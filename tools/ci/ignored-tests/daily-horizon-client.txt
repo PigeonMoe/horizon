@@ -49,7 +49,9 @@ horizon-client game::item_use::interact_vibration_tests::removed_potion_remainde
 horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_mount_position_before_replacing_a_menu lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
 horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_transfer_policy_uses_its_new_position_and_preserves_denied_items lib daily resources
+horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_tries_each_rail_step_until_an_inventory_transfer_succeeds lib daily resources
 horizon-client game::maps::tests::map_on_banner_in_adventure_mode_honours_can_place_on lib daily game-boot
+horizon-client game::minecarts::minecart_riders_tests::a_denied_rail_crossing_stops_the_cart_and_preserves_its_seat lib daily resources
 horizon-client game::mods::tests::a_shared_missing_jar_stops_native_load_and_refuses_each_content_mod_row lib daily child-process
 horizon-client game::mods::tests::content_overlay_validates_dependencies_and_orders_layers lib daily child-process
 horizon-client game::mods::tests::native_content_follows_the_build_and_misplaced_content_follows_its_selection lib daily child-process

@@ -1132,7 +1132,12 @@ impl Game<'_> {
     /// `NewMinecartBehavior.moveAlongTrack`: the iteration keeps moving
     /// while distance is left, over as many rails as it takes, the speed
     /// recomputed per rail (slope, halt, boost).
-    fn move_along_track_new(&mut self, c: &mut Minecart, intent: [f64; 2]) {
+    fn move_along_track_new(
+        &mut self,
+        c: &mut Minecart,
+        intent: [f64; 2],
+        hopper_consumed: &mut bool,
+    ) {
         // `TrackIteration`: the slope, halt and boost speeds each apply once
         // per tick, and the iteration keeps moving while distance is left.
         let mut first = true;
@@ -1244,6 +1249,11 @@ impl Game<'_> {
                 movement_left + (new_h - initial_h)
             };
             movement_left = self.new_step_along_track(c, pos, &rail, movement_left);
+            // MinecartHopper.makeStepAlongTrack tries at the resulting block,
+            // before the behavior records or applies effects for this step.
+            if !*hopper_consumed && c.kind == CartKind::Hopper {
+                *hopper_consumed = self.hopper_cart_tick(c, true);
+            }
             self.finish_cart_step(c, step_start, initial);
             // NewMinecartBehavior.moveAlongTrack applies block effects twice,
             // after recording the step, including a stationary first step.
@@ -1449,8 +1459,9 @@ impl Game<'_> {
         c.velocity.y -= c.get_gravity();
         let pos = self.rail_block(c.position);
         let experimental = self.minecart_improvements();
+        let mut hopper_consumed = false;
         let old_rail = if experimental {
-            self.move_along_track_new(c, intent);
+            self.move_along_track_new(c, intent, &mut hopper_consumed);
             None
         } else if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
             self.move_along_track(c, pos, &rail, intent, slot);
@@ -1587,6 +1598,9 @@ impl Game<'_> {
                 }
             }
             _ => {}
+        }
+        if c.kind == CartKind::Hopper && !hopper_consumed {
+            self.hopper_cart_tick(c, true);
         }
         true
     }

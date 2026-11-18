@@ -1962,29 +1962,28 @@ impl Game<'_> {
         }
         self.suck_item_entities(pos, hopper, min, max, false)
     }
-    /// `MinecartHopper.tick`'s `tryConsumeItems` for whichever path ticks the
-    /// cart. `ServerLevel.tickNonPassenger` ticks the vehicle, then its
-    /// passengers, so a ridden cart pulls too; Horizon ticks that one in its
-    /// rider's turn (`tick_cart_riding`). `alive` is `isAlive` after the move.
-    pub(super) fn hopper_cart_tick(&mut self, cart: &mut super::minecarts::Minecart, alive: bool) {
+    /// `MinecartHopper.tryConsumeItems`: recheck the cart at the position of
+    /// this attempt. Both a track substep and the end of the tick can call it.
+    pub(super) fn hopper_cart_tick(
+        &mut self,
+        cart: &mut super::minecarts::Minecart,
+        alive: bool,
+    ) -> bool {
         let at = BlockPos::containing(cart.position);
-        if self.native_authoritative()
+        self.native_authoritative()
             && alive
             && cart.kind == super::minecarts::CartKind::Hopper
             && cart.enabled
             && self.world.loaded(at.x, at.z)
-        {
-            self.hopper_cart_suck(cart);
-        }
+            && self.hopper_cart_suck(cart)
     }
     /// `MinecartHopper.tick`'s `tryConsumeItems` (`suckInItems`) for an enabled
     /// hopper minecart: one item from the container above, else the item
     /// entities over it or touching it, each tick without a cooldown.
-    /// `consumedItemThisFrame` in 26.3 caps a tick at one item: the tick tries
-    /// once, and `makeStepAlongTrack` may try again, but only one succeeds.
-    pub(super) fn hopper_cart_suck(&mut self, cart: &mut super::minecarts::Minecart) {
+    /// `consumedItemThisFrame` in 26.3 limits a tick to one successful attempt.
+    pub(super) fn hopper_cart_suck(&mut self, cart: &mut super::minecarts::Minecart) -> bool {
         if !self.unpack_ticked_cart_loot(cart) {
-            return;
+            return false;
         }
         // The cart's slots are edited as a container under the placeholder key
         // its menu uses; when that menu is open the placeholder is the live copy.
@@ -2017,7 +2016,7 @@ impl Game<'_> {
                 [p.x + 0.5, p.y + 2.0, p.z + 0.5],
             ),
         };
-        if !took {
+        let collected = took || {
             // The cart's own box, inflated by 0.25 sideways.
             let b = cart.bounds();
             let (lo, hi) = (b.min_position(), b.max_position());
@@ -2026,9 +2025,10 @@ impl Game<'_> {
                 &view,
                 [lo.x - 0.25, lo.y, lo.z - 0.25],
                 [hi.x + 0.25, hi.y, hi.z + 0.25],
-            );
-        }
+            )
+        };
         self.reclaim_items(key, open, &mut cart.items);
+        collected
     }
 
     // ---- dispensers and droppers ----
@@ -3007,6 +3007,117 @@ mod hopper_cart_transfer_tests {
     use horizon_client::{containers::BlockEntity, items::ItemStack};
     use horizon_core::geometry::Vec3;
     use horizon_core::nbt::Tag;
+
+    #[test]
+    #[ignore = "daily"]
+    fn hopper_cart_tries_each_rail_step_until_an_inventory_transfer_succeeds() {
+        use mod_api::{Flow, Hooks, Host, InventoryMoveItemEvent, ModEntry, Mods};
+        use std::sync::{Arc, Mutex};
+
+        type Endpoints = ([i32; 3], [i32; 3]);
+        struct Guard {
+            deny_first: bool,
+            seen: Arc<Mutex<Vec<Endpoints>>>,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for Guard {
+            fn inventory_move_item(
+                &self,
+                _: &dyn Host,
+                event: &mut InventoryMoveItemEvent<'_>,
+            ) -> Flow {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((event.source, event.destination));
+                if self.deny_first && event.destination[0] == 8 {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        for deny_first in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let guard = Guard {
+                deny_first,
+                seen: seen.clone(),
+            };
+            let mods: Mods = vec![ModEntry::new("cart-step-guard", Box::new(guard))].into();
+            mod_platform::testing::with_mods(mods, || {
+                with_game(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                    game.streaming.forced.insert((0, 0));
+                    let mut features = game.level.enabled_features.to_vec();
+                    features.push("minecraft:minecart_improvements".into());
+                    game.level.enabled_features = features.into();
+                    game.ui.rules = horizon_client::gamerules::GameRules::with_features(
+                        &game.level.enabled_features,
+                    );
+                    assert!(game.ui.rules.set_string("max_minecart_speed", "60"));
+                    let registry = game.pack.assets.registry;
+                    let floor = registry.default_state("minecraft:stone").unwrap();
+                    let rail = registry.default_state("minecraft:rail").unwrap();
+                    let rail = crate::game::native_hooks::with_property(
+                        registry,
+                        rail,
+                        "shape",
+                        "east_west",
+                    )
+                    .unwrap();
+                    let chest = registry.default_state("minecraft:chest").unwrap();
+                    for x in 6..=12 {
+                        game.world.set(x, 63, 8, floor).unwrap();
+                        game.world.set(x, 64, 8, rail).unwrap();
+                    }
+                    for (x, item) in [
+                        (8, "minecraft:diamond"),
+                        (9, "minecraft:emerald"),
+                        (10, "minecraft:gold_ingot"),
+                    ] {
+                        game.world.set(x, 65, 8, chest).unwrap();
+                        let mut slots = vec![None; 27];
+                        slots[0] = Some(ItemStack::new(item, 2));
+                        game.world
+                            .block_entities
+                            .insert((x, 65, 8), BlockEntity::Chest(slots));
+                    }
+                    let mut cart = Minecart::new(900, CartKind::Hopper, Vec3::new(7.75, 64.1, 8.5));
+                    cart.velocity.x = 3.0;
+                    game.carts.push(cart);
+
+                    game.tick_carts();
+
+                    let cart = &game.carts[0];
+                    assert_eq!(
+                        cart.position.x.floor() as i32,
+                        10,
+                        "the cart finished past both substep inventories"
+                    );
+                    let first = ([8, 65, 8], [8, 64, 8]);
+                    let second = ([9, 65, 8], [9, 64, 8]);
+                    let (seen_steps, item, counts) = if deny_first {
+                        (vec![first, second], "minecraft:emerald", [2, 1, 2])
+                    } else {
+                        (vec![first], "minecraft:diamond", [1, 2, 2])
+                    };
+                    assert_eq!(*seen.lock().unwrap(), seen_steps);
+                    assert_eq!(
+                        cart.items.iter().flatten().cloned().collect::<Vec<_>>(),
+                        [ItemStack::new(item, 1)]
+                    );
+                    for (x, count) in (8..=10).zip(counts) {
+                        let slots = game.world.block_entities.get(&(x, 65, 8)).unwrap().slots();
+                        assert_eq!(slots[0].as_ref().unwrap().count, count);
+                    }
+                });
+            });
+        }
+    }
 
     #[test]
     #[ignore = "daily"]
