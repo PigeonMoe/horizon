@@ -528,17 +528,19 @@ impl Shared {
         if self.shutting_down.load(Ordering::Relaxed) {
             return Some(translatable("multiplayer.disconnect.server_shutdown", &[]));
         }
-        // IntegratedPlayerList.canPlayerLogin: the owner's name (ignoring case,
-        // `isSingleplayerOwner`) is refused while a player of that name is online.
-        if let Some((owner, _)) = &self.config.singleplayer_profile
-            && owner.eq_ignore_ascii_case(name)
-            && self
-                .online
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(_, online, _)| online.eq_ignore_ascii_case(name))
-        {
+        let owner = self
+            .config
+            .singleplayer_profile
+            .as_ref()
+            .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(name));
+        let owner_already_here = |online: &[(u128, String, bool)]| {
+            owner
+                && online
+                    .iter()
+                    .any(|(_, other, _)| other.eq_ignore_ascii_case(name))
+        };
+        // IntegratedPlayerList.canPlayerLogin checks the owner's name before other gates.
+        if owner_already_here(&self.online.lock().unwrap()) {
             return Some(translatable("multiplayer.disconnect.name_taken", &[]));
         }
         if let Some(gate) = &self.config.gate
@@ -546,40 +548,39 @@ impl Shared {
         {
             return Some(reason);
         }
-        {
-            let online = self.online.lock().unwrap();
-            let bypass = self.config.bypasses_limit.as_ref().is_some_and(|b| b(uuid));
-            let taken = online.len();
-            if taken >= self.max_players() && !bypass {
+        let bypass = self.config.bypasses_limit.as_ref().is_some_and(|b| b(uuid));
+        let mut deadline = None;
+        loop {
+            let mut online = self.online.lock().unwrap();
+            if self.shutting_down.load(Ordering::Relaxed) {
+                return Some(translatable("multiplayer.disconnect.server_shutdown", &[]));
+            }
+            if owner_already_here(&online) {
+                return Some(translatable("multiplayer.disconnect.name_taken", &[]));
+            }
+            if online.len() >= self.max_players() && !bypass {
                 return Some(translatable("multiplayer.disconnect.server_full", &[]));
             }
-        }
-        if self.is_online(uuid) {
-            let _ = self.events.send(NetEvent::Duplicate(uuid));
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while self.is_online(uuid) {
-                if std::time::Instant::now() > deadline {
-                    return Some(translatable("multiplayer.disconnect.slow_login", &[]));
-                }
-                std::thread::sleep(Duration::from_millis(10));
+            // Check and reserve atomically: both routes can authenticate the same UUID, but
+            // two connections must never place or save that player's state concurrently.
+            if !online.iter().any(|(active, _, _)| *active == uuid) {
+                online.push((uuid, name.to_owned(), true));
+                return None;
             }
+            drop(online);
+            let deadline = deadline.get_or_insert_with(|| {
+                let _ = self.events.send(NetEvent::Duplicate(uuid));
+                std::time::Instant::now() + Duration::from_secs(30)
+            });
+            if std::time::Instant::now() > *deadline {
+                return Some(translatable("multiplayer.disconnect.slow_login", &[]));
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        self.online
-            .lock()
-            .unwrap()
-            .push((uuid, name.to_owned(), true));
-        None
     }
     /// A stop has begun: every login from now on is refused as the server's shutdown.
     pub fn refuse_logins(&self) {
         self.shutting_down.store(true, Ordering::Relaxed);
-    }
-    fn is_online(&self, uuid: u128) -> bool {
-        self.online
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(u, _, _)| *u == uuid)
     }
     pub fn motd(&self) -> String {
         self.motd.lock().unwrap().clone()
