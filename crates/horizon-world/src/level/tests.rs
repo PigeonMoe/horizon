@@ -3005,6 +3005,35 @@ fn a_dripstone_tip_grows_only_under_a_water_source() {
 }
 
 #[test]
+fn a_guarded_dripstone_destination_stays_empty_while_other_tips_grow() {
+    let mut w = world!();
+    let block = w.id("dripstone_block", &[]);
+    let tip = w.id(
+        "pointed_dripstone",
+        &[("vertical_direction", "down"), ("thickness", "tip")],
+    );
+    let water = w.id("water", &[("level", "0")]);
+    let guarded = BlockPos::new(0, 9, 0);
+    let allowed = BlockPos::new(4, 9, 0);
+    let guarded_below = guarded.offset(0, -1, 0);
+    let allowed_below = allowed.offset(0, -1, 0);
+    w.level.guarded.insert(guarded_below);
+    for source in [guarded, allowed] {
+        w.put(source, tip);
+        w.put(source.offset(0, 1, 0), block);
+        w.put(source.offset(0, 2, 0), water);
+        for _ in 0..4000 {
+            w.b().random_tick(&mut w.level, &mut w.ticks, source);
+        }
+    }
+    let checks = w.level.growth_spread_checks.borrow();
+    assert!(checks.contains(&(guarded, guarded_below)));
+    assert!(checks.contains(&(allowed, allowed_below)));
+    assert_eq!(w.get(guarded_below), w.b().air());
+    assert!(w.name(allowed_below).starts_with("pointed_dripstone"));
+}
+
+#[test]
 fn a_level_can_answer_for_a_blocks_signal() {
     let mut w = world!();
     let source = BlockPos::new(0, 1, 0);

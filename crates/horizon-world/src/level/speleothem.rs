@@ -152,6 +152,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     fn speleothem_create(
         &mut self,
         block: BlockId,
+        source: BlockPos,
         pos: BlockPos,
         direction: Direction,
         thickness: &str,
@@ -163,7 +164,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let state = b.table.set_text(state, b.props.thickness, thickness);
         let water = self.fluid_at(pos) == crate::fluid::FluidState::WATER
             || self.fluid_at(pos).kind() == FluidKind::Water;
-        self.set_block_and_update(pos, b.table.set_bool(state, b.props.waterlogged, water));
+        self.set_growth_spread(
+            source,
+            pos,
+            b.table.set_bool(state, b.props.waterlogged, water),
+            3,
+        );
     }
     fn speleothem_grow_to(&mut self, block: BlockId, from: BlockPos, direction: Direction) {
         let b = self.b;
@@ -176,10 +182,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 } else {
                     (target, below(target))
                 };
-            self.speleothem_create(block, stalactite, Direction::Down, "tip_merge");
-            self.speleothem_create(block, stalagmite, Direction::Up, "tip_merge");
+            self.speleothem_create(block, target, stalactite, Direction::Down, "tip_merge");
+            self.speleothem_create(block, target, stalagmite, Direction::Up, "tip_merge");
         } else if b.is_air(existing) || b.is_block(existing, b.named.water) {
-            self.speleothem_create(block, target, direction, "tip");
+            self.speleothem_create(block, from, target, direction, "tip");
         }
     }
     fn speleothem_grow_stalagmite_below(&mut self, block: BlockId, from: BlockPos) {
@@ -296,12 +302,16 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             return;
         };
         if b.is_block(source_state, b.named.mud) && fluid == FluidKind::Water {
+            let clay = b.default_of(b.named.clay);
+            if !self.level.allow_block_form(source_pos, source_state, clay) {
+                return;
+            }
             self.emit(LevelEvent::BlockEvent {
                 pos: source_pos,
                 state: source_state,
                 kind: "push_entities_up",
             });
-            self.set_block_and_update(source_pos, b.default_of(b.named.clay));
+            self.set_block_and_update(source_pos, clay);
             self.game_event(source_pos, "minecraft:block_change");
             self.level_event(1504, tip, 0);
         } else if let Some(cauldron) = self.dripstone_find_cauldron(tip, fluid) {
