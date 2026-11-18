@@ -1459,6 +1459,9 @@ impl EatBerries {
     }
     fn pick(&mut self, m: &mut Mob, cx: &mut Cx) {
         let p = self.block.block;
+        if !cx.w.may_change_block(m, p) {
+            return;
+        }
         let at = [
             f64::from(p[0]) + 0.5,
             f64::from(p[1]) + 0.5,
@@ -1511,6 +1514,84 @@ impl EatBerries {
                 pitch,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod berry_protection_tests {
+    use super::*;
+    use crate::mobs::{mob_hooks::BlockChangeGuard, world::with_built_test_world_rules};
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_fox_leaves_protected_sweet_and_glow_berries_on_the_plant() {
+        assert!(with_built_test_world_rules(
+            &[],
+            true,
+            true,
+            |world, registry| {
+                world
+                    .chunks
+                    .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                for (x, block, prop, value) in [
+                    (0, "minecraft:sweet_berry_bush", "age", "3"),
+                    (1, "minecraft:cave_vines", "berries", "true"),
+                    (2, "minecraft:sweet_berry_bush", "age", "3"),
+                    (3, "minecraft:cave_vines", "berries", "true"),
+                ] {
+                    let state = registry.default_state(block).unwrap();
+                    let mut state = registry.state(state).unwrap().clone();
+                    state.properties.insert(prop.into(), value.into());
+                    world
+                        .set(x, 1, 0, registry.resolve(&state).unwrap())
+                        .unwrap();
+                }
+            },
+            |world, types| {
+                let mut world = world.clone();
+                let guard = BlockChangeGuard(&[[0, 1, 0], [1, 1, 0]]);
+                world.mob_hooks = Some(&guard);
+                let mut fox = Mob::new(
+                    1,
+                    Arc::new(types.types["minecraft:fox"].clone()),
+                    Vec3::ZERO,
+                    0.0,
+                );
+                let mut goal = EatBerries::new();
+                let mut level = crate::health::TestLevel::new(17);
+                let level = &mut level.level();
+                let mut events = Vec::new();
+                for x in 0..=3 {
+                    let pos = [x, 1, 0];
+                    goal.block.block = pos;
+                    events.clear();
+                    goal.pick(
+                        &mut fox,
+                        &mut Cx {
+                            w: &world,
+                            level,
+                            events: &mut events,
+                        },
+                    );
+                    if x <= 1 {
+                        assert!(events.is_empty());
+                        assert!(fox.extra.main_hand_id().is_none());
+                    } else {
+                        assert!(
+                            events.iter().any(
+                                |e| matches!(e, MobEvent::SetBlock { pos: p, .. } if *p == pos)
+                            )
+                        );
+                        assert!(
+                            events
+                                .iter()
+                                .any(|e| matches!(e, MobEvent::DropItem { mob: 1, .. }))
+                        );
+                    }
+                }
+            },
+        ));
     }
 }
 impl Goal for EatBerries {

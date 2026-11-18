@@ -83,6 +83,7 @@ horizon-client-lib mobs::equine::tests::tame_listener_defers_the_successful_tame
 horizon-client-lib mobs::equine::tests::temper_preservation_reaches_the_existing_taming_consumer lib daily resources
 horizon-client-lib mobs::fox::pickup_tests::carry_crouch_advances_only_after_living_step lib daily resources
 horizon-client-lib mobs::fox::pickup_tests::carry_no_ai_keeps_sleeping_in_water_and_animates lib daily resources
+horizon-client-lib mobs::fox::berry_protection_tests::a_fox_leaves_protected_sweet_and_glow_berries_on_the_plant lib daily resources
 horizon-client-lib mobs::frog::tests::tongue_acquisition_honors_brain_hooks_and_edible_redirects lib daily resources
 horizon-client-lib mobs::goals::breeding_variant_tests::chicken_breeding_coin_precedes_same_tick_egg_with_or_without_listener lib daily resources
 horizon-client-lib mobs::goals::breeding_variant_tests::variant_and_experience_are_drawn_in_order_before_later_goal_work lib daily resources
