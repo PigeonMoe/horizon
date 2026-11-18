@@ -1143,7 +1143,9 @@ impl Goal for GrowCrop {
         let here = block_pos(m);
         for i in 1..=2 {
             let p = [here[0], here[1] - i, here[2]];
-            if let Some(state) = grown(cx.w, p) {
+            if let Some(state) = grown(cx.w, p)
+                && cx.w.may_change_block(m, p)
+            {
                 // The growth sparks (level event 2011), then the crop.
                 cx.events.push(MobEvent::LevelEvent {
                     id: 2011,
@@ -1378,12 +1380,13 @@ mod tests {
         );
     }
 
-    /// `BeeGrowCropGoal.tick`: level event 2011 (data 15) comes before the
-    /// crop's new state (#11377).
+    /// `BeeGrowCropGoal.tick`: Paper checks the crop before both the growth
+    /// sparks and the crop change. A denied crop does not use the bee's quota.
     #[test]
     #[ignore = "daily"]
     fn a_bee_sparks_a_crop_before_growing_it() {
-        use crate::mobs::goals::Goal;
+        use crate::mobs::{goals::Goal, mob_hooks::BlockChangeGuard};
+        use horizon_core::random::{EntityRandom, LegacyRandom};
         crate::mobs::world::with_built_test_world(
             &[],
             |world, registry| {
@@ -1393,35 +1396,53 @@ mod tests {
                     std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
                 );
                 world.set(0, 63, 0, wheat).unwrap();
+                world.set(1, 63, 0, wheat).unwrap();
             },
             |w, _| {
+                let guard = BlockChangeGuard(&[[0, 63, 0]]);
+                let mut w = w.clone();
+                w.mob_hooks = Some(&guard);
                 let mut m = bee();
-                m.position = Vec3::new(0.5, 64.0, 0.5);
+                m.position = Vec3::new(1.5, 64.0, 0.5);
+                let mut blocked = m.clone();
+                blocked.position.x = 0.5;
+                m.random = EntityRandom::own(LegacyRandom::new(7));
+                blocked.random = EntityRandom::own(LegacyRandom::new(7));
                 let mut test_level = crate::health::TestLevel::new(1);
                 let mut events = Vec::new();
+                let mut blocked_events = Vec::new();
                 // The goal grows on a 1-in-reduced(30) roll.
                 for _ in 0..1000 {
                     if !events.is_empty() {
                         break;
                     }
                     let mut cx = Cx {
-                        w,
+                        w: &w,
+                        level: &mut test_level.level(),
+                        events: &mut blocked_events,
+                    };
+                    super::GrowCrop.tick(&mut blocked, &mut cx);
+                    let mut cx = Cx {
+                        w: &w,
                         level: &mut test_level.level(),
                         events: &mut events,
                     };
                     super::GrowCrop.tick(&mut m, &mut cx);
                 }
+                assert!(blocked_events.is_empty(), "{blocked_events:?}");
+                assert!(super::get(&blocked).is_none_or(|bee| bee.crops_grown == 0));
+                assert_eq!(super::get(&m).unwrap().crops_grown, 1);
                 assert!(
                     matches!(
                         events[..],
                         [
                             MobEvent::LevelEvent {
                                 id: 2011,
-                                pos: [0, 63, 0],
+                                pos: [1, 63, 0],
                                 data: 15
                             },
                             MobEvent::SetBlock {
-                                pos: [0, 63, 0],
+                                pos: [1, 63, 0],
                                 ..
                             }
                         ]
