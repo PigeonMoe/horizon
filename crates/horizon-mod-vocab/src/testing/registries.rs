@@ -12,6 +12,7 @@ pub struct FakeRegistries {
     containers: HashMap<String, usize>,
     loaded: HashSet<String>,
     fluid_sounds: HashMap<String, (&'static str, &'static str)>,
+    enchantments: HashMap<String, HashSet<String>>,
 }
 
 impl FakeRegistries {
@@ -52,6 +53,22 @@ impl FakeRegistries {
         self.components
             .insert((item.to_owned(), component.to_owned()), value);
         self
+    }
+    /// Makes an enchantment support this item in the fake registry.
+    pub fn allow_enchantment(&mut self, enchantment: &str, item: &str) -> &mut Self {
+        self.enchantments
+            .entry(enchantment.to_owned())
+            .or_default()
+            .insert(item.to_owned());
+        self
+    }
+    pub(super) fn enchantment_supports(&self, enchantment: &str, item: crate::ItemKey) -> bool {
+        let Some(item) = Self::resolved_item_id(item) else {
+            return false;
+        };
+        self.enchantments
+            .get(enchantment)
+            .is_some_and(|items| items.contains(item))
     }
     /// Gives item `item` `slots` slots of the game's own, as `item_container` answers for a
     /// mod's backpack; they read empty.

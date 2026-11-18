@@ -192,6 +192,17 @@ pub(in crate::game) fn wasm_answer<T: Wire>(
     } else {
         "Backend"
     };
+    wasm_host_answer(game, level, owner, name, input, expected);
+}
+
+pub(in crate::game) fn wasm_host_answer<T: Wire>(
+    game: &mut Game<'_>,
+    level: LevelRef,
+    owner: &str,
+    name: &str,
+    input: Writer,
+    expected: &T,
+) {
     let mut answer = Writer::new();
     answer.put(expected);
     let mut reply = Writer::new();

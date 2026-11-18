@@ -3691,20 +3691,54 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn enchantment_registry_returns_records_and_unknown_cost() {
-        super::super::native_entity_refs::tests::with_game(|game| {
-            let all = game.enchantments();
-            let sharpness = all.iter().find(|e| e.id == "minecraft:sharpness").unwrap();
-            assert_eq!((sharpness.max_level, sharpness.curse), (5, false));
-            let binding = all
-                .iter()
-                .find(|e| e.id == "minecraft:binding_curse")
-                .unwrap();
-            assert!(binding.curse);
-            assert!(
-                game.enchantment_min_cost("minecraft:sharpness", 1)
-                    .is_some()
-            );
-            assert_eq!(game.enchantment_min_cost("missing:unknown", 1), None);
+        use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+        use crate::game::native_explosion_resistance_tests::wasm_host_answer;
+        use mod_api::{Identifier, prelude::ItemsHost, wire::Writer};
+
+        run_on_guest_stack(|| {
+            with_game(|game| {
+                let all = game.enchantments();
+                let sharpness = all.iter().find(|e| e.id == "minecraft:sharpness").unwrap();
+                assert_eq!((sharpness.max_level, sharpness.curse), (5, false));
+                let binding = all
+                    .iter()
+                    .find(|e| e.id == "minecraft:binding_curse")
+                    .unwrap();
+                assert!(binding.curse);
+                assert!(
+                    game.enchantment_min_cost("minecraft:sharpness", 1)
+                        .is_some()
+                );
+                assert_eq!(game.enchantment_min_cost("missing:unknown", 1), None);
+
+                game.build_registries();
+                let level = game.level("minecraft:overworld").unwrap();
+                let item = |id| ItemsHost::item_key(game, &Identifier::parse(id).unwrap()).unwrap();
+                let sword = item("minecraft:diamond_sword");
+                let bow = item("minecraft:bow");
+                for (enchantment, item, expected) in [
+                    ("minecraft:sharpness", sword, true),
+                    ("minecraft:sharpness", bow, false),
+                    ("minecraft:vanishing_curse", sword, true),
+                    ("missing:unknown", sword, false),
+                ] {
+                    assert_eq!(
+                        ItemsHost::enchantment_supports(game, enchantment, item),
+                        expected
+                    );
+                    let mut input = Writer::new();
+                    input.put(&enchantment.to_owned());
+                    input.put(&item);
+                    wasm_host_answer(
+                        game,
+                        level,
+                        "Host",
+                        "enchantment_supports",
+                        input,
+                        &expected,
+                    );
+                }
+            })
         });
     }
     #[test]

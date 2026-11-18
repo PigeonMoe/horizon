@@ -44,6 +44,10 @@ pub trait ItemsHost {
     /// world's enchantment definitions. API @API:item_components@.
     #[access(WorldOnly)]
     fn enchantments_compatible(&self, a: &str, b: &str) -> bool;
+    /// Side: both. Whether enchantment `id` can go on `item` (`Enchantment.isSupportedItem`),
+    /// using this game's enchantment definitions and item tags.
+    #[access(ClientSetup)]
+    fn enchantment_supports(&self, id: &str, item: ItemKey) -> bool;
     /// Side: both.
     /// `EntityType.is(TagKey)`: whether `entity_type` (`minecraft:player`) is in the entity
     /// type tag `tag` (`minecraft:cannot_be_pushed_onto_boats`).
@@ -171,10 +175,6 @@ pub trait ItemsClientHost {
     /// `Enchantment.getMinCost(level)`: the enchanting power needed, or None for an unknown id.
     #[access(ClientSetup)]
     fn enchantment_min_cost(&self, id: &str, level: u32) -> Option<i32>;
-    /// Side: client.
-    /// Whether enchantment `id` can go on `item` (`Enchantment.isSupportedItem`).
-    #[access(ClientSetup)]
-    fn enchantment_supports(&self, id: &str, item: ItemKey) -> bool;
 }
 /// The handles' reads of the `items` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

@@ -336,6 +336,9 @@ impl crate::prelude::ItemsHost for FakeHost {
         self.registries
             .default_component(FakeRegistries::resolved_item_id(item)?, component)
     }
+    fn enchantment_supports(&self, id: &str, item: crate::ItemKey) -> bool {
+        self.registries.enchantment_supports(id, item)
+    }
     fn max_stack_size(&self, item: crate::ItemKey) -> Option<u32> {
         Some(
             self.registries
