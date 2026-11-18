@@ -30,8 +30,10 @@ impl Game<'_> {
         let Some(index) = self.mobs.iter().position(|m| m.id == mob) else {
             return;
         };
-        let columns = super::mount_menu::mount_columns(&self.mobs[index]);
-        if !self.guest_may_open(conn, "minecraft:horse_inventory", None) {
+        let mount = &self.mobs[index];
+        let columns = super::mount_menu::mount_columns(mount);
+        let pos = mount.position.components().map(|axis| axis.floor() as i32);
+        if !self.guest_may_open(conn, "minecraft:horse_inventory", Some(pos)) {
             return;
         }
         // ServerPlayer.openMenu closes the menu that was open.
@@ -252,6 +254,60 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "daily"]
+    fn mount_inventory_open_checks_the_mount_position_before_replacing_a_menu() {
+        use horizon_client::mobs::Mob;
+        use horizon_core::geometry::Vec3;
+        use mod_api::{ContainerOpenedEvent, Flow, Hooks, ModEntry, Mods, ServerHost};
+        use std::sync::{Arc, Mutex};
+
+        struct Guard(Arc<Mutex<Vec<[i32; 3]>>>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Guard {
+            fn container_opened(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut ContainerOpenedEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.kind, "minecraft:horse_inventory");
+                let pos = event.pos.expect("the mount inventory has a world location");
+                self.0.lock().unwrap().push(pos);
+                if pos[0] < 0 {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "mount-area-guard",
+            Box::new(Guard(heard.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_guest_turn_tests::with_guests(|game| {
+                let kind = game.res.mob_types().get("minecraft:horse").unwrap().clone();
+                for (id, x) in [(39, 0.25), (40, -0.25)] {
+                    let mut mob = Mob::new(id, kind.clone(), Vec3::new(x, 64.0, 6.0), 0.0);
+                    mob.extra.tame = true;
+                    game.mobs.push(mob);
+                }
+                game.lan_open_mount(12, 39);
+                game.lan_open_mount(12, 40);
+                let open = game.lan.as_ref().unwrap().play[&12]
+                    .mount_window
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(open.mob, 39);
+                assert_eq!(*heard.lock().unwrap(), [[0, 64, 6], [-1, 64, 6]]);
+            });
+        });
+    }
+
     /// `handleContainerClick` refuses a click on a menu that is no longer `stillValid`: a
     /// chested donkey that died this tick has already dropped its chest, so its body's slots
     /// must not be taken as well.
@@ -262,7 +318,12 @@ mod tests {
         use horizon_core::geometry::Vec3;
         use horizon_protocol::packets::play;
         super::super::native_guest_turn_tests::with_guests(|game| {
-            let kind = game.res.mob_types().get("minecraft:donkey").unwrap().clone();
+            let kind = game
+                .res
+                .mob_types()
+                .get("minecraft:donkey")
+                .unwrap()
+                .clone();
             let mut mob = Mob::new(40, kind, Vec3::new(3.0, 64.0, 6.0), 0.0);
             mob.extra.tame = true;
             mob.extra.chested = true;
