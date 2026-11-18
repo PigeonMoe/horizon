@@ -2560,7 +2560,7 @@ impl Game<'_> {
     /// players get the blocks as they are then. The block log's length after
     /// it: what the tick writes from there on goes out with the next tick's.
     pub(super) fn lan_broadcast_changes(&mut self) -> Option<usize> {
-        self.refresh_block_backed_menus();
+        self.refresh_shared_menus();
         if let Some(host) = self.lan.as_mut() {
             host.hub.broadcast_changes(&mut self.world);
         }

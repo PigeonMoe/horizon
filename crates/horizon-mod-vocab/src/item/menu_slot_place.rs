@@ -6,8 +6,10 @@
 //! storage's own handler in one journalled transaction, as a block entity's slots do.
 use crate::{
     BlockEntityRef, BlockKey, Capability, ENTITY_ITEMS, EntityRef, Hand, ITEM_ITEMS, ITEMS,
-    ItemPlace, ItemResource, LevelRef, PlayerRef, ResourceHandler, ServerHost,
+    ItemPlace, ItemResource, LevelRef, PlaceProvider, PlayerRef, ResourceHandler, ServerHost,
+    Transaction,
 };
+use std::sync::Arc;
 
 /// The storage one container slot of a mod menu opened with no block shows
 /// ([`MenuSlotBacking::Place`](crate::MenuSlotBacking::Place)).
@@ -62,6 +64,14 @@ pub enum MenuSlotPlace {
         slot: usize,
         /// Whether players can place items in the slot through this menu.
         allow_insert: bool,
+    },
+    /// A slot of a registered mod place provider. Other viewers can show the same storage.
+    /// Disabled providers or keys that no longer resolve close the menu.
+    ModSlot {
+        /// Name passed to `Registrar::place_provider`.
+        provider: &'static str,
+        /// The provider's own key for this slot.
+        key: u64,
     },
 }
 
@@ -137,6 +147,19 @@ impl MenuSlotPlace {
                 }
                 Some((level.capability(host, &ITEMS, pos, None)?, slot))
             }
+            Self::ModSlot { provider, key } => {
+                let (provider, owner) = host.capability_providers().place_provider(provider)?;
+                if !provider.menu_slot_exists(host, key) {
+                    return None;
+                }
+                Some((
+                    Capability {
+                        handler: Box::new(ModMenuSlot { provider, key }),
+                        owner: Some(owner),
+                    },
+                    0,
+                ))
+            }
         }
     }
 
@@ -163,5 +186,52 @@ impl MenuSlotPlace {
             || self
                 .handler(host, player)
                 .is_some_and(|(handler, slot)| slot < handler.size(host))
+    }
+}
+
+struct ModMenuSlot {
+    provider: Arc<dyn PlaceProvider>,
+    key: u64,
+}
+
+impl ResourceHandler<ItemResource> for ModMenuSlot {
+    fn size(&self, _: &mut dyn ServerHost) -> usize {
+        1
+    }
+
+    fn resource(&self, host: &mut dyn ServerHost, _: usize) -> Option<ItemResource> {
+        Some(ItemResource::of(&self.provider.stack(host, self.key)?))
+    }
+
+    fn amount(&self, host: &mut dyn ServerHost, _: usize) -> u32 {
+        self.provider
+            .stack(host, self.key)
+            .map_or(0, |stack| stack.count())
+    }
+
+    fn capacity(&self, host: &mut dyn ServerHost, _: usize, resource: &ItemResource) -> u32 {
+        self.provider.menu_slot_capacity(host, self.key, resource)
+    }
+
+    fn insert(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &Transaction,
+        _: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> u32 {
+        self.provider.insert(host, tx, self.key, resource, amount)
+    }
+
+    fn extract(
+        &self,
+        host: &mut dyn ServerHost,
+        tx: &Transaction,
+        _: usize,
+        resource: &ItemResource,
+        amount: u32,
+    ) -> u32 {
+        self.provider.extract(host, tx, self.key, resource, amount)
     }
 }

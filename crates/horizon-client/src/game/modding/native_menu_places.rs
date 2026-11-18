@@ -35,8 +35,8 @@ pub(in crate::game) struct MenuSlotPlaces {
     held: [Option<(usize, ItemStack)>; 2],
     /// A change notice is queued; further writes queue none until it is taken.
     noticed: bool,
-    /// Block handlers can change outside menu clicks, for example during a machine's tick.
-    has_block_slots: bool,
+    /// These slots can change outside this menu, for example in another viewer's menu.
+    refresh_each_tick: bool,
 }
 
 /// A held container's identity: the stack without the contents its `ITEM_ITEMS` handler
@@ -131,10 +131,12 @@ impl Game<'_> {
             return Err(MenuSlotBackRefusal::NoPlayerOrWindow);
         };
         let count = places.len();
-        let has_block_slots = places.iter().any(|place| {
+        let refresh_each_tick = places.iter().any(|place| {
             matches!(
                 place,
-                MenuSlotPlace::BlockEntityItems { .. } | MenuSlotPlace::BlockItems { .. }
+                MenuSlotPlace::BlockEntityItems { .. }
+                    | MenuSlotPlace::BlockItems { .. }
+                    | MenuSlotPlace::ModSlot { .. }
             )
         });
         let entry = &mut lan.menus.entry(conn).or_default().slot_places;
@@ -148,7 +150,7 @@ impl Game<'_> {
             locked,
             held,
             noticed: false,
-            has_block_slots,
+            refresh_each_tick,
         });
         let mut cleared = false;
         if let Some(index) = lan.hub.guests.connection_index(conn)
@@ -270,8 +272,8 @@ impl Game<'_> {
         open
     }
 
-    /// Refresh live block inventories immediately before the level sends menu changes.
-    pub(super) fn refresh_block_backed_menus(&mut self) {
+    /// Refresh shared inventories immediately before the level sends menu changes.
+    pub(super) fn refresh_shared_menus(&mut self) {
         let Some(lan) = self.lan.as_ref() else {
             return;
         };
@@ -282,7 +284,7 @@ impl Game<'_> {
                 let backing = menus
                     .slot_places
                     .as_ref()
-                    .filter(|backing| backing.has_block_slots)?;
+                    .filter(|backing| backing.refresh_each_tick)?;
                 let guest = lan.hub.guest(*conn)?;
                 (guest.dimension == self.dim.id()).then_some((*conn, guest.uuid, backing.window))
             })
@@ -538,6 +540,7 @@ mod tests {
     use super::super::native_entity_refs::tests::with_game as with_base_game;
     use super::super::native_item_places::tests::{guest, open_to_lan};
     use super::*;
+    use crate::game::api_values::TryIntoApi;
     use horizon_client::items::ItemStack;
     use horizon_client::lan::menu::Slots;
     use mod_api::{MenuReplace, MenuSlotBacking};
@@ -559,6 +562,145 @@ mod tests {
         .into();
         crate::game::api_values::install_parts(&mods).unwrap();
         mod_platform::testing::with_mods(mods, || with_base_game(test));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_slot_is_shared_by_two_views_and_refuses_a_stale_second_take() {
+        use super::super::native_guest_turn_tests::with_guests;
+        use mod_api::{AttachmentCodec, AttachmentType, Compound, Holder, PlaceProvider, Tag};
+        use std::sync::Arc;
+
+        const PROVIDER: &str = "shared_fixture:inventory";
+        static DATA: AttachmentType<Compound> = AttachmentType {
+            namespace: "shared_fixture",
+            name: "inventory",
+            default: Compound::new,
+            codec: Some(AttachmentCodec {
+                encode: |value| Ok(value.clone()),
+                decode: |value| Ok(value.clone()),
+            }),
+            copy_on_death: false,
+            sync: false,
+        };
+        struct Shared;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Shared {
+            fn register(
+                &self,
+                registrar: &mut dyn mod_api::Registrar,
+                _: &mod_api::RegistrationContext,
+            ) {
+                registrar.place_provider(PROVIDER, Arc::new(Shared));
+            }
+        }
+        impl PlaceProvider for Shared {
+            fn menu_slot_exists(&self, _: &mut dyn ServerHost, key: u64) -> bool {
+                key == 7
+            }
+            fn menu_slot_capacity(
+                &self,
+                _: &mut dyn ServerHost,
+                _: u64,
+                _: &mod_api::ItemResource,
+            ) -> u32 {
+                0
+            }
+            fn stack(&self, host: &mut dyn ServerHost, key: u64) -> Option<mod_api::ItemStack> {
+                if key != 7 {
+                    return None;
+                }
+                let data = DATA.get_existing(host, Holder::Server).ok()??;
+                let Tag::Compound(stack) = data.get(&"item".into())? else {
+                    return None;
+                };
+                mod_api::ItemStack::from_nbt(host, stack)
+            }
+            fn insert(
+                &self,
+                _: &mut dyn ServerHost,
+                _: &mod_api::Transaction,
+                _: u64,
+                _: &mod_api::ItemResource,
+                _: u32,
+            ) -> u32 {
+                0
+            }
+            fn extract(
+                &self,
+                host: &mut dyn ServerHost,
+                _: &mod_api::Transaction,
+                key: u64,
+                resource: &mod_api::ItemResource,
+                amount: u32,
+            ) -> u32 {
+                let Some(stack) = self.stack(host, key) else {
+                    return 0;
+                };
+                if amount != stack.count() || !resource.matches(&stack) {
+                    return 0;
+                }
+                if DATA.set(host, Holder::Server, Compound::new()).is_ok() {
+                    amount
+                } else {
+                    0
+                }
+            }
+        }
+
+        let mods: mod_api::Mods =
+            vec![mod_api::ModEntry::new("shared_fixture", Box::new(Shared))].into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.world_root = game.save.root.clone();
+                let host: &mut dyn ServerHost = game;
+                let rock = ItemStack::new("minecraft:stone", 4)
+                    .try_into_api()
+                    .unwrap()
+                    .to_nbt(host)
+                    .unwrap();
+                DATA.set(
+                    host,
+                    Holder::Server,
+                    Compound::from([("item".into(), Tag::Compound(rock))]),
+                )
+                .unwrap();
+                let windows = [12, 13].map(|uuid| {
+                    let player = host.player(uuid).unwrap();
+                    let window = host
+                        .open_menu(
+                            uuid,
+                            1,
+                            mod_api::Text::literal("Shared"),
+                            Vec::new(),
+                            MenuReplace::CloseFirst,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    let mut slots = vec![MenuSlotPlace::Decoration; 9];
+                    slots[7] = MenuSlotPlace::ModSlot {
+                        provider: PROVIDER,
+                        key: 7,
+                    };
+                    player.back_mod_menu_slots(host, window, slots).unwrap();
+                    let menu = host.menu(uuid, window).unwrap();
+                    assert_eq!(menu.slot(host, 7).flatten().unwrap().count(), 4);
+                    window
+                });
+                assert!(game.place_menu_click(12, windows[0], 7, 0, 0));
+                let host: &mut dyn ServerHost = game;
+                let other = host.menu(13, windows[1]).unwrap();
+                assert_eq!(other.slot(host, 7).flatten().unwrap().count(), 4);
+                assert!(game.place_menu_click(13, windows[1], 7, 0, 0));
+                game.refresh_shared_menus();
+                let host: &mut dyn ServerHost = game;
+                assert_eq!(other.slot(host, 7), Some(None));
+                assert_eq!(other.cursor().amount(host), 0);
+                let first = host.menu(12, windows[0]).unwrap();
+                assert_eq!(first.cursor().amount(host), 4);
+            })
+        });
     }
 
     /// Guest 1 (UUID 123) holding a shulker box in hotbar slot 0 with 64 stone in inventory
@@ -722,7 +864,7 @@ mod tests {
                 host.transaction(|host, tx| Ok::<_, ()>(raw_output.insert(host, tx, &stone, 2))),
                 Ok(2)
             );
-            game.refresh_block_backed_menus();
+            game.refresh_shared_menus();
             let host: &mut dyn ServerHost = game;
             assert_eq!(menu.slot(host, 24).flatten().unwrap().count(), 2);
             assert!(game.place_menu_click(123, window, 24, 0, 0));
@@ -731,7 +873,7 @@ mod tests {
 
             assert_eq!(game.level_set_block(level, pos, air, flags), Ok(true));
             assert_eq!(game.level_set_block(level, pos, chest, flags), Ok(true));
-            game.refresh_block_backed_menus();
+            game.refresh_shared_menus();
             assert!(game.menu(123, window).is_none());
         });
     }

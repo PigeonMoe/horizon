@@ -280,6 +280,19 @@ impl Drop for ItemPlace {
 /// attachments). While its mod is disabled, lookups refuse both reads and writes through its
 /// places; re-enabling the mod makes the same registrations available again.
 pub trait PlaceProvider: Send + Sync + 'static {
+    /// Whether `key` is a live slot and can back a menu, including when it is empty.
+    fn menu_slot_exists(&self, _host: &mut dyn ServerHost, _key: u64) -> bool {
+        false
+    }
+    /// The maximum amount this menu slot accepts of `resource`, or zero to refuse it.
+    fn menu_slot_capacity(
+        &self,
+        _host: &mut dyn ServerHost,
+        _key: u64,
+        _resource: &ItemResource,
+    ) -> u32 {
+        0
+    }
     /// The stack at `key`, if any.
     fn stack(&self, host: &mut dyn ServerHost, key: u64) -> Option<ItemStack>;
     /// Puts up to `amount` of `resource` at `key`, in transaction `tx`: how much went. What
