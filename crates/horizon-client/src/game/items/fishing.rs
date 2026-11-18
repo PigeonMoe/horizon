@@ -1134,6 +1134,7 @@ impl Game<'_> {
                     }
                 } else if let Some(hit) = block_hit.filter(|_| !canceled && hit.is_none()) {
                     let projectile = ProjectileHitter {
+                        id: h.id,
                         owner: Some(horizon_client::mobs::Who::Player),
                         guest: self.lan_acting,
                         arrow: false,

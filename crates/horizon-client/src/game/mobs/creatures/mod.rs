@@ -386,6 +386,7 @@ pub(super) type Skinned = Option<((usize, usize, u32), Option<(glam::Vec3, glam:
 /// (`FishingHook.onHitBlock` calls `Projectile.onHitBlock` too).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ProjectileHitter {
+    pub(super) id: u32,
     /// `Projectile.getOwner`.
     pub(super) owner: Option<Who>,
     /// On a server, the guest (by connection) who owns it.
@@ -399,6 +400,7 @@ pub(super) struct ProjectileHitter {
 impl ProjectileHitter {
     pub(super) fn of(p: &Projectile) -> Self {
         Self {
+            id: p.id,
             owner: p.owner,
             guest: p.guest,
             arrow: p.arrow.is_some(),
@@ -4962,96 +4964,15 @@ impl Game<'_> {
             });
         let _ = self.process_level_events();
     }
-    /// `onProjectileHit` of chorus flowers, decorated pots and speleothems
-    /// (pointed dripstone, sulfur spikes): an impact projectile
-    /// (`#impact_projectiles`) breaks the block when `Projectile.mayInteract`
-    /// and `Projectile.mayBreak` allow it, which takes the
-    /// `projectiles_can_break_blocks` rule and a shooter that may break blocks
-    /// (`canBreakBlockInAdventureMode`: a resolved mob's arrow needs its
-    /// actual projectile predicate and mob_griefing). Other owner/kind paths
-    /// retain their existing policy. A pot is cracked first (flags 260).
     fn projectile_breaks_block(&mut self, p: &Projectile, pos: [i32; 3]) {
-        use horizon_client::command::args::GameMode;
-        let impact = matches!(
-            p.kind,
-            ProjectileKind::Arrow { .. }
-                | ProjectileKind::Trident
-                | ProjectileKind::Snowball
-                | ProjectileKind::Thrown(_)
-                | ProjectileKind::Egg
-                | ProjectileKind::SmallFireball
-                | ProjectileKind::LargeFireball { .. }
-                | ProjectileKind::WitherSkull { .. }
-                | ProjectileKind::WindCharge
-                | ProjectileKind::BreezeWindCharge
+        let arrow = p.arrow.as_ref();
+        self.projectile_destructible_block_hit(
+            &ProjectileHitter::of(p),
+            p.owner_uuid,
+            arrow.and_then(|arrow| arrow.can_break.as_ref()),
+            arrow.map_or(0.0, |arrow| arrow.hit_speed),
+            pos,
         );
-        use horizon_client::arrows::OwnerLookup;
-        let shooter_may_break = match p.owner {
-            Some(Who::Player) => self.mode != GameMode::Adventure,
-            Some(Who::Mob(_)) => {
-                matches!(p.kind, ProjectileKind::Arrow { .. })
-                    && self
-                        .ui
-                        .rules
-                        .bool_at(horizon_client::gamerules::vanilla::MOB_GRIEFING)
-                    && p.arrow
-                        .as_ref()
-                        .and_then(|a| a.can_break.as_ref())
-                        .is_some_and(|predicate| {
-                            super::game_mode::projectile_predicate_supported(predicate)
-                                && self.adventure_predicate_at(predicate, pos)
-                        })
-            }
-            None => !p.owner_uuid.is_some_and(|u| self.non_player_entity(u)),
-        };
-        if !impact
-            || !shooter_may_break
-            || !self
-                .ui
-                .rules
-                .bool_at(horizon_client::gamerules::vanilla::PROJECTILES_CAN_BREAK_BLOCKS)
-        {
-            return;
-        }
-        let state = self.world.block(pos[0], pos[1], pos[2]);
-        let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        // `destroyBlock(pos, true, projectile)`; a speleothem's names no entity.
-        let mut entity = Some(p.id);
-        match &*self.res.facts().get(state).name {
-            "minecraft:chorus_flower"
-                if matches!(
-                    p.kind,
-                    ProjectileKind::Arrow { .. } | ProjectileKind::Snowball
-                ) =>
-            {
-                // `ChorusFlowerBlock.onProjectileHit` supplies the projectile,
-                // even when it has no owner, as the direct block's loot entity.
-                let _ = self.destroy_block_by(pos, Some(p.id));
-                return;
-            }
-            "minecraft:chorus_flower" => {}
-            // SpeleothemBlock.onProjectileHit (pointed dripstone and sulfur spikes): a
-            // thrown trident faster than 0.6 breaks it.
-            "minecraft:pointed_dripstone" | "minecraft:sulfur_spike"
-                if matches!(p.kind, ProjectileKind::Trident)
-                    && p.arrow.as_ref().is_some_and(|a| a.hit_speed > 0.6) =>
-            {
-                entity = None;
-            }
-            "minecraft:decorated_pot" => {
-                let registry = &self.pack.assets.registry;
-                let Some(mut pot) = registry.state(state).cloned() else {
-                    return;
-                };
-                pot.properties.insert("cracked".into(), "true".into());
-                let Ok(cracked) = registry.resolve(&pot) else {
-                    return;
-                };
-                self.with_level(|b, level, ticks| b.set_block(level, ticks, at, cracked, 260));
-            }
-            _ => return,
-        }
-        let _ = self.destroy_block_by(pos, entity);
     }
     /// What an arrow's tick asked for: its particles and sounds.
     pub(in crate::game) fn arrow_event(

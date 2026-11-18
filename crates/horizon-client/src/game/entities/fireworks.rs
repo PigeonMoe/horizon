@@ -2,7 +2,9 @@
 //! from a block face, boosting a gliding player, the 1.15 horizontal
 //! acceleration and 0.04 lift, the flight-duration lifetime, explosion
 //! damage with line of sight, and the client explosion (`createFireworks`).
-use super::{Game, Hit, dragon::FightWho, item_draw::owner_at, view_vector};
+use super::{
+    Game, Hit, creatures::ProjectileHitter, dragon::FightWho, item_draw::owner_at, view_vector,
+};
 use horizon_assets::item_model::DisplayContext;
 use horizon_client::{
     block_entity_render::vertex_light,
@@ -735,6 +737,7 @@ impl Game<'_> {
             // off on a block; a plain one flies on to its lifetime.
             let deflected = matches!(hit, ProjectileHit::Entity { who: Who::Mob(id), .. }
                 if self.mobs.iter().any(|m| m.id == id && m.species() == Species::Breeze));
+            let mut block_hit = None;
             if deflected {
                 r.velocity = r.velocity.scale(-0.5);
             } else {
@@ -744,8 +747,13 @@ impl Game<'_> {
                 r = rocket;
                 match hit {
                     ProjectileHit::Entity { .. } if !canceled => r.life = r.lifetime,
-                    ProjectileHit::Block { .. } if !canceled && !r.explosions.is_empty() => {
-                        r.life = r.lifetime;
+                    ProjectileHit::Block { pos, face, .. } if !canceled => {
+                        if face != [0; 3] {
+                            block_hit = Some(pos);
+                        }
+                        if !r.explosions.is_empty() {
+                            r.life = r.lifetime;
+                        }
                     }
                     _ => {}
                 }
@@ -762,8 +770,25 @@ impl Game<'_> {
             }
             r.life += 1;
             self.rocket_spark(&r);
-            if r.life > r.lifetime {
+            let expired = r.life > r.lifetime;
+            if expired {
                 self.explode_rocket(&r);
+            }
+            if let Some(pos) = block_hit {
+                let shot = ProjectileHitter {
+                    id: r.id,
+                    kind: "minecraft:firework_rocket",
+                    position: r.position,
+                    owner: r.owner,
+                    guest: r.guest,
+                    arrow: false,
+                };
+                if let Err(error) = self.projectile_tilts_dripleaf(&shot, pos) {
+                    log::error!("rocket block impact: {error}");
+                }
+                self.projectile_destructible_block_hit(&shot, r.owner_uuid, None, 0.0, pos);
+            }
+            if expired {
                 self.rockets.retire_extracted(r.id, r.join);
                 continue;
             }

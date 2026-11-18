@@ -2,7 +2,9 @@ use super::*;
 use crate::game::{Audio, Options, Progress, Settings, load_resources};
 use horizon_client::{chunk::Chunk, motion::PlayerMotion};
 use horizon_core::position::ChunkPos;
-use std::sync::Arc;
+use mod_api::{Flow, Hooks, Host, MobBlockChangePreEvent, ModEntry};
+use mod_platform::testing::with_mods;
+use std::sync::{Arc, Mutex};
 fn with_game(test: impl FnOnce(&mut Game<'_>)) {
     let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
@@ -125,6 +127,106 @@ fn a_registered_snowball_collision_keeps_the_actual_projectile_for_chorus_loot()
         dropped(game, "minecraft:chorus_flower");
     });
 }
+
+#[derive(Clone)]
+struct GuardedHit(Arc<Mutex<Vec<(u32, String, [i32; 3])>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for GuardedHit {
+    fn mob_block_change_pre(&self, _: &dyn Host, event: &mut MobBlockChangePreEvent<'_>) -> Flow {
+        self.0
+            .lock()
+            .unwrap()
+            .push((event.entity, event.kind.to_owned(), event.pos));
+        if event.pos[0] == 4 {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guarded_projectile_keeps_the_flower_and_pot_while_other_impact_types_still_break() {
+    with_game(|game| {
+        let guarded = GuardedHit(Arc::default());
+        let mods = vec![ModEntry::new("guarded-impact", Box::new(guarded.clone()))].into();
+        with_mods(mods, || {
+            source(game, 4, 4, "chorus_flower");
+            let arrow = launch(game, "arrow", 81, 4, 4, false);
+            game.tick_projectiles().unwrap();
+            assert!(game.run_command("execute if block 4 200 4 chorus_flower"));
+            assert!(game.dropped.is_empty());
+
+            source(game, 4, 8, "decorated_pot");
+            let blocked_egg = launch(game, "egg", 82, 4, 8, false);
+            game.tick_projectiles().unwrap();
+            assert!(game.run_command("execute if block 4 200 8 decorated_pot[cracked=false]"));
+            assert!(game.dropped.is_empty());
+
+            source(game, 8, 4, "chorus_flower");
+            let egg = launch(game, "egg", 83, 8, 4, false);
+            game.tick_projectiles().unwrap();
+            assert!(game.run_command("execute if block 8 200 4 air"));
+            dropped(game, "minecraft:chorus_flower");
+
+            source(game, 12, 4, "chorus_flower");
+            launch(game, "ender_pearl", 84, 12, 4, false);
+            game.tick_projectiles().unwrap();
+            assert!(game.run_command("execute if block 12 200 4 chorus_flower"));
+            dropped(game, "minecraft:chorus_flower");
+
+            game.dropped.clear();
+            source(game, 8, 8, "chorus_flower");
+            assert!(game.run_command("summon firework_rocket 8.5 202.5 8.5 {UUID:[I;116,0,0,85],ShotAtAngle:1b,LifeTime:100,Motion:[0d,-2d,0d]}"));
+            let rocket = game.rockets.iter().next().unwrap().id;
+            game.tick_rockets();
+            assert!(game.run_command("execute if block 8 200 8 air"));
+            dropped(game, "minecraft:chorus_flower");
+
+            game.dropped.clear();
+            source(game, 12, 8, "chorus_flower");
+            assert!(game.run_command("summon trident 12.5 202.5 8.5 {UUID:[I;116,0,0,86],NoGravity:1b,Motion:[0d,-2d,0d]}"));
+            let trident = game.tridents.iter().next().unwrap().id;
+            game.tick_tridents();
+            assert!(game.run_command("execute if block 12 200 8 air"));
+            dropped(game, "minecraft:chorus_flower");
+
+            for (x, tilt) in [(4, "none"), (8, "full")] {
+                assert!(game.run_command(&format!("setblock {x} 199 12 clay strict")));
+                assert!(game.run_command(&format!("setblock {x} 200 12 big_dripleaf strict")));
+                let mut snowball = Projectile::new(ProjectileKind::Snowball, Vec3::ZERO, None);
+                snowball.id = 100 + x as u32;
+                game.projectile_hit(
+                    &snowball,
+                    Hit::Block {
+                        pos: [x, 200, 12],
+                        at: Vec3::new(f64::from(x) + 0.5, 200.9, 12.5),
+                        face: [0, 1, 0],
+                    },
+                )
+                .unwrap();
+                assert!(game.run_command(&format!(
+                    "execute if block {x} 200 12 big_dripleaf[tilt={tilt}]"
+                )));
+            }
+
+            assert_eq!(
+                *guarded.0.lock().unwrap(),
+                [
+                    (arrow, "minecraft:arrow".into(), [4, 200, 4]),
+                    (blocked_egg, "minecraft:egg".into(), [4, 200, 8]),
+                    (egg, "minecraft:egg".into(), [8, 200, 4]),
+                    (rocket, "minecraft:firework_rocket".into(), [8, 200, 8]),
+                    (trident, "minecraft:trident".into(), [12, 200, 8]),
+                    (104, "minecraft:snowball".into(), [4, 200, 12]),
+                    (108, "minecraft:snowball".into(), [8, 200, 12]),
+                ]
+            );
+        });
+    });
+}
 #[test]
 #[ignore = "daily"]
 fn denied_hits_other_blocks_and_direct_destroy_keep_their_drop_contracts() {
@@ -183,8 +285,7 @@ fn default_drop_rng_continues_identically_with_table_sequence_or_level_fallback(
             let root =
                 std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
             let mut table: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(root.join("data/minecraft/loot_table/blocks/gravel.json"))
-                    .unwrap(),
+                &std::fs::read(root.join("data/minecraft/loot_table/blocks/gravel.json")).unwrap(),
             )
             .unwrap();
             if !named {

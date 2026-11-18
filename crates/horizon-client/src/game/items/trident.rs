@@ -4,7 +4,7 @@
 //! return to the owner, pickup) with `ThrownTridentRenderer`, and Channeling's
 //! lightning on a hit (`channeling.json`).
 use super::level_sounds::LevelSound;
-use super::{Game, commands::Target, minecarts::CartHit, view_vector};
+use super::{Game, commands::Target, creatures::ProjectileHitter, minecarts::CartHit, view_vector};
 use horizon_client::{
     arrows::{Pickup, back_off, clip_block_hit},
     collisions::SceneCollisions,
@@ -1276,7 +1276,32 @@ impl Game<'_> {
                     let clip = clip.map(|(at, block, face)| (back_off(at, flight), block, face));
                     if canceled_block && let Some((stop, _, _)) = clip {
                         t.position = stop;
-                    } else if let Some((stop, block, _)) = clip {
+                    } else if let Some((stop, block, face)) = clip {
+                        // AbstractArrow records the block before its onProjectileHit callback.
+                        t.last_state = Some(self.world.block(block.x, block.y, block.z));
+                        if face != [0; 3] {
+                            let shot = ProjectileHitter {
+                                id: t.id,
+                                owner: owner.map(|_| Who::Player).or(owner_who),
+                                guest: t.guest,
+                                arrow: true,
+                                kind: "minecraft:trident",
+                                position: stop,
+                            };
+                            let pos = [block.x, block.y, block.z];
+                            if let Err(error) = self.projectile_tilts_dripleaf(&shot, pos) {
+                                log::error!("trident block impact: {error}");
+                            }
+                            let predicate =
+                                t.stack.data().and_then(|d| d.other("minecraft:can_break"));
+                            self.projectile_destructible_block_hit(
+                                &shot,
+                                t.owner_uuid,
+                                predicate,
+                                flight.length(),
+                                pos,
+                            );
+                        }
                         // Projectile.onHit on a block: PROJECTILE_LAND at the
                         // block's centre.
                         self.projectile_landed_event(
@@ -1295,7 +1320,6 @@ impl Game<'_> {
                         t.position = stop;
                         t.velocity = Vec3::ZERO;
                         t.in_ground = true;
-                        t.last_state = Some(self.world.block(block.x, block.y, block.z));
                         t.shake = 7;
                         let sound = t.hit_ground_sound();
                         self.audio

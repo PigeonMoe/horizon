@@ -1,17 +1,17 @@
-//! Read-only admission while mob AI or a vehicle proposes a block change.
+//! Read-only admission for block changes caused by mobs, vehicles and projectiles.
 
 pub trait Hooks {
-    /// Before a mob or vehicle (`entity`, network ID; `kind`, namespaced type)
+    /// Before an entity (`entity`, network ID; `kind`, namespaced type)
     /// changes the block at `pos` in `dimension`. Canceling prevents the associated
     /// action, such as taking a block into an enderman's hand, merging a
-    /// silverfish into stone, or breaking a lily pad under a boat.
+    /// silverfish into stone, or breaking a block with a boat or projectile.
     #[hook(
         side = "server",
         host = "read",
         contract = "cancel",
         out = "cancel",
         neoforge = "none",
-        paper = "EntityChangeBlockEvent (mob AI and lily pad collision)",
+        paper = "EntityChangeBlockEvent (mob AI, boats and projectile impacts)",
         cancellable = true,
         target = "horizon_client::game::native_hooks::mob_block_change_pre::Game<'_>::native_mob_block_change_pre"
     )]
