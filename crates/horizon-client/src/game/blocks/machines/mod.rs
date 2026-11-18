@@ -1343,12 +1343,7 @@ impl Game<'_> {
         .unwrap_or(0)
     }
     /// `InventoryMoveItemEvent` before the selected stack leaves `source`.
-    fn container_move_canceled(
-        &mut self,
-        source: [i32; 3],
-        destination: [i32; 3],
-        item: &str,
-    ) -> bool {
+    fn container_move_canceled(&self, source: [i32; 3], destination: [i32; 3], item: &str) -> bool {
         let mut cancel = false;
         self.native_inventory_move_item(source, destination, item, &mut cancel);
         cancel
@@ -1409,11 +1404,11 @@ impl Game<'_> {
         part: &Capability<dyn ResourceHandler<ItemResource>>,
         at: [i32; 3],
         hopper: &View,
+        destination: [i32; 3],
     ) -> bool {
         if self.hopper_is_stacked(hopper) {
             return false;
         }
-        let into = self.container_world_pos(hopper);
         for slot in 0..part.size(self) {
             let Some(resource) = part.resource(self, slot) else {
                 continue;
@@ -1422,7 +1417,9 @@ impl Game<'_> {
             let Ok(one) = resource.as_stack().try_into_engine(self.items()) else {
                 continue;
             };
-            if part.amount(self, slot) == 0 || self.container_move_canceled(at, into, &one.item) {
+            if part.amount(self, slot) == 0
+                || self.container_move_canceled(at, destination, &one.item)
+            {
                 continue;
             }
             let moved = mod_api::run_transaction(self, |game, tx| {
@@ -1568,7 +1565,7 @@ impl Game<'_> {
             f64::from(pos.1) + 1.5,
             f64::from(pos.2) + 0.5,
         ];
-        if let Some(took) = self.suck_from_container(above, at, hopper) {
+        if let Some(took) = self.suck_from_container(above, at, hopper, [pos.0, pos.1, pos.2]) {
             return took;
         }
         let above_state = self.world.block(above.0, above.1, above.2);
@@ -1609,30 +1606,36 @@ impl Game<'_> {
     /// there, from a container entity whose box meets the one around `at`
     /// (`getSourceContainerOrHandler`). `None` when there is no container. A capability part
     /// above takes the container's place.
-    fn suck_from_container(&mut self, above: Pos, at: [f64; 3], hopper: &View) -> Option<bool> {
-        let (x, y, z) = hopper.parts[0].0;
+    fn suck_from_container(
+        &mut self,
+        above: Pos,
+        at: [f64; 3],
+        hopper: &View,
+        destination: [i32; 3],
+    ) -> Option<bool> {
         if let Some(part) = self.item_part_at(above, Direction::Down) {
             let above = [above.0, above.1, above.2];
-            self.native_hopper_inventory_search([x, y, z], Some(above), None);
-            return Some(self.suck_from_part(&part, above, hopper));
+            self.native_hopper_inventory_search(destination, Some(above), None);
+            return Some(self.suck_from_part(&part, above, hopper, destination));
         }
         let c = self.containers();
         let Some(source) = c.hopper_insertion_view(above) else {
             let found = self.automation_entity_at(at, Direction::Down)?;
             return match found {
                 AutomationEntity::Container(id) => {
-                    self.native_hopper_inventory_search([x, y, z], None, Some(id));
+                    self.native_hopper_inventory_search(destination, None, Some(id));
                     self.with_entity_container(id, |g, source| {
-                        g.suck_from_slots(None, source, hopper)
+                        g.suck_from_slots(None, source, hopper, destination)
                     })
                 }
                 AutomationEntity::Part(entity, part) => {
-                    self.native_hopper_inventory_search([x, y, z], None, Some(entity.id()));
-                    Some(self.suck_from_part(&part, [above.0, above.1, above.2], hopper))
+                    self.native_hopper_inventory_search(destination, None, Some(entity.id()));
+                    let source = entity.block_position(self)?;
+                    Some(self.suck_from_part(&part, source, hopper, destination))
                 }
             };
         };
-        self.native_hopper_inventory_search([x, y, z], Some([above.0, above.1, above.2]), None);
+        self.native_hopper_inventory_search(destination, Some([above.0, above.1, above.2]), None);
         if let Kind::Composter(level) = source.kind {
             if level != 8 {
                 return Some(false);
@@ -1643,17 +1646,14 @@ impl Game<'_> {
             // room, the setItem putting the bone meal back into the detached
             // container (whose bone meal is lost with it).
             let bone_meal = bone_meal_stack().clone();
-            if mod_api::__private::listened(mod_api::HookId::InventoryMoveItem) {
-                let mut cancel = false;
-                self.native_inventory_move_item(
+            if mod_api::__private::listened(mod_api::HookId::InventoryMoveItem)
+                && self.container_move_canceled(
                     [above.0, above.1, above.2],
-                    self.container_world_pos(hopper),
+                    destination,
                     &bone_meal.item,
-                    &mut cancel,
-                );
-                if cancel {
-                    return Some(false);
-                }
+                )
+            {
+                return Some(false);
             }
             let at = BlockPos::new(above.0, above.1, above.2);
             self.with_level(|b, level, ticks| b.composter_empty(level, ticks, at));
@@ -1663,7 +1663,7 @@ impl Game<'_> {
             return Some(moved);
         }
         let source_hopper = (source.kind == Kind::Hopper).then_some(above);
-        Some(self.suck_from_slots(source_hopper, &source, hopper))
+        Some(self.suck_from_slots(source_hopper, &source, hopper, destination))
     }
     /// `HopperBlockEntity.tryTakeInItemFromSlot` over the `DOWN` face of `source`.
     fn suck_from_slots(
@@ -1671,11 +1671,14 @@ impl Game<'_> {
         source_hopper: Option<Pos>,
         source: &View,
         hopper: &View,
+        destination: [i32; 3],
     ) -> bool {
         let mut prepared = None;
+        let policy = mod_api::__private::listened(mod_api::HookId::InventoryMoveItem);
+        let source_position = policy.then(|| self.container_world_pos(source));
         for slot in source.slots_for_face_iter(Some(Direction::Down)) {
             self.unpack_next_inventory_part(source, slot, &mut prepared);
-            {
+            let stack = {
                 let c = self.containers();
                 let Some(stack) = c.insertion_item(source, slot).map(Cow::into_owned) else {
                     continue;
@@ -1683,8 +1686,11 @@ impl Game<'_> {
                 if !c.can_take_into(source, slot, &stack, Direction::Down, hopper) {
                     continue;
                 }
-            }
-            if self.hopper_move_canceled(source, slot, source, hopper) {
+                stack
+            };
+            if source_position
+                .is_some_and(|pos| self.container_move_canceled(pos, destination, &stack.item))
+            {
                 continue;
             }
             let Some(one) = self.take_one(source, slot) else {
@@ -1961,7 +1967,13 @@ impl Game<'_> {
     /// passengers, so a ridden cart pulls too; Horizon ticks that one in its
     /// rider's turn (`tick_cart_riding`). `alive` is `isAlive` after the move.
     pub(super) fn hopper_cart_tick(&mut self, cart: &mut super::minecarts::Minecart, alive: bool) {
-        if alive && cart.kind == super::minecarts::CartKind::Hopper && cart.enabled {
+        let at = BlockPos::containing(cart.position);
+        if self.native_authoritative()
+            && alive
+            && cart.kind == super::minecarts::CartKind::Hopper
+            && cart.enabled
+            && self.world.loaded(at.x, at.z)
+        {
             self.hopper_cart_suck(cart);
         }
     }
@@ -1979,6 +1991,9 @@ impl Game<'_> {
         let key = (i32::MAX - 15, super::minecarts::CART_KEY_Y, cart.id as i32);
         let (view, open) = self.lend_items(key, &mut cart.items);
         let p = cart.position;
+        // The tick holds a moving copy of the cart. The resident cart may
+        // still be across a protection boundary from the position we reached.
+        let destination = BlockPos::containing(p);
         // getLevelY is the cart's y + 0.5, so the container is the block at
         // y + 1.5, and Hopper.SUCK_AABB (moved by getLevel - 0.5) starts 11/16
         // above the cart.
@@ -1988,10 +2003,15 @@ impl Game<'_> {
             p.z.floor() as i32,
         );
         let at = [p.x, p.y + 1.5, p.z];
-        let took = match self.suck_from_container(above, at, &view) {
+        let took = match self.suck_from_container(
+            above,
+            at,
+            &view,
+            [destination.x, destination.y, destination.z],
+        ) {
             Some(took) => took,
             None => self.cart_suck_items(
-                BlockPos::containing(p),
+                destination,
                 &view,
                 [p.x - 0.5, p.y + 11.0 / 16.0, p.z - 0.5],
                 [p.x + 0.5, p.y + 2.0, p.z + 0.5],
@@ -2002,7 +2022,7 @@ impl Game<'_> {
             let b = cart.bounds();
             let (lo, hi) = (b.min_position(), b.max_position());
             self.cart_suck_items(
-                BlockPos::containing(p),
+                destination,
                 &view,
                 [lo.x - 0.25, lo.y, lo.z - 0.25],
                 [hi.x + 0.25, hi.y, hi.z + 0.25],
@@ -2990,6 +3010,128 @@ mod hopper_cart_transfer_tests {
 
     #[test]
     #[ignore = "daily"]
+    fn hopper_cart_transfer_policy_uses_its_new_position_and_preserves_denied_items() {
+        use mod_api::{
+            Flow, Hooks, HopperPickupItemPreEvent, Host, InventoryMoveItemEvent, LevelHost,
+            ModEntry, Mods,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Heard {
+            moves: Vec<([i32; 3], [i32; 3])>,
+            pickups: Vec<([f64; 3], [i32; 3])>,
+            deny: bool,
+        }
+        struct Guard(Arc<Mutex<Heard>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Guard {
+            fn inventory_move_item(
+                &self,
+                _: &dyn Host,
+                event: &mut InventoryMoveItemEvent<'_>,
+            ) -> Flow {
+                let mut state = self.0.lock().unwrap();
+                state.moves.push((event.source, event.destination));
+                if state.deny {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+            fn hopper_pickup_item_pre(
+                &self,
+                _: &dyn LevelHost,
+                event: &mut HopperPickupItemPreEvent<'_>,
+            ) -> Flow {
+                let mut state = self.0.lock().unwrap();
+                state
+                    .pickups
+                    .push((event.source, [event.pos.x, event.pos.y, event.pos.z]));
+                if state.deny {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        let heard = Arc::new(Mutex::new(Heard {
+            deny: true,
+            ..Heard::default()
+        }));
+        let mods: Mods = vec![ModEntry::new("cart-guard", Box::new(Guard(heard.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let registry = game.pack.assets.registry;
+                game.world
+                    .set(8, 65, 8, registry.default_state("minecraft:chest").unwrap())
+                    .unwrap();
+                let chest = (8, 65, 8);
+                let diamond = ItemStack::new("minecraft:diamond", 2);
+                let p = ItemStack::new("minecraft:emerald", 3);
+                let mut slots = vec![None; 27];
+                slots[0] = Some(diamond.clone());
+                game.world
+                    .block_entities
+                    .insert(chest, BlockEntity::Chest(slots));
+                game.carts.push(Minecart::new(
+                    900,
+                    CartKind::Hopper,
+                    Vec3::new(7.5, 64.0, 8.5),
+                ));
+                let mut moving = game.carts[0].clone();
+                moving.position = Vec3::new(8.25, 64.0, 8.5);
+                let loose = [7.95, 64.2, 8.5];
+                game.spawn_item(p.clone(), loose, [0.0; 3], 0);
+                let in_chest = |game: &Game<'_>| {
+                    game.world.block_entities.get(&chest).unwrap().slots()[0].clone()
+                };
+
+                moving.enabled = false;
+                game.hopper_cart_tick(&mut moving, true);
+                moving.enabled = true;
+                game.hopper_cart_tick(&mut moving, false);
+                moving.position = Vec3::new(512.5, 64.0, 8.5);
+                game.hopper_cart_tick(&mut moving, true);
+                assert!(heard.lock().unwrap().moves.is_empty());
+                assert!(heard.lock().unwrap().pickups.is_empty());
+
+                moving.position = Vec3::new(8.25, 64.0, 8.5);
+                game.hopper_cart_tick(&mut moving, true);
+                assert_eq!(in_chest(game), Some(diamond));
+                assert_eq!(game.dropped[0].stack, p);
+                assert!(moving.items.iter().all(Option::is_none));
+                {
+                    let mut state = heard.lock().unwrap();
+                    assert_eq!(state.moves, [([8, 65, 8], [8, 64, 8])]);
+                    assert_eq!(state.pickups, [(loose, [8, 64, 8])]);
+                    state.deny = false;
+                }
+                game.hopper_cart_tick(&mut moving, true);
+                assert_eq!(in_chest(game), Some(ItemStack::new("minecraft:diamond", 1)));
+                assert_eq!(
+                    moving.items[0],
+                    Some(ItemStack::new("minecraft:diamond", 1))
+                );
+                assert_eq!(game.dropped[0].stack, p);
+
+                game.world
+                    .set(8, 65, 8, registry.default_state("minecraft:air").unwrap())
+                    .unwrap();
+                game.world.block_entities.remove(&chest);
+                game.hopper_cart_tick(&mut moving, true);
+                assert_eq!(moving.items[1], Some(p));
+                assert!(game.dropped.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn chest_boat_automation_does_not_award_player_loot() {
         use horizon_client::advancements::Tree;
         use horizon_world::loot::PackOverlay;
@@ -3501,7 +3643,7 @@ mod can_take_tests {
             .view(hopper_pos, false)
             .expect("hopper view");
         assert!(
-            game.suck_from_container(sign_pos, [2.5, 5.5, 3.5], &hopper_view)
+            game.suck_from_container(sign_pos, [2.5, 5.5, 3.5], &hopper_view, [2, 4, 3])
                 .is_none(),
             "suck_from_container returns None so hopper falls through to suck_item_entities"
         );
