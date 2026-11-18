@@ -127,6 +127,104 @@ pub(in crate::game) mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn a_death_hook_keeps_exact_inventory_slots_without_copying_or_bypassing_vanishing() {
+        use super::super::native_guest_turn_tests::with_guests;
+        use horizon_client::items::ItemStack;
+        use mod_api::{Flow, Hooks, Host, ModEntry, PlayerKeepDeathItemEvent};
+        use std::sync::{Arc, Mutex};
+
+        struct Keep(Arc<Mutex<Vec<u32>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Keep {
+            fn player_keep_death_item(
+                &self,
+                _: &dyn Host,
+                event: &mut PlayerKeepDeathItemEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.player, 13);
+                self.0.lock().unwrap().push(event.slot);
+                if matches!(event.slot, 7 | 8 | 36 | 40) {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        let slots = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![ModEntry::new("keep", Box::new(Keep(slots.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                let player = game.player(13).unwrap();
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.guests.update_connection(13, |guest| {
+                    guest.health = 0.0;
+                    guest.inventory[0] = Some(ItemStack::new("minecraft:stone", 2));
+                    guest.inventory[7] = Some(ItemStack::new("minecraft:apple", 1));
+                    let mut cursed = ItemStack::new("minecraft:diamond_sword", 1);
+                    cursed
+                        .data_mut()
+                        .enchantments
+                        .push(("minecraft:vanishing_curse".into(), 1));
+                    guest.inventory[8] = Some(cursed);
+                    guest.armor[3] = Some(ItemStack::new("minecraft:iron_boots", 1));
+                    guest.offhand = Some(ItemStack::new("minecraft:torch", 4));
+                });
+                game.guest_die(1, 13);
+                assert_eq!(*slots.lock().unwrap(), [0, 7, 36, 40]);
+                let dropped: Vec<_> = game
+                    .dropped
+                    .iter()
+                    .map(|drop| drop.stack.item.as_ref())
+                    .collect();
+                assert_eq!(dropped, ["minecraft:stone"]);
+                assert_eq!(player.respawn(game), Ok(()));
+                let items = player.inventory_slots(game).unwrap();
+                let names: Vec<_> = items
+                    .iter()
+                    .map(|(slot, item)| (*slot, item.item().id(game)))
+                    .collect();
+                assert_eq!(
+                    names,
+                    [
+                        (7, "minecraft:apple".into()),
+                        (36, "minecraft:iron_boots".into()),
+                        (40, "minecraft:torch".into())
+                    ]
+                );
+                assert!(game.ui.rules.set(
+                    "keep_inventory",
+                    horizon_client::gamerules::Value::Bool(true),
+                ));
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .update_connection(13, |guest| {
+                        guest.health = 0.0;
+                        guest.inventory[0] = Some(ItemStack::new("minecraft:stone", 2));
+                    });
+                game.guest_die(1, 13);
+                assert_eq!(*slots.lock().unwrap(), [0, 7, 36, 40]);
+                assert_eq!(player.respawn(game), Ok(()));
+                assert!(
+                    player
+                        .inventory_slots(game)
+                        .unwrap()
+                        .iter()
+                        .any(|(slot, item)| {
+                            *slot == 0
+                                && item.count() == 2
+                                && item.item().id(game) == "minecraft:stone"
+                        })
+                );
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn a_players_last_death_location_reads_from_their_record() {
         with_game(|game| {
             let player = add_guest(game);

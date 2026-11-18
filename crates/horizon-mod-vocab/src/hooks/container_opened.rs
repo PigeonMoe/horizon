@@ -8,8 +8,8 @@ pub trait Hooks {
     /// (`minecraft:generic_9x3`, `minecraft:furnace`, `minecraft:crafting`,
     /// `minecraft:merchant`, `minecraft:anvil`, `minecraft:lectern`...; a
     /// horse's inventory is `minecraft:horse_inventory`) and `pos` the block
-    /// it belongs to or the mount's block position. Villager and vehicle-chest
-    /// menus have no position.
+    /// it belongs to or the mount's block position. Villager, vehicle-chest and portable
+    /// ender chest menus have no position.
     /// Heard after the checks that refuse the menu (a locked container, a
     /// spectator) and before the menu that was open closes. Set `cancel` and
     /// nothing opens: the open menu stays as it was and the click is spent.

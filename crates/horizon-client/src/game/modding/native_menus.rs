@@ -121,6 +121,41 @@ impl Game<'_> {
         self.open_menu(player.uuid(), rows, title, items, replace)
     }
 
+    pub(super) fn player_open_ender_chest_menu(
+        &mut self,
+        player: mod_api::PlayerRef,
+        replace: MenuReplace,
+    ) -> Option<i32> {
+        const KIND: &str = "minecraft:generic_9x3";
+        self.player_write_gate(player).ok()?;
+        let conn = self.native_conn(player.uuid())?;
+        if !self.guest_may_open(conn, KIND, None) {
+            return None;
+        }
+        self.player_write_gate(player).ok()?;
+        self.close_for_open(conn, replace);
+        self.player_write_gate(player).ok()?;
+        if self.native_conn(player.uuid()) != Some(conn) {
+            return None;
+        }
+        let mut items = vec![None; 27];
+        for (slot, stack) in self.player_ender_chest(player)? {
+            items[slot as usize] = Some(stack);
+        }
+        let title = horizon_protocol::text::translatable("container.enderchest", &[]);
+        let window = self.lan.as_mut()?.hub.open_menu_window(
+            conn,
+            KIND,
+            title,
+            None,
+            horizon_client::lan::menu::Slots::Ender,
+            items,
+            None,
+        )?;
+        self.player_menu_opening(conn);
+        Some(window)
+    }
+
     pub(super) fn open_inventory_menu_at(
         &mut self,
         player: mod_api::PlayerRef,

@@ -150,6 +150,116 @@ fn a_written_slot_is_what_the_open_ender_chest_menu_shows_and_clicks() {
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn portable_ender_chest_uses_live_slots_and_checks_menu_protection() {
+    use horizon_client::lan::menu::Slots;
+    use horizon_protocol::packets::play::{ContainerClick, Serverbound};
+    use mod_api::{ContainerOpenedEvent, Flow, Hooks, MenuReplace, ModEntry, ServerHost, Text};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct Protection(Arc<AtomicBool>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn container_opened(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut ContainerOpenedEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player, 13);
+            assert_eq!(event.kind, "minecraft:generic_9x3");
+            assert_eq!(event.pos, None);
+            if self.0.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let deny = Arc::new(AtomicBool::new(true));
+    let mods = vec![ModEntry::new(
+        "protection",
+        Box::new(Protection(deny.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_guests(|game| {
+            let [a, b] = game.players().server_players()[..] else {
+                panic!("two guests")
+            };
+            let book = api_item(game, BOOK).unwrap();
+            b.set_ender_chest_slot(game, 26, Some(book)).unwrap();
+            let old = (game as &mut dyn ServerHost)
+                .open_menu(
+                    b.uuid(),
+                    1,
+                    Text::literal("Previous"),
+                    Vec::new(),
+                    MenuReplace::CloseFirst,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(b.open_ender_chest_menu(game, MenuReplace::CloseFirst), None);
+            assert_eq!(
+                game.lan
+                    .as_ref()
+                    .unwrap()
+                    .hub
+                    .guest(13)
+                    .unwrap()
+                    .menu
+                    .as_ref()
+                    .unwrap()
+                    .window,
+                old
+            );
+
+            deny.store(false, Ordering::Relaxed);
+            let window = game
+                .as_guest(13, |game| {
+                    b.open_ender_chest_menu(game, MenuReplace::CloseFirst)
+                })
+                .unwrap()
+                .unwrap();
+            let guest = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
+            let menu = guest.menu.as_ref().unwrap();
+            assert_eq!(menu.slots, Slots::Ender);
+            assert_eq!(menu.pos, None);
+            assert_eq!(
+                menu.slots
+                    .get(&game.world, guest, 26)
+                    .unwrap()
+                    .item
+                    .as_ref(),
+                "minecraft:written_book"
+            );
+            game.lan_guest_packet(
+                13,
+                Serverbound::ContainerClick(ContainerClick {
+                    container: window,
+                    state: 0,
+                    slot: 26,
+                    button: 0,
+                    input: 0,
+                    changed: Vec::new(),
+                    carried: None,
+                }),
+            );
+            assert!(b.ender_chest(game).unwrap().is_empty());
+            assert!(a.ender_chest(game).unwrap().is_empty());
+            let guest = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
+            assert_eq!(
+                guest.carried.as_ref().unwrap().item.as_ref(),
+                "minecraft:written_book"
+            );
+        })
+    });
+}
+
 /// The local player's open ender chest menu holds a copy that closing writes back over the
 /// chest: a write made while it is open goes into that copy and survives the close.
 #[test]

@@ -2,6 +2,14 @@ use super::*;
 
 /// The hook points. Each does nothing in Horizon.
 impl Game<'_> {
+    /// Whether the given player inventory slot is excluded from `Inventory.dropAll`.
+    pub(in crate::game) fn native_player_keep_death_item(
+        &self,
+        call: mod_api::__private::PlayerKeepDeathItemCall<'_>,
+    ) {
+        self.fire_player_keep_death_item(call);
+    }
+
     /// Not `native_loot_drops`: that is the loot-modifier step, which edits
     /// the stacks a table rolled (blocks, shearing, a mob's table). This hook
     /// fires once after it, on the entity's whole collected drop list, and

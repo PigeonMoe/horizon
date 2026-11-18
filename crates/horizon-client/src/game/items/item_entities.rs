@@ -687,9 +687,44 @@ impl Game<'_> {
             .rules
             .bool_at(horizon_client::gamerules::vanilla::KEEP_INVENTORY)
         {
-            stacks.extend(self.inventory.iter_mut().filter_map(Option::take));
-            stacks.extend(self.armor.iter_mut().rev().filter_map(Option::take));
-            stacks.extend(self.offhand.take());
+            let mut keep = [false; 41];
+            if let Some(player) = dying.player
+                && mod_api::__private::listened(mod_api::HookId::PlayerKeepDeathItem)
+            {
+                use crate::game::api_values::TryIntoApi;
+                let slots = self
+                    .inventory
+                    .iter()
+                    .chain(self.armor.iter().rev())
+                    .chain(std::iter::once(&self.offhand));
+                for (slot, (value, keep)) in slots.zip(&mut keep).enumerate() {
+                    if let Some(value) = value
+                        && value.enchantment_level("minecraft:vanishing_curse") == 0
+                        && let Ok(stack) = value.try_into_api()
+                    {
+                        self.native_player_keep_death_item(
+                            mod_api::__private::PlayerKeepDeathItemCall {
+                                player,
+                                slot: slot as u32,
+                                stack: &stack,
+                                keep,
+                            },
+                        );
+                    }
+                }
+            }
+            let slots = self
+                .inventory
+                .iter_mut()
+                .chain(self.armor.iter_mut().rev())
+                .chain(std::iter::once(&mut self.offhand));
+            stacks.extend(slots.enumerate().filter_map(|(slot, value)| {
+                if keep.get(slot) == Some(&true) {
+                    None
+                } else {
+                    value.take()
+                }
+            }));
             stacks.extend(self.equipment.take_all());
             stacks.retain(|s| s.enchantment_level("minecraft:vanishing_curse") == 0);
             self.apply_equipment();
@@ -1070,7 +1105,8 @@ mod escape_tests {
         let stack = ItemStack::new("minecraft:stone", 2);
         game.spawn_item(stack, [8.5, 64.4, 8.5], [0.0, 0.0, 0.0], 10);
         let item = game.dropped.last_mut().unwrap();
-        item.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(12345));
+        item.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(12345));
         let mut level = game.world.random.clone();
         game.ticked_entities_through = u32::MAX;
         game.tick_items();

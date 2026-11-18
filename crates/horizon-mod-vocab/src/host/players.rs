@@ -652,6 +652,17 @@ pub trait PlayersBackendMut {
         entity: BlockEntityRef,
     ) -> Result<bool, BlockEntityError>;
     /// Side: server.
+    /// Opens the connected player's own vanilla ender chest inventory without a block, as
+    /// opening a portable ender chest does. The normal `container_opened` protection runs with
+    /// no position before any menu is closed. All slot operations use the live ender chest.
+    /// Returns the new window ID, or `None` for a refused, unavailable or cancelled open.
+    #[access(WorldOnly)]
+    fn player_open_ender_chest_menu(
+        &mut self,
+        player: PlayerRef,
+        replace: MenuReplace,
+    ) -> Option<i32>;
+    /// Side: server.
     /// Opens content mod menu type `menu` for a connected player from anywhere, with no
     /// block (`ServerPlayer.openMenu(provider, extraDataWriter)`): an item's use, an entity,
     /// a command. The menu replaces the one they had open. Its container slots show empty
