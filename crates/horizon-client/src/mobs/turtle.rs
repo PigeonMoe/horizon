@@ -242,12 +242,6 @@ impl Goal for LayEgg {
         if m.extra.counter < 1 {
             set_laying_egg(m, true);
         } else if m.extra.counter > 200 {
-            let at = [m.position.x, m.position.y, m.position.z];
-            // `TurtleLayEggGoal` plays the sound with the level's random, then
-            // draws the egg count from the turtle's own.
-            let pitch = 0.9 + cx.level.random().next_float() * 0.2;
-            cx.events
-                .push(MobEvent::Sound("entity.turtle.lay_egg", at, 0.3, pitch));
             // Blocks.TURTLE_EGG with EGGS = nextInt(4) + 1 above the sand.
             let eggs = m.random.next_int_bound(4).unwrap_or(0) + 1;
             let registry = cx.w.registry;
@@ -259,8 +253,14 @@ impl Goal for LayEgg {
                     registry.resolve(&s).ok()
                 });
             let b = self.0.block;
-            if let Some(state) = state {
-                let pos = [b[0], b[1] + 1, b[2]];
+            let pos = [b[0], b[1] + 1, b[2]];
+            if let Some(state) = state
+                && cx.w.may_change_block(m, pos)
+            {
+                let at = [m.position.x, m.position.y, m.position.z];
+                let pitch = 0.9 + cx.level.random().next_float() * 0.2;
+                cx.events
+                    .push(MobEvent::Sound("entity.turtle.lay_egg", at, 0.3, pitch));
                 cx.events.push(MobEvent::SetBlock { pos, state });
                 cx.events.push(MobEvent::GameEvent {
                     event: "minecraft:block_place",
@@ -707,67 +707,76 @@ mod tests {
         assert_eq!(m.body_yaw, m.yaw);
     }
 
-    /// `Turtle.TurtleLayEggGoal.tick`: the pitch comes from the level's
-    /// random, the egg count from the turtle's, and the egg it sets is
-    /// followed by `block_place` from the turtle at the new block.
+    /// `Turtle.TurtleLayEggGoal.tick`: either outcome ends laying. Only an
+    /// approved placement draws a sound pitch and emits the placement events.
     #[test]
     #[ignore = "daily"]
     fn laying_an_egg_posts_block_place_with_the_level_s_pitch_and_its_own_eggs() {
+        use crate::mobs::mob_hooks::BlockChangeGuard;
+        use horizon_core::random::{EntityRandom, LegacyRandom};
         let ran = crate::mobs::world::with_test_world(&[], |w, _| {
-            use horizon_core::random::LegacyRandom;
-            let mut m = strolling_turtle();
-            m.position = Vec3::new(0.5, 0.0, 0.5);
-            m.extra.flag = true;
-            m.extra.counter = 201;
-            m.random = horizon_core::random::EntityRandom::own(LegacyRandom::new(7));
-            let mut lr = crate::health::TestLevel::new(11);
-            let mut level = lr.random().clone();
-            let pitch = 0.9_f32 + level.next_float() * 0.2_f32;
-            let mut own = m.random.clone();
-            let eggs = own.next_int_bound(4).unwrap() + 1;
-            let mut events = Vec::new();
-            let mut cx = Cx {
-                w,
-                level: &mut lr.level(),
-                events: &mut events,
-            };
-            let mut goal = LayEgg(MoveToBlock {
-                reached: true,
-                block: [0, -1, 0],
-                ..Default::default()
-            });
-            goal.tick(&mut m, &mut cx);
-            let base = w.registry.default_state("minecraft:turtle_egg").unwrap();
-            let mut state = w.registry.state(base).unwrap().clone();
-            state.properties.insert("eggs".into(), eggs.to_string());
-            let egg = w.registry.resolve(&state).unwrap();
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    MobEvent::Sound("entity.turtle.lay_egg", _, _, p) if *p == pitch
-                )),
-                "the sound's pitch is the level random's: {events:?}"
-            );
-            assert!(
-                events.iter().any(
-                    |e| matches!(e, MobEvent::SetBlock { pos: [0, 0, 0], state } if *state == egg)
-                ),
-                "the turtle's random picked the egg count: {events:?}"
-            );
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    MobEvent::GameEvent {
-                        event: "minecraft:block_place",
-                        at: [0.5, 0.5, 0.5],
-                        source: 1,
-                        state,
-                    } if *state == egg
-                )),
-                "the new egg posts block_place from the turtle: {events:?}"
-            );
-            assert_eq!(lr.random().state(), level.state());
-            assert_eq!(m.random.state(), own.state());
+            for (protected, allowed) in [([0, 0, 0], false), ([1, 0, 0], true)] {
+                let guarded = [protected];
+                let guard = BlockChangeGuard(&guarded);
+                let mut w = w.clone();
+                w.mob_hooks = Some(&guard);
+                let mut m = strolling_turtle();
+                // The turtle can reach the egg site from the next block over.
+                m.position = Vec3::new(1.125, 0.0, 0.5);
+                m.extra.flag = true;
+                set_laying_egg(&mut m, true);
+                m.extra.counter = 201;
+                m.random = EntityRandom::own(LegacyRandom::new(7));
+                let mut lr = crate::health::TestLevel::new(11);
+                let mut level = lr.random().clone();
+                let mut own = m.random.clone();
+                let eggs = own.next_int_bound(4).unwrap() + 1;
+                let mut events = Vec::new();
+                let mut goal = LayEgg(MoveToBlock {
+                    block: [0, -1, 0],
+                    ..Default::default()
+                });
+                goal.tick(
+                    &mut m,
+                    &mut Cx {
+                        w: &w,
+                        level: &mut lr.level(),
+                        events: &mut events,
+                    },
+                );
+
+                if allowed {
+                    let pitch = 0.9_f32 + level.next_float() * 0.2_f32;
+                    let base = w.registry.default_state("minecraft:turtle_egg").unwrap();
+                    let mut state = w.registry.state(base).unwrap().clone();
+                    state.properties.insert("eggs".into(), eggs.to_string());
+                    let egg = w.registry.resolve(&state).unwrap();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [
+                                MobEvent::Sound("entity.turtle.lay_egg", [1.125, 0.0, 0.5], 0.3, p),
+                                MobEvent::SetBlock { pos: [0, 0, 0], state },
+                                MobEvent::GameEvent {
+                                    event: "minecraft:block_place",
+                                    at: [0.5, 0.5, 0.5],
+                                    source: 1,
+                                    state: placed,
+                                },
+                            ] if *p == pitch && *state == egg && *placed == egg
+                        ),
+                        "the sound precedes the egg and its block_place event: {events:?}"
+                    );
+                } else {
+                    assert!(events.is_empty(), "a denied egg has no effects: {events:?}");
+                }
+                assert_eq!(lr.random().state(), level.state());
+                assert_eq!(m.random.state(), own.state());
+                assert!(!has_egg(&m));
+                assert!(!m.extra.flag2);
+                assert_eq!(m.extra.counter, 0);
+                assert_eq!(m.extra.in_love, 600);
+            }
         });
         assert!(ran, "vanilla data is missing");
     }
