@@ -829,8 +829,7 @@ impl Game<'_> {
     }
 
     /// Player.drop: thrown from the eyes along the view direction. True when
-    /// the selected stack's `on_dropped_by_player` Part kept it in the slot
-    /// (`ServerPlayer.drop(boolean)`, as NeoForge asks it).
+    /// an item part or the server's pre-drop hook left the stack in its slot.
     pub(in crate::game) fn drop_held(&mut self, all: bool) -> bool {
         if self.eye_position().is_none() {
             return false;
@@ -838,6 +837,18 @@ impl Game<'_> {
         let spectator = self.spectator();
         if !spectator && self.native_dropped_by_player_event(all) {
             return true;
+        }
+        if !spectator
+            && self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::PlayerDropPre)
+            && self.inventory[self.selected]
+                .as_ref()
+                .is_some_and(|stack| stack.count > 0)
+        {
+            let slot = self.selected;
+            if !self.player_drop_allowed(self.lan_acting) || self.selected != slot {
+                return true;
+            }
         }
         let Some(thrown) = horizon_client::items::take_held_drop(
             &mut self.inventory[self.selected],
@@ -850,17 +861,21 @@ impl Game<'_> {
         false
     }
 
-    /// A guest's drop key. A drop the held item's Part refused sends the
+    /// A guest's drop key. A drop a hook refused sends the
     /// inventory back, undoing the removal the client predicted.
     pub(in crate::game) fn guest_drop_held(&mut self, gi: usize, conn: u32, all: bool) {
         let kept = self.as_guest(conn, |g| g.drop_held(all)) == Some(true);
         if let Some(host) = self.lan.as_mut() {
             if kept {
-                host.hub.send_inventory(gi);
+                host.hub.resend_menu(conn, 0, &self.world);
             } else {
                 host.hub.guests.update(gi, |g| g.told_selected());
             }
         }
+    }
+
+    pub(in crate::game) fn player_drop_origin(eye: [f64; 3]) -> [f64; 3] {
+        [eye[0], eye[1] - f64::from(0.3f32), eye[2]]
     }
 
     /// `Player.createItemStackToDrop`: an item entity thrown from the eyes
@@ -891,7 +906,7 @@ impl Game<'_> {
                 randomly,
             ),
         };
-        let at = [eye[0], eye[1] - f64::from(0.3f32), eye[2]];
+        let at = Self::player_drop_origin(eye);
         let uuid = thrown_from_hand.then(|| self.acting_player_uuid());
         // Only `drop(.., false)` tosses ask `item_toss`: a death's scatter (`randomly`) does not.
         let id = if randomly {

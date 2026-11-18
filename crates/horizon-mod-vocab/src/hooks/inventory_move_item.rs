@@ -2,7 +2,7 @@
 // catalog-order: 0228
 
 pub trait Hooks {
-    /// A hopper is about to move one item between containers, a composter's
+    /// A hopper or dropper is about to move one item between containers, a composter's
     /// bone meal included. Set `cancel` to leave it in its source slot. A chest
     /// boat or minecart is reported at the block it is in.
     #[hook(

@@ -394,21 +394,84 @@ impl Game<'_> {
             .inventory
             .take()
             .unwrap_or_else(|| Box::new(Menu::new(Kind::Inventory)));
-        let grid = host.hub.guests[gi].craft_grid.clone();
-        let Some(changed) = self.guest_menu_op(gi, &mut menu, |menu, env| {
+        let mode = input(p.input);
+        let mut admitted_drop = false;
+        if (mode == Input::Throw
+            || (p.slot == -999 && matches!(mode, Input::Pickup | Input::QuickMove)))
+            && self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::PlayerDropPre)
+        {
+            let Some(host) = self.lan.as_ref() else {
+                return true;
+            };
+            let guest = &host.hub.guests[gi];
+            let would_drop = {
+                let env = Env {
+                    player: Some(guest.uuid),
+                    player_entity_id: Some(guest.entity_id),
+                    known_recipes: Some(&guest.recipe_book),
+                    limited_crafting: host.hub.limited_crafting,
+                    ..self.menu_env()
+                };
+                load_player(&mut menu, guest);
+                for (k, stack) in guest.craft_grid.iter().enumerate() {
+                    menu.set_slot(&env, 1 + k, stack.clone());
+                }
+                menu.would_drop_from_click(&env, i32::from(p.slot), i32::from(p.button), mode)
+            };
+            if would_drop {
+                if !self.player_drop_allowed(Some(conn)) {
+                    if let Some(host) = self.lan.as_mut()
+                        && host.hub.guest(conn).is_some()
+                    {
+                        let _ = host
+                            .menus
+                            .entry(conn)
+                            .or_default()
+                            .crafting
+                            .inventory
+                            .get_or_insert(menu);
+                        host.hub.resend_menu(conn, 0, &self.world);
+                    }
+                    return true;
+                }
+                admitted_drop = true;
+            }
+        }
+        let Some(host) = self.lan.as_ref() else {
+            return true;
+        };
+        let Some(gi) = host.hub.guests.connection_index(conn) else {
+            return true;
+        };
+        let guest = &host.hub.guests[gi];
+        let grid = guest.craft_grid.clone();
+        let approved_pose = admitted_drop.then(|| {
+            (
+                Self::player_drop_origin(guest.eye()),
+                [guest.yaw, guest.pitch],
+            )
+        });
+        let Some((changed, approved_drops)) = self.guest_menu_op(gi, &mut menu, |menu, env| {
             for (k, s) in grid.into_iter().enumerate() {
                 menu.set_slot(env, 1 + k, s);
             }
             let before: Vec<_> = (0..menu.slot_count())
                 .map(|s| menu.slot(s).cloned())
                 .collect();
-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
-            (0..menu.slot_count())
+            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), mode);
+            let changed = (0..menu.slot_count())
                 .filter(|&s| menu.slot(s) != before[s].as_ref())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let approved_drops = approved_pose.map(|_| std::mem::take(&mut menu.dropped));
+            (changed, approved_drops)
         }) else {
             return true;
         };
+        if let (Some((at, rotation)), Some(drops)) = (approved_pose, approved_drops) {
+            // A recipe's crafted hook may move the guest after the take committed.
+            self.drop_guest_items_at(at, rotation, drops);
+        }
         let Some(host) = self.lan.as_ref() else {
             return true;
         };

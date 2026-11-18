@@ -231,6 +231,14 @@ impl LevelAccess for GameLevel<'_> {
         }
         !cancel
     }
+    fn has_sponge_absorb_policy(&self) -> bool {
+        self.native_authoritative && mod_api::__private::listened(mod_api::HookId::SpongeAbsorbPre)
+    }
+    fn allow_sponge_absorb(&self, sponge: BlockPos, pos: BlockPos) -> bool {
+        let mut cancel = false;
+        self.native_sponge_absorb_pre(self.dimension, sponge, pos, &mut cancel);
+        !cancel
+    }
     fn observe_sponge_absorb(&self, pos: BlockPos) {
         if self.native_authoritative {
             self.native_sponge_absorb(self.dimension, pos);

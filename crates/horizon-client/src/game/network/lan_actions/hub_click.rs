@@ -4,6 +4,7 @@
 //! click, so the click code and the game are separate values and the game is whole while the
 //! hub runs.
 use super::*;
+use horizon_client::lan::menu::input;
 
 impl Game<'_> {
     /// Run `f` with the LAN host taken out of `self.lan`, then put it back. `f` is given the whole
@@ -28,6 +29,31 @@ impl Game<'_> {
     /// `ServerGamePacketListenerImpl.handleContainerClick` for the guest `conn`: the hub's
     /// click, run with the host lifted out of the game. Returns the stacks the click threw out.
     pub(super) fn lan_hub_click(&mut self, conn: u32, p: &play::ContainerClick) -> Vec<ItemStack> {
+        let check_drop = self.native_authoritative()
+            && (p.input == input::THROW || (p.input == input::PICKUP && p.slot == -999))
+            && mod_api::__private::listened(mod_api::HookId::PlayerDropPre);
+        match self.run_hub_click(conn, p, check_drop) {
+            Ok(drops) => drops,
+            Err(()) => {
+                if !self.player_drop_allowed(Some(conn)) {
+                    if let Some(host) = &mut self.lan {
+                        host.hub.resend_menu(conn, p.container, &self.world);
+                    }
+                    return Vec::new();
+                }
+                // Hooks have a mutable server host. Read the menu and world again
+                // so their edits are not overwritten by a pre-hook snapshot.
+                self.run_hub_click(conn, p, false).unwrap_or_default()
+            }
+        }
+    }
+
+    fn run_hub_click(
+        &mut self,
+        conn: u32,
+        p: &play::ContainerClick,
+        check_drop: bool,
+    ) -> Result<Vec<ItemStack>, ()> {
         self.with_lan_lifted(|game, host| {
             // The game is lent to the click as the mods' `menu_slot_rules` (their read-only `Host`).
             // `self.lan` is `None` meanwhile: what a hook reads of the LAN host answers as if none
@@ -38,12 +64,15 @@ impl Game<'_> {
                 Some(&*game),
             );
             let Some(mut prepared) = host.hub.prepare_click(conn, p, &game.world) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
+            if check_drop && host.hub.would_manually_drop(&mut prepared, p, &rules) {
+                return Err(());
+            }
             // The game is whole here: `game` can be read or written while the hub clicks.
             let outcome = host.hub.run_click(&mut prepared, p, &rules);
-            host.hub.finish_click(prepared, p, &mut game.world, outcome)
+            Ok(host.hub.finish_click(prepared, p, &mut game.world, outcome))
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| Ok(Vec::new()))
     }
 }

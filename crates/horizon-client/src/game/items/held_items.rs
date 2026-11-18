@@ -106,6 +106,62 @@ impl Game<'_> {
         out
     }
 
+    /// `AbstractArrow.playerTouch` when a normally collectible arrow holds an item.
+    pub(in crate::game) fn collect_arrow_item(
+        &mut self,
+        stack: ItemStack,
+        position: [f64; 3],
+    ) -> bool {
+        if self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::PlayerPickupArrowPre)
+            && self.inventory_can_hold_item(&stack)
+        {
+            let Some(body) = self.player.as_ref() else {
+                return false;
+            };
+            let identity = (body.entity_id, body.position);
+            let uuid = self.acting_uuid();
+            let level = self.dim;
+            let mut cancel = false;
+            self.native_player_pickup_arrow_pre(
+                horizon_client::lan::playerdata::ints_uuid(uuid),
+                level.id(),
+                position,
+                &stack.item,
+                &mut cancel,
+            );
+            if cancel
+                || self.dim != level
+                || self.acting_uuid() != uuid
+                || self.player.as_ref().is_none_or(|body| {
+                    (body.entity_id, body.position) != identity || body.health.dead_or_dying()
+                })
+            {
+                return false;
+            }
+        }
+        self.add_stack_to_inventory(stack).is_none() || self.creative
+    }
+
+    /// Whether the main inventory or off hand can receive any part of this stack.
+    fn inventory_can_hold_item(&self, stack: &ItemStack) -> bool {
+        let max = self
+            .res
+            .items()
+            .get(&stack.item)
+            .map_or(64, |i| i.max_stack);
+        stack.count > 0
+            && max > 0
+            && (self.inventory.iter().take(36).any(Option::is_none)
+                || self
+                    .inventory
+                    .iter()
+                    .take(36)
+                    .chain(std::iter::once(&self.offhand))
+                    .flatten()
+                    .any(|slot| slot.count < max && slot.same_item_same_components(stack)))
+    }
+
     /// Inventory.add: returns the stack that did not fit.
     pub(super) fn add_stack_to_inventory(&mut self, mut stack: ItemStack) -> Option<ItemStack> {
         let tutorial_item = matches!(

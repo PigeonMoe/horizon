@@ -536,6 +536,32 @@ pub trait PlayersBackendMut {
     /// Refuses text deeper than 512 component nodes before applying any changes.
     fn player_action_bar(&mut self, player: PlayerRef, line: Text) -> Result<bool, TextFormError>;
     /// Side: server.
+    /// Show a title over one player's screen with a subtitle and fade-in, stay,
+    /// and fade-out times in ticks. A negative time retains the client's
+    /// existing setting, as with the vanilla title timing packet. Other players
+    /// are unaffected. False for a stale or unavailable player.
+    #[access(WorldOnly)]
+    /// Refuses either text deeper than 512 component nodes before sending anything.
+    fn player_title(
+        &mut self,
+        player: PlayerRef,
+        title: &Text,
+        subtitle: &Text,
+        times: [i32; 3],
+    ) -> Result<bool, TextFormError>;
+    /// Side: server.
+    /// Show one stationary particle at `at` to one player. A block particle
+    /// needs its block state and an item particle needs an item stack. Returns
+    /// false for a stale player, an unavailable network, or an invalid particle.
+    #[access(WorldOnly)]
+    fn player_particle(
+        &mut self,
+        player: PlayerRef,
+        options: &ParticleOptions,
+        state: Option<BlockState>,
+        at: [f64; 3],
+    ) -> bool;
+    /// Side: server.
     /// The lines over and under that player's list of players (Tab):
     /// `ClientboundTabListPacket`, an empty text for none. False when they
     /// aren't on.

@@ -425,7 +425,8 @@ impl Game<'_> {
         if !controls_vehicle {
             return;
         }
-        let owner = host.hub.singleplayer_owner == Some(g.uuid);
+        let player = g.uuid;
+        let owner = host.hub.singleplayer_owner == Some(player);
         let allow_flight = host.hub.config.allow_flight;
         let (vehicle, good) = (g.vehicle, g.vehicle_good);
         let back = |host: &mut LanHost, position: Vec3, yaw: f32| {
@@ -558,6 +559,26 @@ impl Game<'_> {
             log::warn!("vehicle {id} moved wrongly");
             back(self.lan.as_mut().unwrap(), old, yaw);
             return;
+        }
+        if target != old && mod_api::__private::listened(mod_api::HookId::VehicleClientMovePre) {
+            let mut cancel = false;
+            self.native_vehicle_client_move_pre(
+                player,
+                id,
+                self.dim.id(),
+                [old.x, old.y, old.z],
+                [target.x, target.y, target.z],
+                &mut cancel,
+            );
+            if cancel {
+                if let Some(i) = mount {
+                    self.mobs[i].velocity = Vec3::ZERO;
+                } else if let Some(i) = boat {
+                    self.boats.update(i, |boat| boat.velocity = Vec3::ZERO);
+                }
+                back(self.lan.as_mut().unwrap(), old, yaw);
+                return;
+            }
         }
         // clientVehicleIsFloating: the move didn't go down a step, the vehicle hadn't come down onto
         // something on its last move (`verticalCollisionBelow` before this one), and nothing but air is

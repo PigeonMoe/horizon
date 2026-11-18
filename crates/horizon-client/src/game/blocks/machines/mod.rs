@@ -1272,13 +1272,12 @@ impl Game<'_> {
         let mut taken = false;
         if !self.hopper_is_stacked(&view) {
             let stack = self.dropped[i].stack.clone();
-            let allowed = self.with_level(|_, level, _| {
-                level.allow_hopper_pickup_item(
-                    BlockPos::new(pos.0, pos.1, pos.2),
-                    &stack.item,
-                    stack.count,
-                )
-            });
+            let allowed = self.hopper_may_collect(
+                BlockPos::new(pos.0, pos.1, pos.2),
+                self.dropped[i].position,
+                &stack,
+                true,
+            );
             match allowed
                 .then(|| self.add_item(None, &view, stack, None))
                 .flatten()
@@ -1343,9 +1342,13 @@ impl Game<'_> {
         })
         .unwrap_or(0)
     }
-    /// `InventoryMoveItemEvent` for `item` going from `source` to `destination`, where one end
-    /// is a capability part: whether a mod canceled the move.
-    fn part_move_canceled(&mut self, source: [i32; 3], destination: [i32; 3], item: &str) -> bool {
+    /// `InventoryMoveItemEvent` before the selected stack leaves `source`.
+    fn container_move_canceled(
+        &mut self,
+        source: [i32; 3],
+        destination: [i32; 3],
+        item: &str,
+    ) -> bool {
         let mut cancel = false;
         self.native_inventory_move_item(source, destination, item, &mut cancel);
         cancel
@@ -1378,7 +1381,7 @@ impl Game<'_> {
                 };
                 let resource = ItemResource::of(&snapshot);
                 let item = mod_api::__private::item_key_id(snapshot.item()).unwrap();
-                if game.part_move_canceled(from, at, item) {
+                if game.container_move_canceled(from, at, item) {
                     continue;
                 }
                 let (source, index) = hopper.locate(slot).ok_or(())?;
@@ -1419,7 +1422,7 @@ impl Game<'_> {
             let Ok(one) = resource.as_stack().try_into_engine(self.items()) else {
                 continue;
             };
-            if part.amount(self, slot) == 0 || self.part_move_canceled(at, into, &one.item) {
+            if part.amount(self, slot) == 0 || self.container_move_canceled(at, into, &one.item) {
                 continue;
             }
             let moved = mod_api::run_transaction(self, |game, tx| {
@@ -1599,7 +1602,7 @@ impl Game<'_> {
         {
             return false;
         }
-        self.suck_item_entities(Some(pos), hopper, min, max)
+        self.suck_item_entities(BlockPos::new(pos.0, pos.1, pos.2), hopper, min, max, true)
     }
     /// The container half of `HopperBlockEntity.suckInItems`: one item from the
     /// container at `above`, through its bottom face; with no block container
@@ -1863,14 +1866,36 @@ impl Game<'_> {
             *items = slots;
         }
     }
+    fn hopper_may_collect(
+        &mut self,
+        hopper: BlockPos,
+        source: Vec3,
+        stack: &ItemStack,
+        block_hopper: bool,
+    ) -> bool {
+        if !block_hopper && !mod_api::__private::listened(mod_api::HookId::HopperPickupItemPre) {
+            return true;
+        }
+        self.with_level(|_, level, _| {
+            (!block_hopper || level.allow_hopper_pickup_item(hopper, &stack.item, stack.count))
+                && level.hopper_may_pick_up_item(
+                    hopper,
+                    [source.x, source.y, source.z],
+                    &stack.item,
+                    stack.count,
+                )
+        })
+    }
+
     /// The item half of `HopperBlockEntity.suckInItems` (`getItemsAtAndAbove`):
     /// adds the item entities that meet the box, until one is taken whole.
     fn suck_item_entities(
         &mut self,
-        hopper_pos: Option<Pos>,
+        hopper_pos: BlockPos,
         hopper: &View,
         min: [f64; 3],
         max: [f64; 3],
+        block_hopper: bool,
     ) -> bool {
         let mut i = 0;
         while i < self.dropped.len() {
@@ -1884,15 +1909,12 @@ impl Game<'_> {
                 && hi.z > min[2];
             if inside {
                 let stack = self.dropped[i].stack.clone();
-                let allowed = hopper_pos.is_none_or(|pos| {
-                    self.with_level(|_, level, _| {
-                        level.allow_hopper_pickup_item(
-                            BlockPos::new(pos.0, pos.1, pos.2),
-                            &stack.item,
-                            stack.count,
-                        )
-                    })
-                });
+                let allowed = self.hopper_may_collect(
+                    hopper_pos,
+                    self.dropped[i].position,
+                    &stack,
+                    block_hopper,
+                );
                 if !allowed {
                     i += 1;
                     continue;
@@ -1914,7 +1936,13 @@ impl Game<'_> {
     /// that meets it reaches one of them. The columns follow the item list's
     /// stamp, so any write since they were built (an item's move, an
     /// explosion's push, a command, a pickup) makes them scan, then rebuild.
-    fn cart_suck_items(&mut self, hopper: &View, min: [f64; 3], max: [f64; 3]) -> bool {
+    fn cart_suck_items(
+        &mut self,
+        pos: BlockPos,
+        hopper: &View,
+        min: [f64; 3],
+        max: [f64; 3],
+    ) -> bool {
         if !self
             .pickup_columns
             .get_or_insert_with(Default::default)
@@ -1926,7 +1954,7 @@ impl Game<'_> {
         {
             return false;
         }
-        self.suck_item_entities(None, hopper, min, max)
+        self.suck_item_entities(pos, hopper, min, max, false)
     }
     /// `MinecartHopper.tick`'s `tryConsumeItems` for whichever path ticks the
     /// cart. `ServerLevel.tickNonPassenger` ticks the vehicle, then its
@@ -1963,6 +1991,7 @@ impl Game<'_> {
         let took = match self.suck_from_container(above, at, &view) {
             Some(took) => took,
             None => self.cart_suck_items(
+                BlockPos::containing(p),
                 &view,
                 [p.x - 0.5, p.y + 11.0 / 16.0, p.z - 0.5],
                 [p.x + 0.5, p.y + 2.0, p.z + 0.5],
@@ -1973,6 +2002,7 @@ impl Game<'_> {
             let b = cart.bounds();
             let (lo, hi) = (b.min_position(), b.max_position());
             self.cart_suck_items(
+                BlockPos::containing(p),
                 &view,
                 [lo.x - 0.25, lo.y, lo.z - 0.25],
                 [hi.x + 0.25, hi.y, hi.z + 0.25],
@@ -1982,6 +2012,20 @@ impl Game<'_> {
     }
 
     // ---- dispensers and droppers ----
+
+    fn block_dispense_allowed(&self, pos: BlockPos, target: Pos, item: &str) -> bool {
+        let mut cancel = false;
+        if self.native_authoritative() {
+            self.native_block_dispense_pre(
+                self.dim.id(),
+                [pos.x, pos.y, pos.z],
+                [target.0, target.1, target.2],
+                item,
+                &mut cancel,
+            );
+        }
+        !cancel
+    }
 
     /// `DispenserBlock.dispenseFrom` / `DropperBlock.dispenseFrom`.
     pub(super) fn dispense_from(&mut self, pos: BlockPos, state: BlockStateId) -> Result<()> {
@@ -2034,22 +2078,31 @@ impl Game<'_> {
         let target = offset(key, facing);
         let remaining = if dropper {
             let side = facing.opposite();
-            let inserted = self.with_container_at(target, side, |game, into| match into {
-                ContainerTarget::View(into) => {
-                    let one = ItemStack {
-                        count: 1,
-                        ..stack.clone()
-                    };
-                    let inserted = game.add_item(None, into, one, Some(side)).is_none();
-                    if inserted {
-                        game.view_changed(into);
-                    }
-                    ControlFlow::Continue(inserted)
+            let inserted = self.with_container_at(target, side, |game, into| {
+                if game.container_move_canceled(
+                    [pos.x, pos.y, pos.z],
+                    [target.0, target.1, target.2],
+                    &stack.item,
+                ) {
+                    return ControlFlow::Break(());
                 }
-                ContainerTarget::Part(part) => {
-                    let at = [target.0, target.1, target.2];
-                    game.dropper_into_part(&part, &stack, at, &view, slot);
-                    ControlFlow::Break(())
+                match into {
+                    ContainerTarget::View(into) => {
+                        let one = ItemStack {
+                            count: 1,
+                            ..stack.clone()
+                        };
+                        let inserted = game.add_item(None, into, one, Some(side)).is_none();
+                        if inserted {
+                            game.view_changed(into);
+                        }
+                        ControlFlow::Continue(inserted)
+                    }
+                    ContainerTarget::Part(part) => {
+                        let at = [target.0, target.1, target.2];
+                        game.dropper_into_part(&part, &stack, at, &view, slot);
+                        ControlFlow::Break(())
+                    }
                 }
             });
             match inserted {
@@ -2062,9 +2115,17 @@ impl Game<'_> {
                     ..stack
                 })
                 .filter(|s| s.count > 0),
-                None => self.dispense_default_in_level(key, facing, stack),
+                None => {
+                    if !self.block_dispense_allowed(pos, target, &stack.item) {
+                        return Ok(());
+                    }
+                    self.dispense_default_in_level(key, facing, stack)
+                }
             }
         } else {
+            if !self.block_dispense_allowed(pos, target, &stack.item) {
+                return Ok(());
+            }
             self.dispense_item(key, facing, stack)?
         };
         if let Some(entry) = self.slot_mut_at(&view, slot) {

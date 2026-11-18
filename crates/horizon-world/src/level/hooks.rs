@@ -660,6 +660,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let mut queue = VecDeque::from([(start, 0)]);
         let mut visited = HashSet::new();
         let mut count = 0;
+        let ask = self.level.has_sponge_absorb_policy();
         while let Some((pos, depth)) = queue.pop_front() {
             if !visited.insert(pos) {
                 continue;
@@ -670,6 +671,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let state = self.state(pos);
                 if !b.is_water_fluid(self.fluid_at(pos).kind()) {
                     false
+                } else if ask && !self.sponge_may_drain(start, pos, state) {
+                    // A protected candidate counts as traversed without changing its state.
+                    true
                 } else if self.pickup_block(pos, state, false) {
                     true
                 } else {
@@ -705,6 +709,20 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         }
         count > 1
+    }
+    fn sponge_may_drain(&self, sponge: BlockPos, pos: BlockPos, state: BlockStateId) -> bool {
+        let b = self.b;
+        let block = b.block(state);
+        let plants = [
+            b.named.kelp,
+            b.named.kelp_plant,
+            b.named.seagrass,
+            b.named.tall_seagrass,
+        ];
+        let candidate = b.instance_of(state, Class::Liquid)
+            || plants.contains(&block)
+            || self.plan_pickup_block(pos, state, false).is_some();
+        !candidate || self.level.allow_sponge_absorb(sponge, pos)
     }
     fn frosted_ice_fewer_neighbours_than(&self, pos: BlockPos, limit: i32) -> bool {
         let mut count = 0;

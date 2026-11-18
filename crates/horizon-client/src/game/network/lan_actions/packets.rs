@@ -754,6 +754,18 @@ impl Game<'_> {
                 let Some(host) = self.lan.as_ref() else {
                     return;
                 };
+                let Some(gi) = host.hub.guests.connection_index(conn) else {
+                    return;
+                };
+                let guest = &host.hub.guests[gi];
+                let approved_pose = (!drops.is_empty()
+                    && mod_api::__private::listened(mod_api::HookId::PlayerDropPre))
+                .then(|| {
+                    (
+                        Self::player_drop_origin(guest.eye()),
+                        [guest.yaw, guest.pitch],
+                    )
+                });
                 if let Some(Slots::Block(key) | Slots::Double(key, _)) = slots
                     && slots.and_then(|s| s.read(&self.world, &host.hub.guests[gi])) != before
                 {
@@ -763,7 +775,12 @@ impl Game<'_> {
                 if let Some(Slots::Block(key)) = slots {
                     self.store_cart_items(key);
                 }
-                self.drop_guest_items(gi, drops);
+                if let Some((at, rotation)) = approved_pose {
+                    // The container's changed hook can move the guest after the click commits.
+                    self.drop_guest_items_at(at, rotation, drops);
+                } else {
+                    self.drop_guest_items(gi, drops);
+                }
             }
             S::ContainerClose(p) => {
                 // A vehicle's menu closed: its slots go back to the vehicle
@@ -1254,10 +1271,16 @@ impl Game<'_> {
     /// `ServerGamePacketListenerImpl.handleTeleportToEntityPacket` for a
     /// player: the host's own, or a guest in the world.
     pub(super) fn guest_spectate_teleport(&mut self, gi: usize, uuid: u128) {
-        let Some(host) = self.lan.as_mut() else {
+        let Some(host) = self.lan.as_ref() else {
             return;
         };
-        let own = host.hub.guests[gi].conn;
+        let guest = &host.hub.guests[gi];
+        let (own, player, from, from_dim) = (
+            guest.conn,
+            guest.uuid,
+            guest.position,
+            Dim::from_id(&guest.dimension),
+        );
         let target = host
             .hub
             .guests
@@ -1267,7 +1290,21 @@ impl Game<'_> {
         let Some((at, yaw, pitch, dim)) = target else {
             return;
         };
-        if Dim::from_id(&host.hub.guests[gi].dimension) != dim {
+        if !self.player_teleport_allowed(player, (from_dim, from), (dim, at), "spectate") {
+            return;
+        }
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        let Some(gi) = host.hub.guests.iter().position(|guest| {
+            guest.conn == own
+                && guest.uuid == player
+                && guest.position == from
+                && Dim::from_id(&guest.dimension) == from_dim
+        }) else {
+            return;
+        };
+        if from_dim != dim {
             if !self.server_player_travel_allowed(
                 own,
                 dim,

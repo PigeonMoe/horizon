@@ -3426,9 +3426,9 @@ impl Game<'_> {
                 | MobEvent::SchoolSize { .. }
                 | MobEvent::PufferfishSting { .. } => {}
                 e @ MobEvent::LeashBreak { at: Some(_), .. } => self.leash_break_event(e),
-                MobEvent::LeashBreak { mob, drop, sound, .. } => {
-                    self.tick_break_leash(mob, drop, sound)
-                }
+                MobEvent::LeashBreak {
+                    mob, drop, sound, ..
+                } => self.tick_break_leash(mob, drop, sound),
                 MobEvent::NotifyLeashHolder { holder } => {
                     if let Some(m) = self.mobs.iter_mut().find(|m| m.id == holder) {
                         horizon_client::mobs::happy_ghast::notify_leash_holder(m);
@@ -4376,7 +4376,7 @@ impl Game<'_> {
                 Touch::Ignore => false,
                 Touch::Take => true,
                 // Inventory.add: a creative player takes what does not fit.
-                Touch::Give(stack) => self.add_stack_to_inventory(stack).is_none() || creative,
+                Touch::Give(stack) => self.collect_arrow_item(stack, [at.x, at.y, at.z]),
             };
             if taken {
                 let r = &mut self.world.random;
@@ -5929,7 +5929,11 @@ impl Game<'_> {
                         self.sleeping.is_some(),
                     )
                 });
-                if p.owner == Some(Who::Player) && taken && !cancel {
+                if p.owner == Some(Who::Player)
+                    && taken
+                    && !cancel
+                    && self.current_player_teleport_allowed(to, "ender_pearl")
+                {
                     // ThrownEnderpearl: 5% endermite where the player was
                     // (when monsters spawn), teleport, 5 damage.
                     if self.world.random.next_float() < 0.05

@@ -57,20 +57,26 @@ impl Game<'_> {
     }
 
     pub(in crate::game) fn drop_guest_items(&mut self, gi: usize, stacks: Vec<ItemStack>) {
-        let Some(host) = self.lan.as_ref() else {
+        let Some(guest) = self.lan.as_ref().and_then(|host| host.hub.guests.get(gi)) else {
             return;
         };
-        let g = &host.hub.guests[gi];
-        let eye = [
-            g.position[0],
-            g.position[1] + g.eye_height() - f64::from(0.3f32),
-            g.position[2],
-        ];
-        let (yaw, pitch) = (g.yaw, g.pitch);
+        self.drop_guest_items_at(
+            Self::player_drop_origin(guest.eye()),
+            [guest.yaw, guest.pitch],
+            stacks,
+        );
+    }
+
+    pub(in crate::game) fn drop_guest_items_at(
+        &mut self,
+        at: [f64; 3],
+        [yaw, pitch]: [f32; 2],
+        stacks: Vec<ItemStack>,
+    ) {
         let mut r = horizon_client::random_source::entity(); // the guest's Entity.random
         for stack in stacks {
             let v = horizon_client::entities::drop_motion(&mut r, yaw, pitch, false);
-            self.spawn_item(stack, eye, v, 40);
+            self.spawn_item(stack, at, v, 40);
         }
     }
 

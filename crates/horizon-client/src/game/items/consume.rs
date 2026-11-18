@@ -331,6 +331,7 @@ impl Game<'_> {
         if !free
             || liquid
             || avoid.is_some_and(|tag| states.iter().any(|&s| self.state_in_tag(tag, s)))
+            || !self.current_player_teleport_allowed(at, "random")
         {
             return false;
         }

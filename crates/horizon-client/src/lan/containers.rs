@@ -581,17 +581,20 @@ impl Hub {
         });
     }
 
-    /// `AbstractContainerMenu.sendAllDataToRemote` for the guest's open
-    /// block container `window`: every slot and the carried stack again.
+    /// `AbstractContainerMenu.sendAllDataToRemote`: every slot and the carried stack again.
     pub fn resend_menu(&mut self, conn: u32, window: i32, world: &World) {
         let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
             return;
         };
+        if window == 0 {
+            self.send_inventory(i);
+            return;
+        }
         let g = &self.guests[i];
         let Some(items) = g
             .menu
             .as_ref()
-            .filter(|m| window != 0 && m.window == window)
+            .filter(|m| m.window == window)
             .and_then(|m| m.slots.read(world, g))
         else {
             return;
@@ -751,36 +754,60 @@ impl Hub {
         let shulker = in_menu
             && shulker_box.is_some()
             && self.guests[i].menu.as_ref().map(|m| m.kind) == shulker_box;
-        let (drag, hidden, items, container_limits) = self.guests.update(i, |guest| {
-            let drag = if in_menu {
-                guest.menu.as_mut().and_then(|m| m.drag.take())
-            } else {
-                guest.drag.take()
-            };
-            let hidden = guest
-                .menu
-                .as_ref()
-                .filter(|_| in_menu)
-                .map_or_else(Vec::new, |m| m.hidden.clone());
-            let items = source.and_then(|s| s.read(world, guest));
-            if in_menu && items.is_none() {
-                return None;
-            }
-            let container_limits = source
-                .map(|source| source.stack_limits(world, items.as_ref().map_or(0, Vec::len)))
-                .unwrap_or_default();
-            Some((drag, hidden, items, container_limits))
-        })?;
+        let guest = &self.guests[i];
+        let hidden = guest
+            .menu
+            .as_ref()
+            .filter(|_| in_menu)
+            .map_or_else(Vec::new, |m| m.hidden.clone());
+        let items = source.and_then(|s| s.read(world, guest));
+        if in_menu && items.is_none() {
+            return None;
+        }
+        let container_limits = source
+            .map(|source| source.stack_limits(world, items.as_ref().map_or(0, Vec::len)))
+            .unwrap_or_default();
         Some(PreparedClick {
             i,
             in_menu,
             source,
             shulker,
-            drag,
+            drag: None,
             hidden,
             items,
             container_limits,
             sounds: Vec::new(),
+        })
+    }
+
+    /// An explicit nonempty drop the prepared menu would make. Leave the cursor,
+    /// inventory and drag untouched so the game can ask its policy before committing.
+    pub fn would_manually_drop(
+        &mut self,
+        prepared: &mut PreparedClick,
+        p: &play::ContainerClick,
+        rules: &dyn Rules,
+    ) -> bool {
+        let loop_context = &self.loop_context;
+        self.guests.update(prepared.i, |guest| {
+            let view = View {
+                guest,
+                container: prepared.items.as_deref_mut(),
+                shulker: prepared.shulker,
+                container_limits: Vec::new(),
+                hidden: &prepared.hidden,
+                sounds: Vec::new(),
+                loop_context,
+                slot_snapshot: Default::default(),
+            };
+            menu::ManualDrop::prepare(
+                &view,
+                i32::from(p.slot),
+                i32::from(p.button),
+                p.input,
+                rules,
+            )
+            .is_some_and(|drop| drop.nonempty(&view))
         })
     }
 
@@ -795,6 +822,11 @@ impl Hub {
     ) -> (Vec<ItemStack>, Vec<usize>) {
         let loop_context = &self.loop_context;
         self.guests.update(prepared.i, |guest| {
+            prepared.drag = if prepared.in_menu {
+                guest.menu.as_mut().and_then(|m| m.drag.take())
+            } else {
+                guest.drag.take()
+            };
             let mut view = View {
                 guest,
                 container: prepared.items.as_deref_mut(),

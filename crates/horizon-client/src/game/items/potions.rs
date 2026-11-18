@@ -1903,6 +1903,79 @@ impl Game<'_> {
             self.forget_entity(id);
         }
     }
+    fn harmful_potion_source(
+        &self,
+        owner: Option<Who>,
+        guest: Option<u32>,
+        effects: &[(&'static str, i32, i32)],
+    ) -> Option<u128> {
+        if self.native_authoritative()
+            && owner == Some(Who::Player)
+            && mod_api::__private::listened(mod_api::HookId::PlayerHarmfulPotionTarget)
+            && effects.iter().any(|(id, ..)| {
+                brewing::effect(id)
+                    .is_some_and(|effect| effect.category == brewing::Category::Harmful)
+            })
+        {
+            return self
+                .player_uuid_of(guest)
+                .map(horizon_client::lan::playerdata::ints_uuid);
+        }
+        None
+    }
+
+    fn harmful_potion_target_allowed(
+        &self,
+        player: u128,
+        target: u32,
+        kind: &str,
+        at: Vec3,
+    ) -> bool {
+        let mut cancel = false;
+        self.native_player_harmful_potion_target(
+            player,
+            self.dim.id(),
+            target,
+            kind,
+            [at.x, at.y, at.z],
+            &mut cancel,
+        );
+        !cancel
+    }
+
+    fn cloud_target_allowed(&self, player: u128, victim: Victim) -> bool {
+        match victim {
+            Victim::Player(FightWho::Host) => self.player.as_ref().is_some_and(|target| {
+                self.harmful_potion_target_allowed(
+                    player,
+                    target.entity_id as u32,
+                    "minecraft:player",
+                    target.position,
+                )
+            }),
+            Victim::Player(FightWho::Guest(conn)) => self
+                .lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .is_some_and(|target| {
+                    let [x, y, z] = target.position;
+                    self.harmful_potion_target_allowed(
+                        player,
+                        target.entity_id as u32,
+                        "minecraft:player",
+                        Vec3::new(x, y, z),
+                    )
+                }),
+            Victim::Mob(id) => self
+                .mobs
+                .iter()
+                .find(|mob| mob.id == id && mob.alive())
+                .is_some_and(|target| {
+                    self.harmful_potion_target_allowed(player, id, &target.kind.id, target.position)
+                }),
+        }
+    }
+
     /// `AreaEffectCloud.serverTick`: configured lifetime/radius changes and
     /// five-tick doses, with each victim's configured reapplication delay.
     /// False once the cloud is gone.
@@ -1965,6 +2038,7 @@ impl Game<'_> {
             inside.push((Victim::Player(p.who), p.position.x, p.position.z));
         }
         let effects = potion.effects.clone();
+        let player_source = self.harmful_potion_source(potion.owner, potion.guest, &effects);
         // Only mobs that at least one of the cloud's effects can affect are
         // taken (`allEffects.stream().anyMatch(entity::canBeAffected)`), so
         // the others neither become victims nor use up its radius.
@@ -1986,6 +2060,7 @@ impl Game<'_> {
             let (dx, dz) = (x - c.at[0], z - c.at[2]);
             if potion.victims.iter().any(|(v, _)| *v == victim)
                 || dx * dx + dz * dz > f64::from(c.radius * c.radius)
+                || player_source.is_some_and(|player| !self.cloud_target_allowed(player, victim))
             {
                 continue;
             }
@@ -2307,6 +2382,7 @@ impl Game<'_> {
         age: u32,
         owner: &PotionOwner,
         duration_scale: f64,
+        player_source: Option<u128>,
     ) {
         if let Some(p) = self.player.as_ref() {
             let w = f64::from(p.dimensions.width) / 2.0;
@@ -2318,7 +2394,16 @@ impl Game<'_> {
                     p.position.z + w,
                 ),
             );
-            if let Some(d2) = splash_distance_sqr(at, age, bounds) {
+            if let Some(d2) = splash_distance_sqr(at, age, bounds)
+                && player_source.is_none_or(|source| {
+                    self.harmful_potion_target_allowed(
+                        source,
+                        p.entity_id as u32,
+                        "minecraft:player",
+                        p.position,
+                    )
+                })
+            {
                 let intensity = 1.0 - d2.sqrt() / 4.0;
                 for (id, duration, amp) in effects {
                     let instant = brewing::effect(id).is_some_and(|e| e.instant);
@@ -2469,13 +2554,19 @@ impl Game<'_> {
         let duration_scale = f64::from(stack.potion_duration_scale());
         // Every player in range (`ThrownSplashPotion.applySplash` over
         // `LivingEntity`s, the players among them).
-        self.for_each_player(|g| g.splash_on_player(&effects, at, age, owner, duration_scale));
+        let player_source = self.harmful_potion_source(owner.who(), owner.guest, &effects);
+        self.for_each_player(|g| {
+            g.splash_on_player(&effects, at, age, owner, duration_scale, player_source);
+        });
         // Mobs take the instant effects (undead invert healing and harming).
         let undead = &self.stations().enchantments.entity_tags;
         let mut hits = Vec::new();
         for (i, m) in self.mobs.iter().enumerate() {
             if m.alive()
                 && let Some(d2) = splash_distance_sqr(at, age, m.bounds())
+                && player_source.is_none_or(|source| {
+                    self.harmful_potion_target_allowed(source, m.id, &m.kind.id, m.position)
+                })
             {
                 let inverted = undead
                     .get("minecraft:inverted_healing_and_harm")

@@ -123,3 +123,68 @@ fn projectile_restore_entries_keep_the_bound_arrow() {
         }
     }
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_guest_arrow_pickup_veto_keeps_both_arrow_and_inventory() {
+    use mod_api::{Flow, Hooks, ModEntry, PlayerPickupArrowPreEvent, ServerHost};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Veto(Arc<AtomicBool>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Veto {
+        fn player_pickup_arrow_pre(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut PlayerPickupArrowPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player, 12);
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.position, [3.75, 64.0, 5.0]);
+            assert_eq!(event.item, "minecraft:arrow");
+            if self.0.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let canceled = Arc::new(AtomicBool::new(true));
+    let mods = vec![ModEntry::new(
+        "arrow_probe",
+        Box::new(Veto(canceled.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let mut shot = arrow(71, [3.75, 64.0, 5.0]);
+            let state = shot.arrow.as_mut().unwrap();
+            state.in_ground = true;
+            state.pickup = horizon_client::arrows::Pickup::Allowed;
+            game.creatures.projectiles.push(shot);
+            let arrow_count = |game: &Game<'_>| {
+                game.lan
+                    .as_ref()
+                    .unwrap()
+                    .hub
+                    .guest(12)
+                    .unwrap()
+                    .inventory
+                    .iter()
+                    .flatten()
+                    .filter(|stack| stack.item.as_ref() == "minecraft:arrow")
+                    .map(|stack| stack.count)
+                    .sum::<u32>()
+            };
+            game.guest_arrows(0);
+            assert_eq!(game.creatures.projectiles.len(), 1);
+            assert_eq!(arrow_count(game), 0);
+
+            canceled.store(false, Ordering::Relaxed);
+            game.guest_arrows(0);
+            assert!(game.creatures.projectiles.is_empty());
+            assert_eq!(arrow_count(game), 1);
+        });
+    });
+}

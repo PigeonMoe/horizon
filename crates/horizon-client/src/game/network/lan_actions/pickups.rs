@@ -210,12 +210,9 @@ impl Game<'_> {
                 Touch::Ignore => false,
                 Touch::Take => true,
                 // Inventory.add: a creative player takes what does not fit.
-                Touch::Give(stack) => {
-                    self.as_guest(conn, |g| g.add_stack_to_inventory(stack))
-                        .flatten()
-                        .is_none()
-                        || creative
-                }
+                Touch::Give(stack) => self
+                    .as_guest(conn, |game| game.collect_arrow_item(stack, [p.x, p.y, p.z]))
+                    .unwrap_or(false),
             };
             if taken {
                 picked.push(shot.clone());

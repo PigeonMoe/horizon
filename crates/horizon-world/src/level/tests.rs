@@ -340,6 +340,12 @@ impl LevelAccess for TestLevel {
         self.lava_asks.borrow_mut().push((state, pos, face));
         *ignites = self.lava_ignites.get(&state).copied();
     }
+    fn has_sponge_absorb_policy(&self) -> bool {
+        !self.guarded.is_empty()
+    }
+    fn allow_sponge_absorb(&self, _sponge: BlockPos, pos: BlockPos) -> bool {
+        !self.guarded.contains(&pos)
+    }
     fn allow_block_burn(&self, pos: BlockPos) -> bool {
         !self.unburnable.contains(&pos)
     }
@@ -1394,6 +1400,24 @@ fn torch_and_door_halves_break_with_support() {
         air,
         "upper door half goes with the lower"
     );
+}
+
+#[test]
+fn sponge_leaves_protected_water_but_reaches_water_beyond_it() {
+    let mut w = world!();
+    let sponge = BlockPos::new(0, 1, 0);
+    let protected = BlockPos::new(1, 1, 0);
+    let beyond = BlockPos::new(2, 1, 0);
+    let water = w.id("water", &[("level", "0")]);
+    w.put(protected, water);
+    w.put(beyond, water);
+    w.level.guarded.insert(protected);
+
+    let dry = w.id("sponge", &[]);
+    assert!(w.set(sponge, dry));
+    assert_eq!(w.get(protected), water);
+    assert_eq!(w.get(beyond), w.b().air());
+    assert_eq!(w.get(sponge), w.id("wet_sponge", &[]));
 }
 
 #[test]

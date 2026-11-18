@@ -2,6 +2,28 @@
 use super::*;
 
 impl Menu {
+    /// Whether this click would explicitly remove a nonempty stack into the world.
+    pub fn would_drop_from_click(&self, env: &Env, slot: i32, button: i32, input: Input) -> bool {
+        if self.quick_crafting() {
+            return false;
+        }
+        match input {
+            Input::Pickup | Input::QuickMove if slot == -999 && matches!(button, 0 | 1) => self
+                .state
+                .carried
+                .as_ref()
+                .is_some_and(|stack| stack.count > 0),
+            Input::Throw if self.state.carried.is_none() => usize::try_from(slot)
+                .ok()
+                .filter(|&slot| slot < self.slot_count())
+                .is_some_and(|slot| {
+                    self.slot(slot).is_some_and(|stack| stack.count > 0)
+                        && self.may_pickup(env, slot)
+                }),
+            _ => false,
+        }
+    }
+
     pub(super) fn quick_replace(&self, s: usize, stack: &ItemStack, env: &Env) -> bool {
         match self.slot(s) {
             None => true,

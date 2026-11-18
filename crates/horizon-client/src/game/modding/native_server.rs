@@ -50,6 +50,41 @@ use std::sync::{
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+fn title_packets(title: &Text, subtitle: &Text, [fade_in, stay, fade_out]: [i32; 3]) -> Vec<C> {
+    vec![
+        C::SetTitlesAnimation(play::TitlesAnimation {
+            fade_in,
+            stay,
+            fade_out,
+        }),
+        C::SetSubtitleText(play::Text {
+            text: component_nbt(&subtitle.component()),
+        }),
+        C::SetTitleText(play::Text {
+            text: component_nbt(&title.component()),
+        }),
+    ]
+}
+
+#[cfg(test)]
+#[test]
+fn title_packets_set_subtitle_before_starting_animation() {
+    let title = Text::literal("Private Area");
+    let subtitle = Text::literal("Occupied by Alex");
+    let packets = title_packets(&title, &subtitle, [10, 40, 10]);
+    let [
+        C::SetTitlesAnimation(times),
+        C::SetSubtitleText(sent_subtitle),
+        C::SetTitleText(sent_title),
+    ] = packets.as_slice()
+    else {
+        panic!("incorrect title packet order")
+    };
+    assert_eq!([times.fade_in, times.stay, times.fade_out], [10, 40, 10]);
+    assert_eq!(sent_subtitle.text, component_nbt(&subtitle.component()));
+    assert_eq!(sent_title.text, component_nbt(&title.component()));
+}
+
 /// A sidebar a server mod shows one player (`native_sidebar`): its title and
 /// up to 15 lines, top first, each a text on the left and, where the score's
 /// number would be, an optional text on the right.
@@ -1275,6 +1310,59 @@ impl Game<'_> {
         });
         self.native_send(uuid, packet)
     }
+    /// Send timing and subtitle before the title starts the animation.
+    pub(super) fn player_title(
+        &mut self,
+        player: PlayerRef,
+        title: &Text,
+        subtitle: &Text,
+        times: [i32; 3],
+    ) -> bool {
+        let Some(uuid) = self.message_player_uuid(player) else {
+            return false;
+        };
+        self.native_send_all(uuid, title_packets(title, subtitle, times))
+    }
+
+    pub(super) fn player_particle(
+        &mut self,
+        player: PlayerRef,
+        options: &horizon_client::particles::ParticleOptions,
+        state: Option<horizon_world::registry::BlockStateId>,
+        at: [f64; 3],
+    ) -> bool {
+        let Some(uuid) = self.message_player_uuid(player) else {
+            return false;
+        };
+        let state_ok = |id| self.pack.assets.registry.state(id).is_some();
+        if !super::native_hooks::mod_particles_ok(options, state, state_ok, at, [0.0; 3], 0.0) {
+            return false;
+        }
+        let Some(particle) = self.network_particle(options, state) else {
+            return false;
+        };
+        if particle.horizon_only()
+            && !self
+                .online_player_record(player)
+                .is_some_and(Guest::is_horizon)
+        {
+            return false;
+        }
+        self.native_send(
+            uuid,
+            C::LevelParticles(play::LevelParticles {
+                particle,
+                override_limiter: false,
+                always_show: false,
+                pos: at,
+                dist: [0.0; 3],
+                max_speed: [0.0; 3],
+                count: 1,
+                randomization: 0,
+            }),
+        )
+    }
+
     /// Sends `packet` to that player, also when they are the acting player
     /// (their packets then go after the hook); false when they aren't on.
     pub(super) fn native_send(&mut self, uuid: u128, packet: C) -> bool {

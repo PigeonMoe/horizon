@@ -918,6 +918,76 @@ fn is_container_click_button(button: i32) -> bool {
     button == 0 || button == 1
 }
 
+/// A stack a hub menu can remove for an explicit cursor or slot drop.
+pub(super) enum ManualDrop {
+    Cursor,
+    Slot(usize, ItemStack),
+}
+
+impl ManualDrop {
+    pub(super) fn prepare(
+        view: &View<'_>,
+        slot: i32,
+        button: i32,
+        mode: i32,
+        rules: &dyn Rules,
+    ) -> Option<Self> {
+        match mode {
+            input::PICKUP if slot == -999 && is_container_click_button(button) => {
+                view.guest.carried.as_ref().map(|_| Self::Cursor)
+            }
+            input::THROW if rules.can_drop_items() && view.guest.carried.is_none() => {
+                let slot = usize::try_from(slot).ok()?;
+                if !view.enabled(slot) {
+                    return None;
+                }
+                let stack = view.get(slot)?;
+                if !view.may_pickup_item(slot, Some(&stack), rules) {
+                    return None;
+                }
+                Some(Self::Slot(slot, stack))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn nonempty(&self, view: &View<'_>) -> bool {
+        match self {
+            Self::Cursor => view
+                .guest
+                .carried
+                .as_ref()
+                .is_some_and(|stack| stack.count > 0),
+            Self::Slot(_, stack) => stack.count > 0,
+        }
+    }
+
+    fn take(self, view: &mut View<'_>, button: i32) -> ItemStack {
+        let (slot, mut stack, one) = match self {
+            Self::Cursor => (
+                None,
+                view.guest.carried.take().expect("prepared cursor"),
+                button == 1,
+            ),
+            Self::Slot(slot, stack) => (Some(slot), stack, button == 0),
+        };
+        let remainder = if one && stack.count > 1 {
+            let mut remainder = stack.clone();
+            remainder.count -= 1;
+            stack.count = 1;
+            Some(remainder)
+        } else {
+            None
+        };
+        if let Some(slot) = slot {
+            view.set(slot, remainder);
+        } else {
+            view.guest.carried = remainder;
+        }
+        stack
+    }
+}
+
 /// Apply one click; returns the stacks thrown out and the slots changed.
 pub fn click(
     view: &mut View,
@@ -937,18 +1007,8 @@ pub fn click(
             // Invalid container click buttons must not move the slot or cursor.
             input::PICKUP | input::QUICK_MOVE if !is_container_click_button(button) => {}
             input::PICKUP | input::QUICK_MOVE if slot == -999 => {
-                if mode == input::PICKUP
-                    && let Some(mut carried) = view.guest.carried.take()
-                {
-                    if button == 1 && carried.count > 1 {
-                        let mut one = carried.clone();
-                        one.count = 1;
-                        carried.count -= 1;
-                        view.guest.carried = Some(carried);
-                        drops.push(one);
-                    } else {
-                        drops.push(carried);
-                    }
+                if let Some(drop) = ManualDrop::prepare(view, slot, button, mode, rules) {
+                    drops.push(drop.take(view, button));
                 }
             }
             input::PICKUP => pickup(view, slot, button, rules),
@@ -981,28 +1041,8 @@ pub fn click(
                 }
             }
             input::THROW => {
-                if rules.can_drop_items()
-                    && view.guest.carried.is_none()
-                    && let Ok(i) = usize::try_from(slot)
-                    && view.enabled(i)
-                    // `Slot.safeTake`: a slot that withholds its stack throws
-                    // nothing, whatever the client asked for.
-                    && view.may_pickup(i, rules)
-                    && let Some(mut stack) = view.get(i)
-                {
-                    // doClick's THROW takes one item for button 0 and the
-                    // whole stack for any other button.
-                    let amount = if button == 0 { 1 } else { stack.count };
-                    if amount >= stack.count {
-                        drops.push(stack);
-                        view.set(i, None);
-                    } else {
-                        let mut one = stack.clone();
-                        one.count = amount;
-                        stack.count -= amount;
-                        view.set(i, Some(stack));
-                        drops.push(one);
-                    }
+                if let Some(drop) = ManualDrop::prepare(view, slot, button, mode, rules) {
+                    drops.push(drop.take(view, button));
                 }
             }
             input::PICKUP_ALL => pickup_all(view, slot, button, rules),
@@ -1650,6 +1690,36 @@ pub(crate) mod tests {
         );
         assert!(drops.is_empty() && changed.is_empty());
         assert_eq!(view.get(0).unwrap().count, 10);
+    }
+
+    #[test]
+    fn preparing_explicit_drops_leaves_the_cursor_and_slot_in_place() {
+        let mut guest = guest();
+        let stone = Some(ItemStack::new("minecraft:stone", 3));
+        let mut chest = vec![stone.clone()];
+        guest.carried = stone.clone();
+        let mut view = View {
+            guest: &mut guest,
+            container: Some(&mut chest),
+            shulker: false,
+            container_limits: Vec::new(),
+            hidden: &[],
+            sounds: Vec::new(),
+            slot_snapshot: Default::default(),
+            loop_context: &crate::test_resources::loop_context(
+                horizon_world::native_load_context::LoopSide::Server,
+            ),
+        };
+        assert!(ManualDrop::prepare(&view, 0, 0, input::THROW, &SwapRules).is_none());
+        let cursor = ManualDrop::prepare(&view, -999, 1, input::PICKUP, &SwapRules).unwrap();
+        assert_eq!(view.guest.carried, stone);
+        assert_eq!(cursor.take(&mut view, 1).count, 1);
+        assert_eq!(view.guest.carried.take().unwrap().count, 2);
+
+        let slot = ManualDrop::prepare(&view, 0, 0, input::THROW, &SwapRules).unwrap();
+        assert_eq!(view.get(0), stone);
+        assert_eq!(slot.take(&mut view, 0).count, 1);
+        assert_eq!(view.get(0).unwrap().count, 2);
     }
 
     /// A double-click's collect walks the slots in the direction the button

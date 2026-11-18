@@ -535,6 +535,13 @@ pub trait LevelAccess: BlockEntityNeighbors {
     fn allow_moisture_change(&self, _pos: BlockPos, _from: i32, _to: i32) -> bool {
         true
     }
+    fn has_sponge_absorb_policy(&self) -> bool {
+        false
+    }
+    /// Whether this sponge may change a candidate found in its water traversal.
+    fn allow_sponge_absorb(&self, _sponge: BlockPos, _pos: BlockPos) -> bool {
+        true
+    }
     fn observe_sponge_absorb(&self, _pos: BlockPos) {}
     fn allow_block_fade(&self, _pos: BlockPos, _from: BlockStateId, _to: BlockStateId) -> bool {
         true
