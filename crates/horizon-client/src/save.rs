@@ -38,7 +38,9 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     ticks::{SavedTick, TickPriority, TickTypeId},
 };
-use horizon_mod_runtime::attachments::{ATTACHMENTS_KEY, attachment_compound};
+use horizon_mod_runtime::attachments::{
+    ATTACHMENTS_KEY, AttachmentError, Attachments, attachment_compound,
+};
 use horizon_world::worldgen::blending::BlendingData;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -3420,6 +3422,47 @@ pub fn write_world_gen_settings(dir: &Path, seed: i64, options: WorldGen) -> Res
     write_world_gen_settings_with(dir, seed, options, None, None, None)
 }
 include!("save/preset_generation.rs");
+
+const SERVER_ATTACHMENTS_KEY: &str = "horizon:server_attachments";
+
+/// Persistent mod storage of the save as a whole, shared by its dimensions.
+#[derive(Clone, Debug, Default)]
+pub enum ServerAttachments {
+    #[default]
+    Missing,
+    Saved(Tag),
+    Loaded(Attachments),
+}
+
+impl ServerAttachments {
+    fn read(tag: Option<&Tag>) -> Self {
+        tag.cloned().map_or(Self::Missing, Self::Saved)
+    }
+
+    pub fn contents(&mut self) -> std::result::Result<&mut Attachments, AttachmentError> {
+        match self {
+            Self::Missing => *self = Self::Loaded(Attachments::default()),
+            Self::Saved(Tag::Compound(data)) => {
+                *self = Self::Loaded(Attachments::from_nbt(std::mem::take(data)));
+            }
+            Self::Saved(_) => return Err(AttachmentError::InvalidNamespace),
+            Self::Loaded(_) => {}
+        }
+        match self {
+            Self::Loaded(attachments) => Ok(attachments),
+            _ => unreachable!(),
+        }
+    }
+
+    fn saved(&self) -> Option<Tag> {
+        match self {
+            Self::Missing => None,
+            Self::Loaded(attachments) => Some(Tag::Compound(attachments.to_nbt())),
+            Self::Saved(tag) => Some(tag.clone()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Level {
     pub name: String,
@@ -3499,6 +3542,8 @@ pub struct Level {
     pub enabled_features: std::sync::Arc<[String]>,
     /// The code mods (`fml.LoadingModList` beside `Data`), then the content mods (`horizon.ContentModList`), the world was saved with; `None` without either list.
     pub saved_mods: Option<Vec<level_mods::ModRecord>>,
+    /// Server-only attachments owned by this save, independent of its active dimension.
+    pub server_attachments: ServerAttachments,
     /// Game rule values by name without namespace (`keep_inventory`, ...).
     pub game_rules: BTreeMap<String, i32>,
     /// Definitions used by this world session.
@@ -3640,6 +3685,7 @@ impl Level {
             level.enabled_features = flags.iter().filter_map(|f| text(Some(f))).collect();
         }
         level.saved_mods = level_mods::saved(&root);
+        level.server_attachments = ServerAttachments::read(root.get(SERVER_ATTACHMENTS_KEY));
         if let Some(packs) = data.get("DataPacks") {
             let ids = |key| match packs.get(key) {
                 Some(Tag::List(ids)) => ids.iter().filter_map(|id| text(Some(id))).collect(),
@@ -4451,6 +4497,9 @@ impl Level {
             self.write_player(dir)?;
         }
         put(&mut root, "Data", data);
+        if let Some(attachments) = self.server_attachments.saved() {
+            put(&mut root, SERVER_ATTACHMENTS_KEY, attachments);
+        }
         write_dat(&dir.join("level.dat"), root)?;
         Ok(())
     }
@@ -8954,6 +9003,31 @@ mod tests {
         );
         assert!(!file.exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn invalid_server_attachments_stay_in_level_dat_without_becoming_an_empty_store() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("level.dat");
+        let invalid = Tag::Long(42);
+        write_dat(
+            &file,
+            Tag::compound([
+                ("Data", Tag::Compound(Compound::new())),
+                (SERVER_ATTACHMENTS_KEY, invalid.clone()),
+            ]),
+        )
+        .unwrap();
+        let mut level = Level::read(root.path()).unwrap();
+        assert!(matches!(
+            level.server_attachments.contents(),
+            Err(AttachmentError::InvalidNamespace)
+        ));
+        level.write_without_player(root.path()).unwrap();
+        assert_eq!(
+            read_dat(&file).unwrap().get(SERVER_ATTACHMENTS_KEY),
+            Some(&invalid)
+        );
     }
 
     /// A level id never names a folder outside the world's `dimensions` folder, and no two ids

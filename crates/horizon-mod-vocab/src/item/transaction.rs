@@ -142,7 +142,8 @@ pub trait HostTransaction: ServerHost {
     ///
     /// Covered: block entities (item slots, saved compound, custom name and attachments), cauldrons,
     /// players' inventories and cursors, entities' inventories
-    /// ([`ItemPlace::EntitySlot`](crate::ItemPlace::EntitySlot)) and item entities' stacks.
+    /// ([`ItemPlace::EntitySlot`](crate::ItemPlace::EntitySlot)), item entities' stacks and
+    /// the save-wide attachment map (`Holder::Server`).
     fn transaction<T, E>(
         &mut self,
         f: impl FnOnce(&mut Self, &Transaction) -> Result<T, E>,

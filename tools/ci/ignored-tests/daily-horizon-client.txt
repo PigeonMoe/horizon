@@ -236,6 +236,7 @@ horizon-client game::transaction_entities_tests::exhausted_ids_stop_the_tick_spa
 horizon-client game::transaction_entities_tests::ids_never_go_back_and_a_stale_handle_names_no_later_entity lib daily child-process
 horizon-client game::transaction_entities_tests::late_id_kinds_spawned_then_aborted_are_removed lib daily child-process
 horizon-client game::transaction_entities_tests::outside_a_transaction_joins_and_leaves_are_told_at_the_call lib daily child-process
+horizon-client game::transactions::mod_capability_tests::server_attachments_follow_the_save_and_rollback_across_dimensions lib daily resources
 horizon-client game::viewed_worlds::switch::tests::a_level_opened_after_login_is_forgotten_once_left lib daily resources
 horizon-client game::visibility_unwind_tests::visibility_listener_unwind_does_not_block_an_outside_save lib daily child-process
 horizon-client game::wake_time::tests::a_later_listener_reads_and_replaces_the_earlier_adjustment lib daily resources

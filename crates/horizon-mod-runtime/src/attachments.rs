@@ -131,7 +131,7 @@ pub fn attachment_compound(tag: Option<&Tag>) -> Result<Option<&Compound>, Attac
     }
 }
 
-/// A server holder in the host's current dimension.
+/// A server holder. Most selectors refer to the host's current dimension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 // no wire: runtime-owned selector; mod_api supplies its explicit tagged Wire codec.
@@ -143,6 +143,9 @@ pub enum Holder {
     Level,
     /// A detached player's map, available only during its clone hook.
     OriginalPlayer(u64),
+    /// The active save's server-wide map, available from every dimension on
+    /// ServerHost. It participates in item transactions and never syncs to clients.
+    Server,
 }
 
 /// Whether borrowing a map may create publication authority for a new value.
@@ -306,6 +309,14 @@ impl<H: AttachmentHost + ?Sized> AttachmentStore for H {
         if matches!(holder, Holder::OriginalPlayer(_)) {
             return Err(AttachmentError::MissingHolder);
         }
+        if holder == Holder::Server {
+            if policy.sync {
+                return Err(AttachmentError::InvalidSyncPolicy);
+            }
+            if policy.copy_on_death {
+                return Err(AttachmentError::InvalidCopyPolicy);
+            }
+        }
         Attachments::store(
             self.attachments(holder, AttachmentAccess::Store)?,
             namespace,
@@ -343,6 +354,9 @@ impl<H: AttachmentHost + ?Sized> AttachmentStore for H {
         namespace: &str,
         name: &str,
     ) -> Result<(), AttachmentError> {
+        if holder == Holder::Server {
+            return Err(AttachmentError::InvalidSyncPolicy);
+        }
         Attachments::queue_sync(
             self.attachments(holder, AttachmentAccess::Existing)?,
             namespace,

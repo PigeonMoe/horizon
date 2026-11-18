@@ -1622,7 +1622,7 @@ impl crate::wire::Wire for crate::TicketOwner {
 }
 #[allow(unreachable_patterns, unused_variables)]
 impl crate::wire::Wire for crate::Holder {
-    layout_fields!("tag" => u32, "0:Entity" => u32, "1:Player" => u128, "2:BlockEntity" => [i32;3], "3:Chunk" => [i32;2], "4:Level" => (), "5:OriginalPlayer" => u64);
+    layout_fields!("tag" => u32, "0:Entity" => u32, "1:Player" => u128, "2:BlockEntity" => [i32;3], "3:Chunk" => [i32;2], "4:Level" => (), "5:OriginalPlayer" => u64, "6:Server" => ());
     const LAYOUT_SEED: u64 = crate::wire::layout_name("Holder");
     const MIN: usize = 4;
     fn put(&self, out: &mut crate::wire::Writer) {
@@ -1648,6 +1648,7 @@ impl crate::wire::Wire for crate::Holder {
                 out.put(&5u32);
                 out.put(f0);
             }
+            Self::Server => out.put(&6u32),
             _ => {
                 out.fail(crate::wire::WireError::Invalid("unknown Holder"));
             }
@@ -1676,6 +1677,7 @@ impl crate::wire::Wire for crate::Holder {
                 out.put_owned(5u32);
                 out.put_owned(f0);
             }
+            Self::Server => out.put_owned(6u32),
             _ => {
                 out.fail(crate::wire::WireError::Invalid("unknown Holder"));
             }
@@ -1692,6 +1694,7 @@ impl crate::wire::Wire for crate::Holder {
                 3 => Self::Chunk(input.take()?),
                 4 => Self::Level,
                 5 => Self::OriginalPlayer(input.take()?),
+                6 => Self::Server,
                 tag => return Err(crate::wire::WireError::Tag(tag)),
             })
         })

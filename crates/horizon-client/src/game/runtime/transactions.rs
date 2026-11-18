@@ -2404,6 +2404,53 @@ mod mod_capability_tests {
     use mod_platform::__private::part_tests::{CHEMICALS, ChemTank, Chemical};
     use std::sync::Arc;
 
+    #[test]
+    #[ignore = "daily"]
+    fn server_attachments_follow_the_save_and_rollback_across_dimensions() {
+        use mod_api::{AttachmentCodec, AttachmentType, Holder};
+
+        const SHARED: AttachmentType<Compound> = AttachmentType {
+            namespace: "shared-test",
+            name: "inventory",
+            default: Compound::new,
+            codec: Some(AttachmentCodec {
+                encode: |value| Ok(value.clone()),
+                decode: |value| Ok(value.clone()),
+            }),
+            copy_on_death: false,
+            sync: false,
+        };
+        let value = |amount| Compound::from([("count".into(), Tag::Int(amount))]);
+        with_game(|game| {
+            let root = game.save.root.clone();
+            game.world_root = root.clone();
+            SHARED.set(game, Holder::Server, value(1)).unwrap();
+            SHARED.set(game, Holder::Level, value(5)).unwrap();
+            game.enter_level(crate::game::Dim::Nether).unwrap();
+            assert_eq!(SHARED.get_existing(game, Holder::Level), Ok(None));
+            assert_eq!(SHARED.get_existing(game, Holder::Server), Ok(Some(value(1))));
+            assert!(!game.world.attachment_syncs.contains(&Holder::Server));
+
+            let reverted = game.transaction(|host, _| {
+                SHARED.set(host, Holder::Server, value(2)).unwrap();
+                host.transaction(|host, _| SHARED.set(host, Holder::Server, value(3)))
+                    .unwrap();
+                Err::<(), _>(())
+            });
+            assert!(reverted.is_err());
+            assert_eq!(SHARED.get_existing(game, Holder::Server), Ok(Some(value(1))));
+            game.transaction(|host, _| SHARED.set(host, Holder::Server, value(4)))
+                .unwrap();
+
+            game.enter_level(crate::game::Dim::Overworld).unwrap();
+            assert_eq!(SHARED.get_existing(game, Holder::Level), Ok(Some(value(5))));
+            assert_eq!(SHARED.get_existing(game, Holder::Server), Ok(Some(value(4))));
+            game.level.write_without_player(&root).unwrap();
+            game.level = horizon_client::save::Level::read(&root).unwrap();
+            assert_eq!(SHARED.get_existing(game, Holder::Server), Ok(Some(value(4))));
+        });
+    }
+
     /// Two mods sharing a capability one of them defines, as Mekanism's chemicals are shared
     /// through its API: the first's tank and the second's vat each answer `CHEMICALS`, and a
     /// move between them in a committed transaction moves the chemical, kept in their saved

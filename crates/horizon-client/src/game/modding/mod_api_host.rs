@@ -124,6 +124,9 @@ impl Game<'_> {
         if matches!(holder, mod_api::Holder::OriginalPlayer(_)) {
             return self.attachment_slot(holder, access);
         }
+        if holder == mod_api::Holder::Server {
+            return self.attachment_map_quiet(holder, access);
+        }
         if self.client_attachment_entity_exists(holder) {
             self.initialize_entity_on_access(holder);
         }
@@ -216,6 +219,12 @@ impl Game<'_> {
         access: AttachmentAccess,
     ) -> Result<&mut mod_api::Attachments, mod_api::AttachmentError> {
         use mod_api::AttachmentError;
+        if holder == mod_api::Holder::Server {
+            if !self.native_authoritative() || self.world_root.as_os_str().is_empty() {
+                return Err(AttachmentError::MissingHolder);
+            }
+            return self.level.server_attachments.contents();
+        }
         if let mod_api::Holder::Entity(id) = holder {
             if self.entity_initialization.active != Some(holder) {
                 use super::entity_residency::SlotAccess;
