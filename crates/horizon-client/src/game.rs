@@ -936,7 +936,7 @@ impl ResizeState {
 struct TickScratch {
     ticking: Vec<(i32, i32)>,
     inside: Vec<BlockPos>,
-    standing: Vec<(BlockPos, bool, f64)>,
+    standing: Vec<(BlockPos, bool, f64, u32)>,
     boat_cells: Vec<BlockPos>,
     touched: Vec<BlockPos>,
     sensing: Vec<BlockPos>,

@@ -1287,6 +1287,10 @@ pub trait LevelAccess: BlockEntityNeighbors {
     fn count_entities(&self, _area: Aabb, _query: EntityQuery) -> usize {
         0
     }
+    /// Whether the entity already known to be touching a block may activate it.
+    fn allow_entity_block_trigger(&self, _pos: BlockPos, _entity: u32) -> bool {
+        true
+    }
     /// Candidates whose contact may activate the specified block.
     fn count_block_triggers(
         &self,
@@ -1942,7 +1946,20 @@ impl Behaviours {
         feet_y: f64,
     ) {
         self.sim(level, ticks)
-            .big_dripleaf_entity_inside(pos, on_ground, feet_y);
+            .big_dripleaf_entity_inside(pos, on_ground, feet_y, None);
+    }
+    /// A leaf that can tilt consults the identified entity's trigger permission.
+    pub fn entity_on_big_dripleaf_by<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        on_ground: bool,
+        feet_y: f64,
+        entity: u32,
+    ) {
+        self.sim(level, ticks)
+            .big_dripleaf_entity_inside(pos, on_ground, feet_y, Some(entity));
     }
     /// `BigDripleafBlock.onProjectileHit`: true when a projectile hit a leaf.
     /// Unlike entityInside, this tilts powered leaves too.

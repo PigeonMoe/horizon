@@ -119,6 +119,7 @@ horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::bed
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_missing_bed_death_and_bed_rule_keep_their_distinct_literal_pairs lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_wake_counters_match_the_same_reasons_without_listeners lib daily game-boot
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::redstone_activation_checks_real_players_and_other_entities_per_trigger lib daily resources
+horizon-client game::native_hooks::block_trigger_entity_pre::tests::a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one lib daily resources
 horizon-client game::native_hooks::player_leash_change_pre::tests::knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads lib daily resources
 horizon-client game::native_hooks::runtime_environment::server_data_version_tests::host_data_version_matches_a_freshly_saved_chunk lib daily resources
 horizon-client game::native_menu_places::tests::a_backing_names_why_it_refuses lib daily resources

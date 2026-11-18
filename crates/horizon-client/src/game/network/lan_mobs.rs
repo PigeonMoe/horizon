@@ -306,9 +306,9 @@ impl Game<'_> {
                 .map(|hook| (hook.id(), hook.bounds(), hook.applies_block_effects())),
         );
     }
-    /// The same guests' feet and whether they stand on the ground, for the
+    /// The same guests' entity IDs, feet and whether they stand on the ground, for the
     /// blocks that also ask that (`BigDripleafBlock.canEntityTilt`).
-    pub(super) fn lan_guest_feet(&self) -> Vec<([f64; 3], bool)> {
+    pub(super) fn lan_guest_feet(&self) -> Vec<(u32, [f64; 3], bool)> {
         let Some(host) = self.lan.as_ref() else {
             return Vec::new();
         };
@@ -316,7 +316,7 @@ impl Game<'_> {
             .guests
             .iter()
             .filter(|g| host.hub.here(g) && g.loaded && !g.dead && !g.spectator())
-            .map(|g| (g.position, g.on_ground))
+            .map(|g| (g.entity_id as u32, g.position, g.on_ground))
             .collect()
     }
 

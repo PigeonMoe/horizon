@@ -16,6 +16,53 @@ impl GameLevel<'_> {
         self.fire_block_trigger_entity_pre(call);
     }
 
+    fn block_trigger_allowed(
+        &self,
+        pos: BlockPos,
+        entity: u32,
+        source: Option<BlockTriggerPlayer<'_>>,
+    ) -> bool {
+        let (player, name, permission_level) = source
+            .filter(|source| source.uuid.is_some())
+            .map_or((None, "", 0), |source| {
+                (source.uuid, source.name, source.permission_level)
+            });
+        let mut cancel = false;
+        self.native_block_trigger_entity_pre(mod_api::__private::BlockTriggerEntityPreCall {
+            dimension: self.dimension,
+            pos,
+            entity,
+            player,
+            name,
+            permission_level,
+            cancel: &mut cancel,
+        });
+        !cancel
+    }
+
+    pub(in crate::game) fn allow_known_block_trigger(&self, pos: BlockPos, entity: u32) -> bool {
+        let source = self
+            .block_trigger_player
+            .filter(|source| source.entity == entity)
+            .or_else(|| {
+                let hub = self.lan_hub?;
+                let guest = hub.guests.simulation_iter().find(|guest| {
+                    guest.entity_id as u32 == entity
+                        && hub.here(guest)
+                        && guest.loaded
+                        && !guest.dead
+                        && !guest.spectator()
+                })?;
+                Some(BlockTriggerPlayer {
+                    entity,
+                    uuid: Some(guest.uuid),
+                    name: &guest.name,
+                    permission_level: guest.permission,
+                })
+            });
+        self.block_trigger_allowed(pos, entity, source)
+    }
+
     pub(in crate::game) fn count_allowed_block_triggers(
         &self,
         pos: BlockPos,
@@ -25,23 +72,9 @@ impl GameLevel<'_> {
     ) -> usize {
         let mut count = 0;
         let mut visit = |entity, player: Option<BlockTriggerPlayer<'_>>| {
-            let (player, name, permission_level) = player
-                .filter(|source| source.uuid.is_some())
-                .map_or((None, "", 0), |source| {
-                    (source.uuid, source.name, source.permission_level)
-                });
-            let mut cancel = false;
-            self.native_block_trigger_entity_pre(mod_api::__private::BlockTriggerEntityPreCall {
-                dimension: self.dimension,
-                pos,
-                entity,
-                player,
-                name,
-                permission_level,
-                cancel: &mut cancel,
-            });
-            count += usize::from(!cancel);
-            mode == BlockTriggerCount::First || (mode == BlockTriggerCount::Any && !cancel)
+            let allowed = self.block_trigger_allowed(pos, entity, player);
+            count += usize::from(allowed);
+            mode == BlockTriggerCount::First || (mode == BlockTriggerCount::Any && allowed)
         };
         let hit = |(min, max): ([f64; 3], [f64; 3])| {
             area.intersects(Aabb::new(
@@ -132,7 +165,7 @@ impl GameLevel<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::game::native_entity_refs::tests::{bind_local_player, with_game};
+    use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player, with_game};
     use horizon_client::{
         chunk::Chunk,
         mobs::Mob,
@@ -163,6 +196,78 @@ mod tests {
                 Flow::Continue
             }
         }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "trigger-guard",
+            Box::new(Guard(heard.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let feet = Vec3::new(8.5, 64.9375, 8.5);
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let mut player = PlayerMotion::new(game.motion, feet).unwrap();
+                player.ground.on_ground = true;
+                game.player = Some(player);
+                bind_local_player(game, 7, 17);
+                game.lan_acting_name = Some("rider".into());
+                game.lan_acting_permission = Some(2);
+                game.update_chunk_tickets();
+                let registry = game.pack.assets.registry;
+                let clay = registry.default_state("minecraft:clay").unwrap();
+                let leaf = registry.default_state("minecraft:big_dripleaf").unwrap();
+                game.world.set(8, 63, 8, clay).unwrap();
+                game.world.set(8, 64, 8, leaf).unwrap();
+                let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+                let mut denied = Mob::new(10, kind.clone(), feet, 0.0);
+                denied.on_ground = true;
+                game.mobs.push(denied);
+
+                game.tick_blocks().unwrap();
+                assert_eq!(game.world.block(8, 64, 8), leaf);
+                assert_eq!(
+                    std::mem::take(&mut *heard.lock().unwrap()),
+                    [(7, Some(17)), (10, None)]
+                );
+
+                let mut allowed = Mob::new(11, kind, feet, 0.0);
+                allowed.on_ground = true;
+                game.mobs.push(allowed);
+                game.tick_blocks().unwrap();
+                let state = registry.state(game.world.block(8, 64, 8)).unwrap();
+                assert_eq!(state.properties["tilt"], "unstable");
+                assert_eq!(
+                    std::mem::take(&mut *heard.lock().unwrap()),
+                    [(7, Some(17)), (10, None), (11, None)]
+                );
+
+                game.lan_acting = Some(8);
+                game.lan_acting_entity = Some(12);
+                game.lan_acting_uuid = Some(22);
+                bind_acting_guest(game);
+                game.lan_acting = None;
+                game.lan_acting_entity = None;
+                game.lan_acting_uuid = None;
+                game.player.as_mut().unwrap().position = Vec3::new(9.5, 65.0, 8.5);
+                game.mobs.clear();
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.loaded = true;
+                    guest.on_ground = true;
+                    guest.permission = 2;
+                });
+                game.world.set(8, 64, 8, leaf).unwrap();
+                game.tick_blocks().unwrap();
+                assert_eq!(game.world.block(8, 64, 8), leaf);
+                assert_eq!(*heard.lock().unwrap(), [(12, Some(22))]);
+            });
+        });
     }
 
     #[test]

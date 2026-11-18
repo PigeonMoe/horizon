@@ -773,6 +773,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         pos: BlockPos,
         on_ground: bool,
         feet_y: f64,
+        entity: Option<u32>,
     ) {
         let b = self.b;
         let state = self.state(pos);
@@ -780,6 +781,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             || b.table.text(state, b.props.tilt) != "none"
             || !(on_ground && feet_y > f64::from(pos.y) + f64::from(0.6875_f32))
             || self.has_neighbor_signal(pos)
+            || entity.is_some_and(|entity| !self.level.allow_entity_block_trigger(pos, entity))
         {
             return;
         }

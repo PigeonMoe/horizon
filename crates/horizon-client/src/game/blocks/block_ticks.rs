@@ -93,13 +93,14 @@ impl Game<'_> {
         for p in self.player.iter().filter(|_| !self.spectator()) {
             standing_feet(
                 &mut scratch.standing,
+                p.entity_id as u32,
                 [p.position.x, p.position.y, p.position.z],
                 p.ground.on_ground,
                 f64::from(p.dimensions.width) / 2.0,
             );
         }
-        for (at, on_ground) in self.lan_guest_feet() {
-            standing_feet(&mut scratch.standing, at, on_ground, 0.3);
+        for (id, at, on_ground) in self.lan_guest_feet() {
+            standing_feet(&mut scratch.standing, id, at, on_ground, 0.3);
         }
         {
             use entity::{Entity as _, entity_lists_of, for_each_entity};
@@ -117,6 +118,7 @@ impl Game<'_> {
                     let b = e.bounds();
                     standing_feet(
                         &mut scratch.standing,
+                        e.id(),
                         [at.x, at.y, at.z],
                         e.on_ground(),
                         (b.max_position().x - b.min_position().x) / 2.0,
@@ -135,6 +137,7 @@ impl Game<'_> {
                     let b = t.bounds();
                     standing_feet(
                         &mut scratch.standing,
+                        t.id,
                         [at.x, at.y, at.z],
                         t.on_ground,
                         (b.max_position().x - b.min_position().x) / 2.0,
@@ -145,7 +148,13 @@ impl Game<'_> {
         for c in &self.carts {
             let at = c.position;
             if entity_ticking(at.x.floor() as i32, at.z.floor() as i32) {
-                standing_feet(&mut scratch.standing, [at.x, at.y, at.z], c.on_ground, 0.49);
+                standing_feet(
+                    &mut scratch.standing,
+                    c.id,
+                    [at.x, at.y, at.z],
+                    c.on_ground,
+                    0.49,
+                );
             }
         }
         // LilyPadBlock.entityInside: a boat inside a lily pad breaks it.
@@ -262,8 +271,8 @@ impl Game<'_> {
                     break;
                 }
             }
-            for (pos, on_ground, feet_y) in scratch.standing.drain(..) {
-                b.entity_on_big_dripleaf(level, ticks, pos, on_ground, feet_y);
+            for (pos, on_ground, feet_y, entity) in scratch.standing.drain(..) {
+                b.entity_on_big_dripleaf_by(level, ticks, pos, on_ground, feet_y, entity);
             }
         });
         self.process_level_events()?;
@@ -452,7 +461,8 @@ impl Game<'_> {
 /// leaf's 0.6875 and a box starts at its feet, so only a leaf in the feet
 /// layer can pass it.
 pub(in crate::game) fn standing_feet(
-    out: &mut Vec<(BlockPos, bool, f64)>,
+    out: &mut Vec<(BlockPos, bool, f64, u32)>,
+    entity: u32,
     at: [f64; 3],
     on_ground: bool,
     w: f64,
@@ -461,7 +471,7 @@ pub(in crate::game) fn standing_feet(
     let y = (at[1] + epsilon).floor() as i32;
     for x in (at[0] - w + epsilon).floor() as i32..=(at[0] + w - epsilon).floor() as i32 {
         for z in (at[2] - w + epsilon).floor() as i32..=(at[2] + w - epsilon).floor() as i32 {
-            out.push((BlockPos::new(x, y, z), on_ground, at[1]));
+            out.push((BlockPos::new(x, y, z), on_ground, at[1], entity));
         }
     }
 }

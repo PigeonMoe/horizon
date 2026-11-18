@@ -1,18 +1,19 @@
-//! The entity admission policy for physical redstone triggers.
+//! The entity admission policy for physical block triggers.
 
 pub trait Hooks {
     /// An entity at `pos` is a candidate to activate a pressure plate, an
-    /// attached tripwire, or a wooden button. Each relevant candidate is
-    /// checked before contributing: a weighted plate counts all admitted
+    /// attached tripwire or wooden button, or to tilt a big dripleaf. Each
+    /// relevant candidate is checked before contributing: a weighted plate counts all admitted
     /// entities, a binary plate and an attached tripwire accept the first
-    /// admitted entity, and a button checks its first arrow. The source player
+    /// admitted entity, and a button checks its first arrow. A dripleaf checks
+    /// each eligible standing entity until it tilts. The source player
     /// fields identify the player physically in the block, if any.
     #[hook(
         side = "server",
         contract = "cancel",
         out = "cancel",
-        neoforge = "none (entity admission to a block's signal query)",
-        paper = "PlayerInteractEvent (PHYSICAL) and EntityInteractEvent",
+        neoforge = "none (entity admission to a physical block trigger)",
+        paper = "PlayerInteractEvent (PHYSICAL), EntityInteractEvent and EntityChangeBlockEvent (standing on dripleaf)",
         cancellable = true,
         target = "horizon_client::game::native_hooks::block_trigger_entity_pre::GameLevel<'_>::native_block_trigger_entity_pre"
     )]

@@ -1138,6 +1138,14 @@ impl LevelAccess for GameLevel<'_> {
         }
         self.count_allowed_block_triggers(pos, area, query, count)
     }
+    fn allow_entity_block_trigger(&self, pos: BlockPos, entity: u32) -> bool {
+        if !self.native_authoritative
+            || !mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+        {
+            return true;
+        }
+        self.allow_known_block_trigger(pos, entity)
+    }
     fn emit(&mut self, event: LevelEvent) {
         match event {
             // Block.dropResources draws its loot and spots right away.
