@@ -1267,6 +1267,17 @@ pub trait LevelsBackendMut {
     #[access(WorldOnly)]
     fn level_level_event(&mut self, level: LevelRef, id: i32, pos: [i32; 3], data: i32) -> bool;
     /// Side: server.
+    /// Play `LevelEvent.PARTICLES_DESTROY_BLOCK` for `appearance` at `pos`,
+    /// including its break sound and particles. The block at `pos` is untouched.
+    /// False for an unknown state or a stale or inactive level.
+    #[access(WorldOnly)]
+    fn level_block_break_effect(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        appearance: BlockState,
+    ) -> bool;
+    /// Side: server.
     /// Plays level event `id` at `pos` with `data` for every player on the
     /// server, in every level and at any distance (`ServerLevel.globalLevelEvent`).
     /// Vanilla's ids are the wither's spawn (`1023`), the dragon's death

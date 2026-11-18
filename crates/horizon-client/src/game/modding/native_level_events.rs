@@ -6,7 +6,10 @@
 //! level, a stale handle or a client returns false. Reaching a parked level, as `play_sound` and the
 //! reads do through `native_level_world`, is a follow-up.
 use super::{Game, GameLevel};
-use horizon_world::level::{BlockEventData, LevelEvent};
+use horizon_world::{
+    level::{BlockEventData, LevelEvent},
+    registry::BlockStateId,
+};
 use mod_api::{
     BlockKey, EntityRef, ExplodeError, ExplosionInteraction, ExplosionSettings, LevelRef,
 };
@@ -70,6 +73,16 @@ impl Game<'_> {
         self.level_event_at(id, pos, data);
         true
     }
+
+    pub(super) fn level_block_break_effect(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        appearance: BlockStateId,
+    ) -> bool {
+        self.level_level_event(level, 2001, pos, appearance.0 as i32)
+    }
+
     /// Plays level event `id` for every player on the server
     /// (`ServerLevel.globalLevelEvent`), or for the players near `pos` when the
     /// `global_sound_events` rule is off. Refuses what `level_level_event` refuses.
@@ -203,6 +216,87 @@ mod tests {
     use crate::game::LevelDimension;
     use horizon_world::level::LevelEvent;
     use mod_api::{self, BlockPart, Flow, Hooks, RandomTickEvent, Registrar};
+
+    #[test]
+    #[ignore = "daily"]
+    fn native_and_wasm_break_effects_use_the_supplied_state_without_breaking_a_block() {
+        use crate::game::{QueuedLevelEvent, api_values::TryIntoApi};
+        use mod_api::{ScheduledTaskEvent, TaskId, WorldEpoch, wire::Writer};
+
+        horizon_guest_stack::run_on_guest_stack(|| {
+            super::super::native_guest_turn_tests::with_guests(|game| {
+                let level = game.level(game.dim.id()).unwrap();
+                let pos = [3, 64, 5];
+                game.world.chunks.insert(
+                    (0, 0),
+                    std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+                );
+                let registry = game.pack.assets.registry;
+                let cauldron = registry.default_state("minecraft:cauldron").unwrap();
+                let leaves = registry.default_state("minecraft:oak_leaves").unwrap();
+                game.world.set(pos[0], pos[1], pos[2], cauldron).unwrap();
+                let appearance = leaves.try_into_api().unwrap();
+                let expected = QueuedLevelEvent {
+                    kind: 2001,
+                    pos,
+                    data: leaves.0 as i32,
+                    source: None,
+                };
+
+                let stale = super::LevelRef::new(
+                    WorldEpoch::new(level.epoch().get() + 1),
+                    level.dimension(),
+                );
+                assert!(!stale.block_break_effect(game, pos, appearance));
+                assert!(level.block_break_effect(game, pos, appearance));
+                assert_eq!(game.lan_events.as_slice(), std::slice::from_ref(&expected));
+                game.lan_events.clear();
+
+                let mut args = Writer::new();
+                args.put(&level);
+                args.put(&pos);
+                args.put(&appearance);
+                let encoded = args
+                    .bytes()
+                    .iter()
+                    .map(|b| format!("\\{b:02x}"))
+                    .collect::<String>();
+                let call =
+                    horizon_mod_wasm::fixture::import_id("BackendMut", "level_block_break_effect")
+                        .unwrap();
+                let bytes = wat::parse_str(format!(
+                    r#"(module
+              (@custom "dylink.0" "\01\04\00\00\00\00")
+              (import "env" "memory" (memory 1))
+              (import "env" "__indirect_function_table" (table 1 funcref))
+              (import "horizon" "host" (func $host (param i32 i32 i32 i32 i32) (result i32)))
+              (import "horizon" "host_reply" (func (param i32)))
+              (func (export "horizon_layout") (result i64) i64.const {layout})
+              (data (i32.const 4096) "{encoded}")
+              (func (export "horizon_in") (param i32) (result i32) i32.const 512)
+              (func (export "horizon_hook") (param i32) (result i64)
+                i32.const {call} i32.const 4096 i32.const {size} i32.const 8192 i32.const 4096
+                call $host drop
+                i32.const 8192 i32.load8_u i32.eqz if unreachable end
+                i64.const 16384 i64.const 32 i64.shl i64.const 16 i64.or))"#,
+                    layout = *mod_api::wire::LAYOUT,
+                    size = args.bytes().len()
+                ))
+                .unwrap();
+                let module = horizon_mod_wasm::fixture::module(&bytes).unwrap();
+                module.scheduled_task(
+                    game,
+                    &mut ScheduledTaskEvent {
+                        id: TaskId(0),
+                        owner: "test",
+                        token: 0,
+                    },
+                );
+                assert_eq!(game.lan_events, [expected]);
+                assert_eq!(game.world.block(pos[0], pos[1], pos[2]), cauldron);
+            })
+        });
+    }
 
     /// A stone part whose random tick plays level events through the write host.
     struct Events;

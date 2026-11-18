@@ -124,6 +124,7 @@ horizon-client game::native_hooks::block_trigger_entity_pre::tests::redstone_act
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one lib daily resources
 horizon-client game::native_hooks::player_leash_change_pre::tests::knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads lib daily resources
 horizon-client game::native_hooks::runtime_environment::server_data_version_tests::host_data_version_matches_a_freshly_saved_chunk lib daily resources
+horizon-client game::native_level_events::tests::native_and_wasm_break_effects_use_the_supplied_state_without_breaking_a_block lib daily resources
 horizon-client game::native_menu_places::tests::a_backing_names_why_it_refuses lib daily resources
 horizon-client game::native_menu_places::tests::a_mod_slot_is_shared_by_two_views_and_refuses_a_stale_second_take lib daily resources
 horizon-client game::native_menu_places::tests::a_shift_click_into_a_held_backpack_writes_through_its_handler lib daily resources
