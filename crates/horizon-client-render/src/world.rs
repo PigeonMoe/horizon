@@ -653,15 +653,19 @@ impl World {
     /// without, as the tag it was loaded or set with carries it (Horizon's
     /// model holds no field for it).
     pub fn block_lock(&self, key: (i32, i32, i32)) -> Option<&horizon_core::nbt::Tag> {
+        self.block_entity_source(key)?.get("lock")
+    }
+
+    /// The source compound preserved from disk for this block entity.
+    pub fn block_entity_source(&self, key: (i32, i32, i32)) -> Option<&horizon_core::nbt::Tag> {
         self.chunks
             .get(&(key.0 >> 4, key.2 >> 4))?
             .saved
             .as_ref()?
             .block_entity_sources
             .iter()
-            .find(|(p, _)| *p == key)?
-            .1
-            .get("lock")
+            .find(|(p, _)| *p == key)
+            .map(|(_, tag)| tag)
     }
     /// `LockCode.addToTag` for a tag a command gives a container (`setblock`,
     /// `data merge`): the tag it was set with keeps the lock, so `data get`

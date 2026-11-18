@@ -612,6 +612,15 @@ pub(super) fn save_without_metadata(
     for key in ["id", "x", "y", "z"] {
         data.remove(&key.into());
     }
+    // Paper stores an Auto-Crafter's settings on its skull tile, separate from
+    // the modelled profile. Lend the saved PDC without copying the rest of its raw tag.
+    if matches!(entity, BlockEntity::Skull(_))
+        && let Some(source) = world.block_entity_source(pos)
+        && block_entity_nbt::id(source).as_deref() == Some("minecraft:skull")
+        && let Some(tag @ Tag::Compound(_)) = source.get("PublicBukkitValues")
+    {
+        data.insert("PublicBukkitValues".into(), tag.clone());
+    }
     Some(data)
 }
 
@@ -695,6 +704,40 @@ mod tests {
             assert!(!data.contains_key(&key.into()));
         }
         assert!(data.contains_key(&"Items".into()));
+    }
+
+    #[test]
+    fn a_loaded_skull_exposes_only_unmodified_paper_pdc() {
+        let mut world = World::new(BlockStateId(0), 0);
+        let pos = (1, 64, 2);
+        let entity = BlockEntity::Skull(horizon_client::containers::Skull::default());
+        let pdc = Tag::compound([
+            ("slimefun:recipe_key", Tag::String("CARGO_MOTOR".into())),
+            ("slimefun:recipe_enabled", Tag::Byte(0)),
+        ]);
+        let source = Tag::compound([
+            ("id", Tag::String("minecraft:skull".into())),
+            ("x", Tag::Int(pos.0)),
+            ("y", Tag::Int(pos.1)),
+            ("z", Tag::Int(pos.2)),
+            ("PublicBukkitValues", pdc.clone()),
+            ("UnmodelledField", Tag::Byte(1)),
+        ]);
+        let mut chunk = Chunk::empty(0, 0);
+        Arc::make_mut(chunk.saved.get_or_insert_with(Default::default))
+            .block_entity_sources
+            .push((pos, source.clone()));
+        world.chunks.insert((0, 0), Arc::new(chunk));
+        let data = save_without_metadata(&world, pos, &entity, "minecraft:player_head").unwrap();
+        assert_eq!(data.get(&"PublicBukkitValues".into()), Some(&pdc));
+        for field in ["id", "x", "y", "z", "UnmodelledField"] {
+            assert!(!data.contains_key(&field.into()));
+        }
+        assert_eq!(world.block_entity_source(pos), Some(&source));
+        world.forget_block_entity_source(pos);
+        let replacement =
+            save_without_metadata(&world, pos, &entity, "minecraft:player_head").unwrap();
+        assert!(!replacement.contains_key(&"PublicBukkitValues".into()));
     }
 
     #[test]
