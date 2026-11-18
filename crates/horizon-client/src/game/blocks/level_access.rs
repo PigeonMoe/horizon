@@ -1092,12 +1092,17 @@ impl LevelAccess for GameLevel<'_> {
             self.crystals
                 .iter()
                 .map(dragon::Crystal::bounds)
-                .chain(self.trigger_hooks.iter().map(|&(bounds, _)| bounds))
-                .chain(self.trigger_extras.iter().copied())
+                .chain(self.trigger_hooks.iter().map(|&(_, bounds, _)| bounds))
+                .chain(self.trigger_extras.iter().map(|&(_, bounds)| bounds))
                 .filter(|b| area.intersects(*b))
                 .count()
         };
-        let arrows = || self.arrow_boxes.iter().filter(|b| hit(b)).count();
+        let arrows = || {
+            self.arrow_boxes
+                .iter()
+                .filter(|(_, b)| area.intersects(*b))
+                .count()
+        };
         let players = || {
             self.player_box
                 .iter()
@@ -1111,6 +1116,26 @@ impl LevelAccess for GameLevel<'_> {
             EntityQuery::Mobs => players() + self.count_triggers::<true>(area),
             EntityQuery::Everything => players() + self.count_triggers::<false>(area) + others(),
         }
+    }
+    fn count_block_triggers(
+        &self,
+        pos: BlockPos,
+        area: Aabb,
+        query: EntityQuery,
+        count: horizon_world::level::BlockTriggerCount,
+    ) -> usize {
+        use horizon_world::level::BlockTriggerCount;
+        if !self.native_authoritative
+            || !mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+        {
+            let observed = self.count_entities(area, query);
+            return if count == BlockTriggerCount::All {
+                observed
+            } else {
+                observed.min(1)
+            };
+        }
+        self.count_allowed_block_triggers(pos, area, query, count)
     }
     fn emit(&mut self, event: LevelEvent) {
         match event {

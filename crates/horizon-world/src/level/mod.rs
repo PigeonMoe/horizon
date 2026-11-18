@@ -327,6 +327,17 @@ pub enum EntityQuery {
     Arrows,
 }
 
+/// How an entity-sensing block checks eligible candidates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockTriggerCount {
+    /// A binary detector checks until one entity can activate it.
+    Any,
+    /// A weighted pressure plate counts every permitted entity.
+    All,
+    /// A wooden button checks only the first arrow in its hit box.
+    First,
+}
+
 /// The UUID of a player excluded from a level event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LevelEventPlayer(pub u128);
@@ -1273,6 +1284,21 @@ pub trait LevelAccess: BlockEntityNeighbors {
     /// tripwires under `query`.
     fn count_entities(&self, _area: Aabb, _query: EntityQuery) -> usize {
         0
+    }
+    /// Candidates whose contact may activate the specified block.
+    fn count_block_triggers(
+        &self,
+        _pos: BlockPos,
+        area: Aabb,
+        query: EntityQuery,
+        count: BlockTriggerCount,
+    ) -> usize {
+        let observed = self.count_entities(area, query);
+        if count == BlockTriggerCount::All {
+            observed
+        } else {
+            observed.min(1)
+        }
     }
     /// `ServerLevel.shouldTickBlocksAt`: ticket range, independent of chunk ticking readiness.
     fn should_tick_blocks_at(&self, _chunk: ChunkPos) -> bool {

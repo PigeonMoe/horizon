@@ -1785,7 +1785,7 @@ impl GameLevel<'_> {
         }
         // `Level.playSound` draws `soundSeedGenerator.nextLong` at the call;
         // without a host nothing can be sent.
-        let Some(seed) = self.sound_seeds.map(|hub| hub.next_sound_seed()) else {
+        let Some(seed) = self.lan_hub.map(|hub| hub.next_sound_seed()) else {
             return false;
         };
         self.native_sounds.push(super::creatures::NativeSound {

@@ -382,6 +382,15 @@ struct InteractTarget {
     location: [f64; 3],
 }
 
+/// The shell of the local or currently acting player given to trigger listeners.
+#[derive(Clone, Copy)]
+struct BlockTriggerPlayer<'a> {
+    entity: u32,
+    uuid: Option<u128>,
+    name: &'a str,
+    permission_level: u8,
+}
+
 /// The client world as seen by the vanilla block-behaviour library.
 struct GameLevel<'w> {
     cake_probe: bool,
@@ -405,6 +414,7 @@ struct GameLevel<'w> {
     /// The world's enabled feature flags as this side knows them (`LevelReader.enabledFeatures`).
     enabled_features: &'w std::sync::Arc<[String]>,
     player_box: Option<([f64; 3], [f64; 3])>,
+    block_trigger_player: Option<BlockTriggerPlayer<'w>>,
     /// The LAN guests in this level who trigger blocks (not spectators).
     guest_boxes: Vec<([f64; 3], [f64; 3])>,
     /// Other players that block placement during a guest turn, including live
@@ -418,7 +428,7 @@ struct GameLevel<'w> {
     /// The minecarts, in `cart_boxes` order, for a detector rail's comparator.
     carts: &'w mut horizon_client::join_seq::JoinList<minecarts::Minecart, false>,
     /// Arrow and thrown trident boxes (wooden buttons).
-    arrow_boxes: Vec<([f64; 3], [f64; 3])>,
+    arrow_boxes: Vec<(u32, Aabb)>,
     /// Every entity on the walk; see `entity::for_each_entity`.
     other_entities: entity::EntityLists<'w>,
     /// End crystals, which aren't on the walk yet.
@@ -427,10 +437,10 @@ struct GameLevel<'w> {
     /// block triggers, so each counts on a plate or tripwire. The flag says
     /// whether it also reaches `entityInside` (`applyEffectsFromBlocks`): not
     /// a hook on an entity, whose tick skips that step.
-    trigger_hooks: Vec<(Aabb, bool)>,
+    trigger_hooks: Vec<(u32, Aabb, bool)>,
     /// The lightning bolts here: none ignores block triggers
     /// (`Entity.isIgnoringBlockTriggers`).
-    trigger_extras: Vec<Aabb>,
+    trigger_extras: Vec<(u32, Aabb)>,
     biomes: &'w Biomes,
     seed: i64,
     behaviours: &'w Behaviours,
@@ -477,7 +487,7 @@ struct GameLevel<'w> {
     native_sounds: &'w mut Vec<creatures::NativeSound>,
     loop_context: &'w horizon_world::native_load_context::LoopContext,
     native_particles: &'w mut Vec<lan_particles::QueuedParticle>,
-    sound_seeds: Option<&'w horizon_client::lan::hub::Hub>,
+    lan_hub: Option<&'w horizon_client::lan::hub::Hub>,
     drop_entity: Option<mod_api::EntityRef>,
     /// The block a mod's machine breaks and the tool it breaks it with
     /// (`native_machine_destroy_block`): `Block.dropResources` rolls that
@@ -2822,12 +2832,9 @@ impl Game<'_> {
             .projectiles
             .iter()
             .filter(|p| p.arrow.is_some())
-            .map(|p| p.position)
-            .chain(self.tridents.iter().map(|t| t.position))
-            .map(|at| {
-                let b = horizon_client::arrows::arrow_bounds(at);
-                (b.min_position().components(), b.max_position().components())
-            })
+            .map(|p| (p.id, p.position))
+            .chain(self.tridents.iter().map(|t| (t.id, t.position)))
+            .map(|(id, at)| (id, horizon_client::arrows::arrow_bounds(at)))
             .collect();
         let guest_boxes = self.lan_block_trigger_boxes();
         let building_player_boxes = self
@@ -2849,19 +2856,19 @@ impl Game<'_> {
                     .map(|g| g.position)
             }))
             .collect();
-        let mut trigger_hooks: Vec<(Aabb, bool)> = self
+        let mut trigger_hooks: Vec<(u32, Aabb, bool)> = self
             .hook
             .iter()
-            .map(|h| (h.bounds(), h.applies_block_effects()))
+            .map(|h| (h.id(), h.bounds(), h.applies_block_effects()))
             .collect();
         self.lan_hook_triggers(&mut trigger_hooks);
         // EntityType.LIGHTNING_BOLT: 0 x 0.
-        let trigger_extras: Vec<Aabb> = self
+        let trigger_extras: Vec<(u32, Aabb)> = self
             .bolts
             .iter()
             .map(|b| {
                 let at = Vec3::new(b.at[0], b.at[1], b.at[2]);
-                Aabb::new(at, at)
+                (b.id, Aabb::new(at, at))
             })
             .collect();
         // `ContainerOpenersCounter.getEntitiesWithContainerOpen`: the players
@@ -2892,6 +2899,31 @@ impl Game<'_> {
             golem_chests.extend(self.chest_other_half(key));
         }
         let native_authoritative = self.native_authoritative();
+        let block_trigger_player = if native_authoritative
+            && mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+        {
+            self.player.as_ref().map(|player| {
+                let uuid = if self.lan_acting_fake {
+                    None
+                } else {
+                    self.lan_acting_uuid.or_else(|| {
+                        self.level
+                            .player_uuid
+                            .map(horizon_client::lan::playerdata::ints_uuid)
+                    })
+                };
+                BlockTriggerPlayer {
+                    entity: player.entity_id as u32,
+                    uuid,
+                    name: self.lan_acting_name.as_deref().unwrap_or(chat::PLAYER_NAME),
+                    permission_level: self
+                        .lan_acting_permission
+                        .unwrap_or(self.ui.registries.permission),
+                }
+            })
+        } else {
+            None
+        };
         let environment = self.res.environment_of(&self.dimension_type().id);
         let other_entities = entity::entity_lists_of!(self, without_carts);
         let mut level = GameLevel {
@@ -2932,6 +2964,7 @@ impl Game<'_> {
                 .as_ref()
                 .map_or(&self.level.enabled_features, |remote| &remote.features),
             player_box,
+            block_trigger_player,
             guest_boxes,
             building_player_boxes,
             player_collision,
@@ -2968,7 +3001,7 @@ impl Game<'_> {
             native_sounds: &mut self.creatures.lan_sounds,
             loop_context: &self.loop_context,
             native_particles: &mut self.creatures.lan_particles,
-            sound_seeds: self.lan.as_ref().map(|host| &host.hub),
+            lan_hub: self.lan.as_ref().map(|host| &host.hub),
             drop_tool: None,
             drop_entity: None,
             drop_breaker_at: None,

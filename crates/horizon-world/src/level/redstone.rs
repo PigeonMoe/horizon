@@ -682,10 +682,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let data = b.data(state);
         if data.is(Class::WeightedPressurePlate) {
             let max = data.max_weight.max(1);
-            let count = (self
-                .level
-                .count_entities(area, super::EntityQuery::Everything)
-                as i32)
+            let count = (self.level.count_block_triggers(
+                pos,
+                area,
+                super::EntityQuery::Everything,
+                super::BlockTriggerCount::All,
+            ) as i32)
                 .min(max);
             if count > 0 {
                 (count.min(max) as f32 / max as f32 * 15.0).ceil() as i32
@@ -698,11 +700,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             } else {
                 super::EntityQuery::Everything
             };
-            if self.level.count_entities(area, query) > 0 {
-                15
+            let count = if self.plate_signal_for_state(state) == 0 {
+                self.level
+                    .count_block_triggers(pos, area, query, super::BlockTriggerCount::Any)
             } else {
-                0
-            }
+                self.level.count_entities(area, query)
+            };
+            if count > 0 { 15 } else { 0 }
         }
     }
     /// `BasePressurePlateBlock.checkPressed`.
@@ -773,12 +777,18 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub(crate) fn button_check_pressed(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
         let data = b.data(state);
-        let should_be_pressed = data.set_type.as_ref().is_some_and(|s| s.arrows)
-            && self
-                .level
-                .count_entities(self.button_bounds(pos, state), super::EntityQuery::Arrows)
-                > 0;
         let was_pressed = b.table.bool(state, b.props.powered);
+        let should_be_pressed = data.set_type.as_ref().is_some_and(|s| s.arrows) && {
+            let area = self.button_bounds(pos, state);
+            let query = super::EntityQuery::Arrows;
+            let count = if was_pressed {
+                self.level.count_entities(area, query)
+            } else {
+                self.level
+                    .count_block_triggers(pos, area, query, super::BlockTriggerCount::First)
+            };
+            count > 0
+        };
         if should_be_pressed != was_pressed {
             if !self.allow_binary_redstone(pos, should_be_pressed) {
                 return;

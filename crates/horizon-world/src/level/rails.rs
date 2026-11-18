@@ -611,11 +611,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let state = self.state(pos);
         let was = b.table.bool(state, b.props.powered);
-        let top = if b.table.bool(state, b.props.attached) {
-            2.5 / 16.0
-        } else {
-            8.0 / 16.0
-        };
+        let attached = b.table.bool(state, b.props.attached);
+        let top = if attached { 2.5 / 16.0 } else { 8.0 / 16.0 };
         let area = Aabb::new(
             Vec3::new(
                 f64::from(pos.x),
@@ -628,10 +625,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 f64::from(pos.z) + 1.0,
             ),
         );
-        let pressed = self
-            .level
-            .count_entities(area, super::EntityQuery::Everything)
-            > 0;
+        let query = super::EntityQuery::Everything;
+        let count = if !was && attached {
+            self.level
+                .count_block_triggers(pos, area, query, super::BlockTriggerCount::Any)
+        } else {
+            self.level.count_entities(area, query)
+        };
+        let pressed = count > 0;
         let block = b.block(state);
         if pressed != was {
             let next = b.table.set_bool(state, b.props.powered, pressed);

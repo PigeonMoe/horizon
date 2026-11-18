@@ -189,12 +189,12 @@ impl Game<'_> {
             for crystal in level.crystals {
                 touch(crystal.bounds());
             }
-            for &(bounds, applies) in &level.trigger_hooks {
+            for &(_, bounds, applies) in &level.trigger_hooks {
                 if applies {
                     touch(bounds);
                 }
             }
-            for &bounds in &level.trigger_extras {
+            for &(_, bounds) in &level.trigger_extras {
                 touch(bounds);
             }
             for pos in scratch.inside.drain(..) {
