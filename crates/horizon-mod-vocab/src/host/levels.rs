@@ -764,6 +764,13 @@ pub trait LevelsBackend {
     /// height. Constant time, no allocation.
     #[access(WorldOnly)]
     fn level_capability_generation(&self, level: LevelRef, pos: [i32; 3]) -> Option<u64>;
+    /// Side: server.
+    /// Ask whether a device's saved `owner` may build at this loaded position without
+    /// loading a chunk, simulating a player, or writing a block. This also works for
+    /// an offline owner. Checks the world boundary, spawn protection and the
+    /// `device_placement_pre` policy. False for a stale or inactive level.
+    #[access(WorldOnly)]
+    fn level_allow_device_placement(&self, level: LevelRef, owner: u128, pos: [i32; 3]) -> bool;
 }
 /// The handles' writes of the `levels` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

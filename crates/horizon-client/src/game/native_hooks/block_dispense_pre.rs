@@ -1,6 +1,13 @@
 use super::*;
 
 impl Game<'_> {
+    pub(in crate::game) fn native_dispenser_selected(
+        &mut self,
+        call: mod_api::__private::DispenserSelectedCall<'_>,
+    ) {
+        self.fire_dispenser_selected(call);
+    }
+
     pub(in crate::game) fn native_block_dispense_pre(
         &self,
         dimension: &str,

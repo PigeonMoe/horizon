@@ -4,6 +4,7 @@
 //! comparator signals (`AbstractContainerMenu.getRedstoneSignalFromContainer`).
 mod loot_access;
 use super::{Game, composter::is_composter, spill, storage::is_shulker_box};
+use crate::game::api_values::TryIntoApi;
 use horizon_core::nbt::Tag;
 use mod_api::__private::game::*;
 
@@ -2047,6 +2048,21 @@ impl Game<'_> {
         !cancel
     }
 
+    fn dispenser_viewed(&self, key: Pos) -> bool {
+        use horizon_client::lan::menu::Slots;
+        self.lan.as_ref().is_some_and(|host| {
+            host.hub.online_players().any(|guest| {
+                guest.dimension == self.dim.id()
+                    && guest
+                        .menu
+                        .as_ref()
+                        .is_some_and(|menu| menu.slots == Slots::Block(key))
+            })
+        }) || (!self.lan_acting_fake
+            && self.container == Some(key)
+            && self.native_acting_player().is_some())
+    }
+
     /// `DispenserBlock.dispenseFrom` / `DropperBlock.dispenseFrom`.
     pub(super) fn dispense_from(&mut self, pos: BlockPos, state: BlockStateId) -> Result<()> {
         let key = (pos.x, pos.y, pos.z);
@@ -2143,6 +2159,30 @@ impl Game<'_> {
                 }
             }
         } else {
+            if self.native_authoritative()
+                && mod_api::__private::listened(mod_api::HookId::DispenserSelected)
+                && let Ok(snapshot) = stack.try_into_api()
+            {
+                let generation = self.world.block_entities.generation(&key);
+                let mut cancel = false;
+                let viewed = self.dispenser_viewed(key);
+                self.native_dispenser_selected(mod_api::__private::DispenserSelectedCall {
+                    dimension: self.dim.id(),
+                    pos: [pos.x, pos.y, pos.z],
+                    target: [target.0, target.1, target.2],
+                    slot: slot as u32,
+                    stack: &snapshot,
+                    viewed,
+                    cancel: &mut cancel,
+                });
+                if cancel
+                    || self.world.block(pos.x, pos.y, pos.z) != state
+                    || self.world.block_entities.generation(&key) != generation
+                    || self.containers().get(&view, slot) != Some(&stack)
+                {
+                    return Ok(());
+                }
+            }
             if !self.block_dispense_allowed(pos, target, &stack.item) {
                 return Ok(());
             }
@@ -2995,6 +3035,165 @@ mod part_front_tests {
 #[cfg(test)]
 #[path = "hopper_cart_rider_tests.rs"]
 mod hopper_cart_rider_tests;
+
+#[cfg(test)]
+mod dispenser_selection_tests {
+    use super::super::{Hit, native_guest_turn_tests::with_guests};
+    use horizon_client::{containers::BlockEntity, items::ItemStack};
+    use horizon_core::nbt::Tag;
+
+    #[test]
+    #[ignore = "daily"]
+    fn dispenser_selection_reports_the_slot_and_stack_before_ordinary_dispense() {
+        use horizon_core::position::BlockPos;
+        use mod_api::{
+            BlockDispensePreEvent, DispenserSelectedEvent, Flow, Hand, Hooks, Host, ModEntry,
+            ServerHost,
+        };
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        const DISPENSER: [i32; 3] = [3, 64, 4];
+        const DROPPER: [i32; 3] = [5, 64, 4];
+        const SLOT: usize = 7;
+        type Calls = Arc<Mutex<Vec<(&'static str, [i32; 3])>>>;
+
+        struct Listen {
+            cancel: Arc<AtomicBool>,
+            calls: Calls,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for Listen {
+            fn dispenser_selected(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut DispenserSelectedEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.dimension, "minecraft:overworld");
+                assert_eq!(event.pos, DISPENSER);
+                assert_eq!(event.target, [4, 64, 4]);
+                assert_eq!(event.slot, SLOT as u32);
+                assert_eq!(event.stack.item().id(host), "minecraft:stone");
+                assert_eq!(event.stack.count(), 3);
+                let cancel = self.cancel.load(Ordering::Relaxed);
+                assert_eq!(event.viewed, !cancel);
+                assert_eq!(
+                    event
+                        .stack
+                        .components()
+                        .unwrap()
+                        .as_nbt()
+                        .get(&"minecraft:custom_name".into()),
+                    Some(&Tag::String("Selected".into())),
+                );
+                self.calls.lock().unwrap().push(("selected", event.pos));
+                if cancel { Flow::Cancel } else { Flow::Continue }
+            }
+
+            fn block_dispense_pre(
+                &self,
+                _: &dyn Host,
+                event: &mut BlockDispensePreEvent<'_>,
+            ) -> Flow {
+                self.calls.lock().unwrap().push(("ordinary", event.pos));
+                Flow::Continue
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let calls = Calls::default();
+        let mods: mod_api::Mods = vec![ModEntry::new(
+            "dispenser-selection-fixture",
+            Box::new(Listen {
+                cancel: cancel.clone(),
+                calls: calls.clone(),
+            }),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let mut stack = ItemStack::new("minecraft:stone", 3);
+                stack.data_mut().custom_name = Some(Tag::String("Selected".into()));
+                let mut place_carrier = |[x, y, z]: [i32; 3], id: &str| {
+                    let registry = game.pack.assets.registry;
+                    let state = crate::game::native_hooks::with_property(
+                        registry,
+                        registry.default_state(id).unwrap(),
+                        "facing",
+                        "east",
+                    )
+                    .unwrap();
+                    game.world.set(x, y, z, state).unwrap();
+                    let mut items = vec![None; 9];
+                    items[SLOT] = Some(stack.clone());
+                    game.world
+                        .block_entities
+                        .insert((x, y, z), BlockEntity::Chest(items));
+                    (BlockPos::new(x, y, z), state)
+                };
+                let (dispenser, dispenser_state) = place_carrier(DISPENSER, "minecraft:dispenser");
+                let (dropper, dropper_state) = place_carrier(DROPPER, "minecraft:dropper");
+                game.dispense_from(dispenser, dispenser_state).unwrap();
+                assert_eq!(*calls.lock().unwrap(), [("selected", DISPENSER)]);
+                assert!(game.dropped.is_empty());
+                let view = game
+                    .containers()
+                    .view((dispenser.x, dispenser.y, dispenser.z), false)
+                    .unwrap();
+                assert_eq!(game.containers().get(&view, SLOT), Some(&stack));
+
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(12, |guest| guest.game_mode = 3);
+                let index = game.guest_index(12).unwrap();
+                game.guest_use_item_on(
+                    12,
+                    index,
+                    Hit {
+                        pos: DISPENSER,
+                        face: [0, 0, 1],
+                        point: [3.5, 64.5, 5.0],
+                        inside: false,
+                    },
+                    Hand::Main,
+                )
+                .unwrap();
+                assert!(
+                    game.lan
+                        .as_ref()
+                        .unwrap()
+                        .hub
+                        .guest(12)
+                        .unwrap()
+                        .menu
+                        .is_some()
+                );
+                cancel.store(false, Ordering::Relaxed);
+                game.dispense_from(dispenser, dispenser_state).unwrap();
+                game.dispense_from(dropper, dropper_state).unwrap();
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    [
+                        ("selected", DISPENSER),
+                        ("selected", DISPENSER),
+                        ("ordinary", DISPENSER),
+                        ("ordinary", DROPPER),
+                    ]
+                );
+                assert_eq!(game.dropped.len(), 2);
+                assert_eq!(game.containers().get(&view, SLOT).unwrap().count, 2);
+            });
+        });
+    }
+}
 
 #[cfg(test)]
 mod hopper_cart_transfer_tests {

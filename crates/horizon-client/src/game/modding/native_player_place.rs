@@ -8,6 +8,46 @@ use mod_api::{
 };
 
 impl Game<'_> {
+    pub(super) fn level_allow_device_placement(
+        &self,
+        level: LevelRef,
+        owner: u128,
+        pos: [i32; 3],
+    ) -> bool {
+        let [x, _, z] = pos;
+        if self.dim.key() != level.dimension()
+            || !(-30_000_000..30_000_000).contains(&x)
+            || !(-30_000_000..30_000_000).contains(&z)
+            || !self.native_level_write_allowed(level, pos)
+            || self.lan.as_ref().is_some_and(|host| {
+                self.spawn_protection_for(host, owner)
+                    .is_some_and(|radius| self.spawn_protects(radius, self.dim.id(), pos))
+            })
+        {
+            return false;
+        }
+        if !mod_api::__private::listened(mod_api::HookId::DevicePlacementPre) {
+            return true;
+        }
+        let operator = self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.ops.contains_key(&owner))
+            || self
+                .player(owner)
+                .and_then(|player| self.player_permission_level(player))
+                .is_some_and(|level| level > 0);
+        let mut cancel = false;
+        self.native_device_placement_pre(mod_api::__private::DevicePlacementPreCall {
+            owner,
+            operator,
+            dimension: self.dim.id(),
+            pos,
+            cancel: &mut cancel,
+        });
+        !cancel
+    }
+
     pub(super) fn level_replace_block_for_player(
         &mut self,
         level: LevelRef,
