@@ -201,14 +201,8 @@ fn form(kind: Form, error: Option<Message>) -> Tag {
             "can_close_with_escape",
             Tag::Byte(i8::from(matches!(kind, Form::Set))),
         ),
-        (
-            "after_action",
-            string(if matches!(kind, Form::Set) {
-                "close"
-            } else {
-                "wait_for_response"
-            }),
-        ),
+        // Close before later configuration prompts such as a resource pack or rules.
+        ("after_action", string("close")),
         (
             "body",
             Tag::compound([
@@ -558,6 +552,7 @@ mod tests {
                 let dialog = crate::dialog::Dialog::parse(&p.dialog).expect("valid client dialog");
                 assert_eq!(dialog.inputs.len(), 1);
                 assert!(!dialog.can_close_with_escape);
+                assert_eq!(dialog.after_action, crate::dialog::AfterAction::Close);
                 assert_eq!(
                     p.dialog.get("title").unwrap().get("translate"),
                     Some(&string(expected_title))
