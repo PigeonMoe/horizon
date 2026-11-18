@@ -558,6 +558,61 @@ impl Game<'_> {
         true
     }
 
+    pub(super) fn mob_age_ticks(&self, mob: MobRef) -> Option<i32> {
+        let Target::Mob(id) = self.native_entity_target(mob.entity())? else {
+            return None;
+        };
+        let mob = self.mobs.iter().find(|mob| mob.id == id && !mob.removed)?;
+        mobs::finalize::ageable(mob.species()).then_some(mob.extra.age)
+    }
+
+    pub(super) fn mob_love_ticks(&self, mob: MobRef) -> Option<i32> {
+        let Target::Mob(id) = self.native_entity_target(mob.entity())? else {
+            return None;
+        };
+        let mob = self.mobs.iter().find(|mob| mob.id == id && !mob.removed)?;
+        mobs::drops::is_animal(mob.species()).then_some(mob.extra.in_love)
+    }
+
+    pub(super) fn mob_set_age_ticks(&mut self, mob: MobRef, ticks: i32) -> bool {
+        let Some(Target::Mob(id)) = self.native_entity_target(mob.entity()) else {
+            return false;
+        };
+        let Some(mob) = self
+            .mobs
+            .iter_mut()
+            .find(|mob| mob.id == id && !mob.removed)
+        else {
+            return false;
+        };
+        if !mobs::finalize::ageable(mob.species()) {
+            return false;
+        }
+        mobs::finalize::set_age(mob, ticks, None);
+        true
+    }
+
+    pub(super) fn mob_set_love_ticks(&mut self, mob: MobRef, ticks: i32) -> bool {
+        if ticks < 0 {
+            return false;
+        }
+        let Some(Target::Mob(id)) = self.native_entity_target(mob.entity()) else {
+            return false;
+        };
+        let Some(mob) = self
+            .mobs
+            .iter_mut()
+            .find(|mob| mob.id == id && !mob.removed)
+        else {
+            return false;
+        };
+        if !mobs::drops::is_animal(mob.species()) {
+            return false;
+        }
+        mob.extra.in_love = ticks;
+        true
+    }
+
     /// `LookControl.setLookAt`, by the mob's `lookAt` path: the wanted
     /// position its look control rotates the head toward over the next
     /// ticks. As `move_to`'s path, the mob's own AI — a goal's look, or a
@@ -1037,6 +1092,39 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn mod_breeding_timers_keep_exact_ticks_and_species_boundaries() {
+        use mobs::finalize::{Attr, base_value};
+
+        with_game(|game| {
+            let goat = add_mob(game, 12, "minecraft:goat");
+            let villager = add_mob(game, 13, "minecraft:villager");
+            let zombie = add_mob(game, 14, "minecraft:zombie");
+            assert!(goat.set_age_ticks(game, -1999));
+            assert_eq!(goat.age_ticks(game), Some(-1999));
+            assert_eq!(goat.living().baby(game), Some(true));
+            assert_eq!(base_value(&game.mobs[0], Attr::AttackDamage), 1.0);
+            assert!(goat.set_age_ticks(game, 0));
+            assert_eq!(base_value(&game.mobs[0], Attr::AttackDamage), 2.0);
+            assert_eq!(goat.love_ticks(game), Some(0));
+            assert!(goat.set_love_ticks(game, 600));
+            assert_eq!(goat.love_ticks(game), Some(600));
+            assert!(!goat.set_love_ticks(game, -1));
+            assert!(!game.mobs[0].extra.love_player);
+            assert!(game.mobs[0].extra.love_cause.is_none());
+
+            assert!(villager.set_age_ticks(game, 15));
+            assert_eq!(villager.age_ticks(game), Some(15));
+            assert_eq!(villager.love_ticks(game), None);
+            assert!(!villager.set_love_ticks(game, 600));
+            assert!(zombie.set_baby(game, true));
+            assert_eq!(zombie.age_ticks(game), None);
+            assert!(!zombie.set_age_ticks(game, 0));
+            assert_eq!(zombie.living().baby(game), Some(true));
         });
     }
 

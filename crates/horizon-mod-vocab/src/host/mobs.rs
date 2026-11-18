@@ -146,6 +146,17 @@ pub trait MobsBackend {
     #[access(WorldOnly)]
     fn mob_no_ai(&self, mob: MobRef) -> Option<bool>;
     /// Side: server.
+    /// `AgeableMob.getAge`. Negative values count down the remaining time
+    /// before adulthood, zero is an adult ready to breed, and positive values
+    /// are its breeding cooldown. None for a stale or non-ageable mob.
+    #[access(WorldOnly)]
+    fn mob_age_ticks(&self, mob: MobRef) -> Option<i32>;
+    /// Side: server.
+    /// `Animal.getInLoveTime`, the time that the animal is ready to mate.
+    /// None for a stale handle or a mob that does not extend Animal.
+    #[access(WorldOnly)]
+    fn mob_love_ticks(&self, mob: MobRef) -> Option<i32>;
+    /// Side: server.
     /// Whether a mod paused the mob's AI step with `set_ai_paused`. False
     /// for a mob no mod paused, whether or not it has `NoAI`. None for a
     /// stale or held-out handle, anything but a mob, the dragon, or on a
@@ -432,6 +443,18 @@ pub trait MobsBackendMut {
     /// changes, for an unavailable mob or a species with no baby form.
     #[access(WorldOnly)]
     fn mob_set_baby(&mut self, mob: MobRef, baby: bool) -> bool;
+    /// Side: server.
+    /// `AgeableMob.setAge` with the exact tick count. Applies the vanilla
+    /// species' age boundary changes. Does not change NoAI, persistence or
+    /// the age lock. False, with no changes, for a stale or non-ageable mob.
+    #[access(WorldOnly)]
+    fn mob_set_age_ticks(&mut self, mob: MobRef, ticks: i32) -> bool;
+    /// Side: server.
+    /// `Animal.setInLoveTime`. Changes the duration alone, without assigning
+    /// a credited player or running the feeding interaction. False, with
+    /// no changes, for a negative duration, a stale handle or a non-animal.
+    #[access(WorldOnly)]
+    fn mob_set_love_ticks(&mut self, mob: MobRef, ticks: i32) -> bool;
     /// Side: server.
     /// `LookControl.setLookAt`, by the mob's `lookAt` path: the wanted
     /// position its look control rotates the head toward over the next
