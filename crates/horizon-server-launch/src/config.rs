@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
 pub const FILE: &str = "server.toml";
+pub const PANEL_ACCESS_KEY_ENV: &str = "HORIZON_PANEL_ACCESS_KEY";
 
 /// The `backups.keep` values `config set` and `server.toml` both accept.
 pub const BACKUPS_KEEP: std::ops::RangeInclusive<i64> = 1..=1000;
@@ -69,7 +70,8 @@ keep = 1                     # other releases kept by updates, besides the one i
 
 [panel]
 bind = "127.0.0.1:8130"      # the web panel: this computer only, or a tailnet address (100.x); "" turns it off
-allow_public = false         # true lets bind be any address; never put the panel on the open internet
+allow_public = false         # true lets bind be any address; keep the listener behind the HTTPS proxy
+public_url = ""              # public HTTPS origin; requires a key from HORIZON_PANEL_ACCESS_KEY
 
 [api]
 bind = ""                    # the control API: "" a free port on 127.0.0.1; or a fixed one, like 127.0.0.1:8131 or a tailnet address
@@ -424,6 +426,7 @@ pub struct Engine {
 pub struct Panel {
     pub bind: String,
     pub allow_public: bool,
+    pub public_url: String,
 }
 
 impl Default for Panel {
@@ -431,6 +434,7 @@ impl Default for Panel {
         Self {
             bind: "127.0.0.1:8130".into(),
             allow_public: false,
+            public_url: String::new(),
         }
     }
 }
@@ -439,6 +443,36 @@ impl Panel {
     /// Where the panel listens; `None` when it is off.
     pub fn address(&self) -> Result<Option<std::net::SocketAddr>, String> {
         listen_address("panel", &self.bind, self.allow_public, 8130)
+    }
+
+    /// The canonical HTTPS origin seen by browsers. The proxy preserves this authority as `Host`.
+    pub fn public_origin(&self) -> Result<Option<String>, String> {
+        if self.public_url.is_empty() {
+            return Ok(None);
+        }
+        let invalid = || {
+            "panel.public_url must be an HTTPS origin such as https://panel.example.com".to_owned()
+        };
+        let authority = self
+            .public_url
+            .strip_prefix("https://")
+            .ok_or_else(invalid)?;
+        let authority = authority.strip_suffix('/').unwrap_or(authority);
+        let url = url::Url::parse(&self.public_url).map_err(|_| invalid())?;
+        if authority.is_empty()
+            || authority.contains(['/', '@', '\\'])
+            || self
+                .public_url
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            || url.host().is_none()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        Ok(Some(url.origin().ascii_serialization()))
     }
 }
 
@@ -749,6 +783,7 @@ impl Config {
         }
         self.backups.interval()?;
         self.panel.address()?;
+        self.panel.public_origin()?;
         self.api.check()?;
         self.transfer.check()?;
         if self.entities.villager_lobotomize_check_interval == 0 {
@@ -908,6 +943,7 @@ pub fn render(config: &Config) -> String {
         ("updates", "keep"),
         ("panel", "bind"),
         ("panel", "allow_public"),
+        ("panel", "public_url"),
         ("api", "bind"),
         ("api", "token"),
         ("api", "allow_public"),
@@ -1394,6 +1430,7 @@ keep = {keep}
         let panel = |bind: &str, allow_public| Panel {
             bind: bind.into(),
             allow_public,
+            ..Panel::default()
         };
         assert!(panel("127.0.0.1:8130", false).address().unwrap().is_some());
         assert!(panel("[::1]:8130", false).address().unwrap().is_some());
@@ -1415,6 +1452,30 @@ keep = {keep}
         assert!(panel("192.168.1.2:8130", false).address().is_err());
         assert!(panel("192.168.1.2:8130", true).address().unwrap().is_some());
         assert!(panel("localhost", false).address().is_err());
+    }
+
+    #[test]
+    fn a_public_panel_has_an_https_origin() {
+        let parsed = Config::parse("[panel]\npublic_url = 'https://Panel.Example:443/'").unwrap();
+        assert_eq!(
+            parsed.panel.public_origin().unwrap().as_deref(),
+            Some("https://panel.example")
+        );
+        assert_eq!(Config::parse(&render(&parsed)).unwrap().panel, parsed.panel);
+        assert_eq!(Panel::default().public_origin().unwrap(), None);
+        for url in [
+            "http://panel.example",
+            "https://secret@panel.example",
+            "https://panel.example/admin",
+            "https://panel.example/admin/..",
+            "https://panel.example/?key=secret",
+            "https://panel.example/#key",
+        ] {
+            assert!(
+                Config::parse(&format!("[panel]\npublic_url = '{url}'")).is_err(),
+                "{url}"
+            );
+        }
     }
 
     #[test]

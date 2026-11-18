@@ -211,21 +211,29 @@ pub fn run(dir: &Path) -> Result<(), String> {
     }
     crate::rcon::start(shared.clone())?;
     crate::query::start(shared.clone())?;
+    let public_origin = config.panel.public_origin()?;
     match config.panel.address() {
-        Ok(Some(address)) => match crate::panel::start(shared.clone(), address) {
-            Ok(()) => note(
-                &shared,
-                "INFO",
-                &format!(
-                    "Web panel on http://{address} (`horizon-server panel` prints a login link)"
+        Ok(Some(address)) => {
+            match crate::panel::start(shared.clone(), address, public_origin.clone()) {
+                Ok(()) => note(
+                    &shared,
+                    "INFO",
+                    &match public_origin {
+                        Some(origin) => format!(
+                            "Web panel on {origin} through the HTTPS proxy (access key required)"
+                        ),
+                        None => format!(
+                            "Web panel on http://{address} (`horizon-server panel` prints a login link)"
+                        ),
+                    },
                 ),
-            ),
-            Err(e) => note(
-                &shared,
-                "WARN",
-                &format!("The web panel can't listen on {address}: {e}"),
-            ),
-        },
+                Err(e) => note(
+                    &shared,
+                    "WARN",
+                    &format!("The web panel can't listen on {address}: {e}"),
+                ),
+            }
+        }
         Ok(None) => {}
         Err(e) => note(&shared, "WARN", &e),
     }

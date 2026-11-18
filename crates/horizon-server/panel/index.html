@@ -62,6 +62,7 @@
       <a href="#players" data-page="players"><svg><use href="#i-user-multiple-02"/></svg>Players<span class="count" id="nav-players"></span></a>
       <a href="#console" data-page="console"><svg><use href="#i-computer-terminal-01"/></svg>Console</a>
       <a href="#backups" data-page="backups"><svg><use href="#i-folder-01"/></svg>Backups</a>
+      <a href="#plugins" data-page="plugins"><svg><use href="#i-puzzle"/></svg>Plugins</a>
       <a href="#reports" data-page="reports"><svg><use href="#i-information-circle"/></svg>Crash reports<span class="count warn" id="nav-reports"></span></a>
     </nav>
 
@@ -163,6 +164,14 @@
       </article>
     </section>
 
+    <section class="page" data-page="plugins" hidden>
+      <article class="plate card">
+        <ul class="rows" id="plugins"></ul>
+        <p class="empty" id="plugin-status" role="status">Loading plugins…</p>
+        <pre class="log short" id="plugin-output" role="status" tabindex="0" hidden></pre>
+      </article>
+    </section>
+
     <!-- Crash reports -->
     <section class="page" data-page="reports" hidden>
       <div class="split">
@@ -183,8 +192,14 @@
   <div class="plate gate-card">
     <img src="/mark.png" alt="" width="48" height="48">
     <h1>Sign in to your server</h1>
-    <p>Run <code>horizon-server panel</code> in the server's folder and open the link it prints.
+    <p id="login-link-help" hidden>Run <code>horizon-server panel</code> in the server's folder and open the link it prints.
       A link works once, for 10 minutes.</p>
+    <form id="key-login" action="/login" method="post" hidden>
+      <label for="access-key">Panel access key</label>
+      <input id="access-key" type="password" autocomplete="current-password" maxlength="128" required>
+      <p id="login-error" role="alert" hidden></p>
+      <button id="login-submit" class="primary" type="submit">Sign in</button>
+    </form>
   </div>
 </main>
 

@@ -203,6 +203,7 @@ pub fn command_with_transfers(
         .args(["--dedicated", "--nogui"])
         .current_dir(&dir)
         .env("HORIZON_NO_AUDIO", "1")
+        .env_remove(config::PANEL_ACCESS_KEY_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

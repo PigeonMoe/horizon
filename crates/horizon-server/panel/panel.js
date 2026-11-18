@@ -170,13 +170,15 @@ const PAGES = {
   players: ["Players", "Who is online, who may join and who is banned."],
   console: ["Console", "The server's log as it happens. Commands run as if typed in the server's console."],
   backups: ["Backups", "Zips of the world and the settings in backups/. Restoring keeps the current world as a backup."],
+  plugins: ["Plugins", ""],
   reports: ["Crash reports", "The game writes one each time it stops unexpectedly."],
 };
 let page = "overview";
+let loginModeLoaded = false;
 
 function route() {
   const wanted = location.hash.slice(1);
-  page = PAGES[wanted] ? wanted : "overview";
+  page = Object.hasOwn(PAGES, wanted) ? wanted : "overview";
   for (const section of document.querySelectorAll(".page")) section.hidden = section.dataset.page !== page;
   for (const link of document.querySelectorAll(".nav a")) {
     if (link.dataset.page === page) link.setAttribute("aria-current", "page");
@@ -186,6 +188,7 @@ function route() {
   $("page-lead").textContent = PAGES[page][1];
   document.title = `${PAGES[page][0]} · ${state.config ? state.config.server.motd : "Horizon server"}`;
   if (page === "console") scrollLog(true);
+  if (page === "plugins" && !$('app').hidden) refreshPlugins();
   if (state.status) renderUpdate(state.status.update);
   renderCharts();
 }
@@ -194,6 +197,13 @@ function show(view) {
   $("app").hidden = view !== "app";
   $("signed-out").hidden = view !== "signed-out";
   $("gone").hidden = view !== "gone";
+  if (view === "signed-out" && !loginModeLoaded) {
+    loginModeLoaded = true;
+    api("GET", "/login/mode").then(({ key }) => {
+      $("key-login").hidden = !key;
+      $("login-link-help").hidden = key;
+    }).catch(() => { loginModeLoaded = false; });
+  }
 }
 
 // --- State ----------------------------------------------------------------------------------------------
@@ -526,6 +536,58 @@ async function readCrash(name) {
   }
 }
 
+// --- Plugins --------------------------------------------------------------------------------------------
+
+let pluginKey;
+let readingPlugins = false;
+async function refreshPlugins() {
+  if (readingPlugins) return;
+  readingPlugins = true;
+  const status = $("plugin-status");
+  try {
+    const { plugins } = await api("GET", "/api/v1/panel/plugins");
+    const key = JSON.stringify(plugins);
+    if (key !== pluginKey) {
+      pluginKey = key;
+      fill("plugins", null, plugins.map(({ id, version, card }) => h("li", {},
+        h("span", { class: "file-icon", "aria-hidden": "true" }, icon("puzzle")),
+        h("span", { class: "row-main" },
+          h("b", {}, card ? card.title : id),
+          card && h("small", {}, card.description ? `${id} · ${card.description}` : id),
+        ),
+        h("span", { class: "row-side" }, version),
+        card && card.actions.length > 0 && h("span", { class: "row-actions" }, card.actions.map((action) =>
+          button(action.label, () => pluginAction(id, card.title, action), { kind: "ghost" }),
+        )),
+      )));
+    }
+    status.hidden = plugins.length > 0;
+    if (!status.hidden) status.textContent = "No plugins loaded.";
+  } catch (e) {
+    if (e instanceof SignedOut) show("signed-out");
+    pluginKey = undefined;
+    $("plugins").replaceChildren();
+    status.textContent = e.message;
+    status.hidden = false;
+  } finally {
+    readingPlugins = false;
+  }
+}
+
+async function pluginAction(plugin, title, action) {
+  if (!await ask({ title: `${action.label}?`, text: title, ok: "Run" })) return;
+  const output = $("plugin-output");
+  try {
+    const reply = await api("POST", "/api/v1/panel/plugins/action", { plugin, action: action.id });
+    output.textContent = (reply.output || []).join("\n") || "Done.";
+    output.hidden = false;
+  } catch (e) {
+    output.hidden = true;
+    if (e instanceof SignedOut) show("signed-out");
+    else toast(e.message, true);
+  }
+}
+
 // --- Polling --------------------------------------------------------------------------------------------
 
 async function refreshLists() {
@@ -585,7 +647,10 @@ async function poll() {
     renderCharts();
     state.logNext = logs.next;
     appendLog(logs.lines);
-    if (ticks++ % 5 === 0) await refreshLists();
+    if (ticks++ % 5 === 0) {
+      await refreshLists();
+      if (page === "plugins") refreshPlugins();
+    }
     if (ticks % 30 === 0) loadConfig();
   } catch (e) {
     if (e instanceof SignedOut) show("signed-out");
@@ -627,6 +692,25 @@ function setUp() {
   $("sign-out").addEventListener("click", async () => {
     await fetch("/logout", { method: "POST", credentials: "same-origin", headers: { "X-Horizon": "1" } }).catch(() => {});
     show("signed-out");
+  });
+  $("key-login").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = $("access-key");
+    const submit = $("login-submit");
+    const error = $("login-error");
+    input.disabled = submit.disabled = true;
+    error.hidden = true;
+    try {
+      await api("POST", "/login", { key: input.value });
+      location.reload();
+    } catch (e) {
+      error.textContent = e.message;
+      error.hidden = false;
+    } finally {
+      input.value = "";
+      input.disabled = submit.disabled = false;
+      if (!error.hidden) input.focus();
+    }
   });
 
   // Players.

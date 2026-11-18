@@ -43,7 +43,7 @@ Usage: horizon-server [--dir DIR] <command>
   service install|uninstall|print [--system]
               Start the server at boot or login: a systemd unit on Linux (--system: for every user,
               with sudo), a launchd agent on macOS, a task at logon on Windows
-  panel       A one-time login link for the web panel ([panel] in server.toml; 127.0.0.1:8130 by
+  panel       The public address or a one-time login link ([panel] in server.toml; 127.0.0.1:8130 by
               default)
   update [--check [--json]] [--version TAG] [--timeout SECONDS]
               Install the newest release (checked against GitHub's SHA-256), back up the world and
@@ -140,7 +140,8 @@ Any other server.properties key, spelled as vanilla spells it, for example: spaw
 | Key | Default | In `server.properties` | What it does |
 | --- | --- | --- | --- |
 | `bind` | `"127.0.0.1:8130"` |  | the web panel: this computer only, or a tailnet address (100.x); "" turns it off |
-| `allow_public` | `false` |  | true lets bind be any address; never put the panel on the open internet |
+| `allow_public` | `false` |  | true lets bind be any address; keep the listener behind the HTTPS proxy |
+| `public_url` | `""` |  | public HTTPS origin; requires a key from HORIZON_PANEL_ACCESS_KEY |
 
 ### `[api]`
 
@@ -211,4 +212,4 @@ HTTP and JSON on 127.0.0.1. A running server writes its address and a random tok
 | `POST` | `/api/v1/whitelist/remove` | `{"name"}` | `{"changed": bool, "output": [...]}`: whether the list (or who is online) changed, and the console's lines | Take a player off the whitelist (kicked if enforce-whitelist) |
 | `GET` | `/api/v1/config` | nothing | `{"config": {...}}`: server.toml's settings by section (`api.token` hidden) | The settings |
 | `PATCH` | `/api/v1/config` | `{"changes": {"world.difficulty": "hard", ...}}` | `saved`, `applied` (taken by the running game at once), `restart` (from the next start), `running` | Change settings as `config set` does; not `engine.*`, `panel.*`, `api.*`, nor RCON, query or management keys |
-| `POST` | `/api/v1/panel/login` | nothing | `{"url": "..."}` | A one-time login link for the web panel (with the token only, not from the panel) |
+| `POST` | `/api/v1/panel/login` | nothing | `{"url": "..."}` | The public panel address or a one-time login link (control token required) |

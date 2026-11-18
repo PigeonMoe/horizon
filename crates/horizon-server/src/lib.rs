@@ -79,7 +79,7 @@ Usage: horizon-server [--dir DIR] <command>
   service install|uninstall|print [--system]
               Start the server at boot or login: a systemd unit on Linux (--system: for every user,
               with sudo), a launchd agent on macOS, a task at logon on Windows
-  panel       A one-time login link for the web panel ([panel] in server.toml; 127.0.0.1:8130 by
+  panel       The public address or a one-time login link ([panel] in server.toml; 127.0.0.1:8130 by
               default)
   update [--check [--json]] [--version TAG] [--timeout SECONDS]
               Install the newest release (checked against GitHub's SHA-256), back up the world and

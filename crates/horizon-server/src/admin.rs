@@ -101,7 +101,7 @@ impl Action {
     }
 }
 
-fn running(shared: &Shared) -> Result<engine::Control, Response> {
+pub(crate) fn running(shared: &Shared) -> Result<engine::Control, Response> {
     if shared.state.lock().unwrap().phase != Phase::Running {
         return Err(Response::error(409, "the game isn't running right now"));
     }
@@ -206,29 +206,30 @@ struct RuntimeMods {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct RuntimeMod {
-    id: String,
-    version: String,
+pub(crate) struct RuntimeMod {
+    pub id: String,
+    pub version: String,
+}
+
+pub(crate) fn runtime_mods(game: &mut engine::Control) -> Result<Vec<RuntimeMod>, Response> {
+    let reply = game
+        .ask("server-mods")
+        .map_err(|e| Response::error(409, &format!("the game didn't answer: {e}")))?;
+    serde_json::from_value::<RuntimeMods>(reply)
+        .map(|inventory| inventory.mods)
+        .map_err(|e| {
+            Response::error(
+                409,
+                &format!("the game's mod inventory is unavailable: {e}"),
+            )
+        })
 }
 
 /// `GET /api/v1/mods`: the running engine's package inventory, with build provenance kept separate.
 pub fn mods(shared: &Shared) -> Response {
-    let mut game = match running(shared) {
-        Ok(game) => game,
-        Err(response) => return response,
-    };
-    let reply = match game.ask("server-mods") {
-        Ok(reply) => reply,
-        Err(e) => return Response::error(409, &format!("the game didn't answer: {e}")),
-    };
-    let runtime: RuntimeMods = match serde_json::from_value(reply) {
+    let runtime = match running(shared).and_then(|mut game| runtime_mods(&mut game)) {
         Ok(runtime) => runtime,
-        Err(e) => {
-            return Response::error(
-                409,
-                &format!("the game's mod inventory is unavailable: {e}"),
-            );
-        }
+        Err(response) => return response,
     };
     let built = config::Config::load(&shared.dir)
         .ok()
@@ -236,7 +237,7 @@ pub fn mods(shared: &Shared) -> Response {
         .and_then(|p| std::fs::read_to_string(p.with_file_name("native-mods.json")).ok());
     Response::json(
         200,
-        &json!({ "mods": runtime.mods, "provenance": built_with(built.as_deref()) }),
+        &json!({ "mods": runtime, "provenance": built_with(built.as_deref()) }),
     )
 }
 

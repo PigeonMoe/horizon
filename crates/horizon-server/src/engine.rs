@@ -19,6 +19,7 @@ pub fn check_starts(program: &Path) -> Result<(), String> {
     let mut command = crate::process::command(program);
     let output = command
         .arg("--help")
+        .env_remove(horizon_server_launch::config::PANEL_ACCESS_KEY_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

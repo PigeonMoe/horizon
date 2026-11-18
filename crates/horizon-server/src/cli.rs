@@ -365,10 +365,14 @@ fn capture_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// `panel`: a one-time login link for the web panel.
+/// `panel`: the public address or a one-time login link for the web panel.
 pub fn panel(dir: &Path) -> Result<(), String> {
     let reply = running(dir)?.call("POST", "/api/v1/panel/login", None)?;
     let url = reply["url"].as_str().unwrap_or_default();
+    if url.starts_with("https://") {
+        println!("Open the web panel and enter its access key:\n  {url}");
+        return Ok(());
+    }
     println!(
         "Open this link in your browser (it works once, for 10 minutes):\n  {url}\n\
          From another computer: put a tailnet address in [panel] bind, or forward the port first:\n  \

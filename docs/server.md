@@ -583,8 +583,8 @@ keep = 12                    # automatic backups kept (backups made by hand are 
 keep = 1                     # other releases kept by updates, besides the one in use and the one rollback goes to
 ```
 
-This is the file `init` writes today, and it also writes `[panel]` (`bind = "127.0.0.1:8130"` and
-`allow_public = false`, section 6), `[api]`, `[transfer]` (off; a proxy's hand-overs, section 2) and `[discord]`. `[entities]` (mob AI far from players, off) is written only when set ([hosting](hosting.md)). The defaults are vanilla 26.3's (a test checks
+This is the file `init` writes today, and it also writes `[panel]` (`bind = "127.0.0.1:8130"`,
+`allow_public = false`, and `public_url = ""`, section 6), `[api]`, `[transfer]` (off; a proxy's hand-overs, section 2) and `[discord]`. `[entities]` (mob AI far from players, off) is written only when set ([hosting](hosting.md)). The defaults are vanilla 26.3's (a test checks
 each one). Unknown keys are errors, as are a typed key set again under `[properties]` and values vanilla would
 refuse. There is no `backups.before_update` setting: an update always backs up the world first (section 7).
 
@@ -649,7 +649,7 @@ horizon-server backup [NAME]             backups [--json]    restore <backup> [-
 horizon-server import <server.properties>
 horizon-server config [--json]           config set KEY=VALUE... [--json]
 horizon-server service install|uninstall|print [--system]
-horizon-server panel                     the panel's address and a one-time login link
+horizon-server panel                     the public panel address or a one-time login link
 horizon-server update [--check [--json]] [--version vX.Y.Z] [--timeout S]     rollback [--timeout S]
 horizon-server update --archive FILE --version NAME     an archive you have (your own build)
 horizon-server mcp                       MCP server on stdio (section 8)
@@ -689,12 +689,12 @@ colours, light and dark) and draws charts on a canvas. It polls the control API'
 (`status`, `metrics?since=`, `logs?since=`), served by the same small HTTP code on `std::net`, with no async
 runtime or new dependency. Server-sent events can replace the polling later if a tab ever costs too much.
 
-**Auth: local or tailnet only, never an open admin port.**
+**Local and tailnet access**
 
 - **Bind.** The panel listens on `127.0.0.1:8130` by default. `panel.bind` can name a tailnet address
   (100.64.0.0/10 or Tailscale's fd7a:115c:a1e0::/48) or another loopback address. Any other address, such as
-  0.0.0.0 or a public IP, is refused unless `panel.allow_public = true` is set, and even then the panel logs
-  a warning at every start.
+  0.0.0.0 or a public IP, requires `panel.allow_public = true`. Restrict a plaintext listener to a trusted
+  network or the HTTPS reverse proxy.
 - **Who may act.** The API token in `.horizon/api.json` (file mode 0600) is what the CLI and MCP use. Browsers
   get a one-time login link from `horizon-server panel`: a code good for 10 minutes, swapped for an
   `HttpOnly; SameSite=Strict` session cookie. Anyone who can read the server folder can manage the server,
@@ -707,6 +707,49 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   framed.
 - **Remote access** goes over Tailscale/SSH (`ssh -L 8130:127.0.0.1:8130 host`), with no TLS or passwords to
   manage. HTTPS comes for free with `tailscale serve`, and the doc shows how to set it up.
+
+**Public HTTPS with an access key**
+
+Set a public DNS name, configure an HTTPS reverse proxy with a certificate for that name, and set the same
+origin in `server.toml`. Run the proxy and supervisor on the same machine to keep the panel listener on
+loopback.
+
+```toml
+[panel]
+bind = "127.0.0.1:8130"
+public_url = "https://panel.example.com"
+```
+
+The reverse proxy forwards that hostname on `/` to `http://127.0.0.1:8130` and preserves the public `Host`
+and browser `Origin` headers. Keep the plaintext backend port out of the public firewall. If the proxy is
+on a separate private network, bind the panel to that network with `allow_public = true` and restrict
+the port to the proxy. A public origin is a dedicated HTTPS host, optionally with a port.
+
+Generate a random key with `openssl rand -hex 32`. Supply it to the supervisor through the hosting
+environment or secret manager as `HORIZON_PANEL_ACCESS_KEY`, then restart the supervisor. The panel stays
+off in public mode until it has a valid key. `horizon-server panel` prints the public address. The sign-in
+form exchanges the key for a `Secure; HttpOnly; SameSite=Strict` cookie that lasts up to twelve hours. To
+rotate the key, update the environment secret and restart the supervisor. This ends active sessions.
+
+**Plugin management entries**
+
+The **Plugins** page shows packages loaded by the running engine. To add a title, description, or actions,
+install a TOML manifest at `panel-plugins/<mod-id>.toml` in the server folder. The name must match the
+loaded package ID. An example for a package that has registered the `example` command:
+
+```toml
+title = "Example plugin"
+description = "Managed through the server console"
+
+[[actions]]
+id = "status"
+label = "View status"
+command = "example status"
+```
+
+Each action runs a fixed, one-line console command starting with the package ID and shows the output.
+The panel checks that the package is loaded when it runs an action. Install manifests from plugins you
+trust, since they define commands executed with console permissions. Edits take effect on the next refresh.
 
 ## 7. Backups, updates and crash restart
 

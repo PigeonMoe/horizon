@@ -272,7 +272,7 @@ pub const ROUTES: [Route; 32] = [
         path: "/api/v1/panel/login",
         takes: "",
         answers: "`{\"url\": \"...\"}`",
-        what: "A one-time login link for the web panel (with the token only, not from the panel)",
+        what: "The public panel address or a one-time login link (control token required)",
     },
 ];
 

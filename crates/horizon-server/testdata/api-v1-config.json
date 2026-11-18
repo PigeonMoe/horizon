@@ -19,7 +19,7 @@
           "resources": "",
           "restart_on_crash": true
         },
-        "panel": {"allow_public": false, "bind": "127.0.0.1:8130"},
+        "panel": {"allow_public": false, "bind": "127.0.0.1:8130", "public_url": ""},
         "properties": {},
         "server": {
           "accept_older_clients": false,

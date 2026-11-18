@@ -16,6 +16,7 @@ dunce = "1.0.5"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 toml_edit = "0.25"
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
