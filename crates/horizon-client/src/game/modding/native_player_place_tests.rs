@@ -26,6 +26,91 @@ fn loaded(game: &mut super::Game<'_>) {
     );
 }
 
+mod device_protection {
+    use mod_api::{EntityChangeBlockPreEvent, Flow, Hooks, ServerHost};
+
+    #[derive(Default)]
+    struct Claims;
+
+    #[mod_api::horizon_mod]
+    impl Hooks for Claims {
+        fn entity_change_block_pre(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut EntityChangeBlockPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player, Some(13));
+            assert_eq!(event.kind, "minecraft:player");
+            match event.pos {
+                [2, 70, 2] => Flow::Cancel,
+                [3, 70, 2] => Flow::Continue,
+                _ => panic!("unexpected block protection check at {:?}", event.pos),
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_device_write_checks_the_real_player_and_the_expected_block_before_changing_it() {
+    use mod_api::{BlockUpdateFlags, ModEntry};
+
+    mod_platform::testing::with_mods(
+        vec![ModEntry::new(
+            "device-protection",
+            device_protection::hooks(),
+        )]
+        .into(),
+        || {
+            with_guests(|game| {
+                loaded(game);
+                let player = game.player(13).unwrap();
+                let level = game.level(game.dim.id()).unwrap();
+                let air = api_state(game, "minecraft:air");
+                let water = api_state(game, "minecraft:water");
+                let protected = [2, 70, 2];
+                let open = [3, 70, 2];
+                let spawn = [4, 70, 2];
+                let flags = BlockUpdateFlags::CLIENTS | BlockUpdateFlags::KNOWN_SHAPE;
+
+                assert_eq!(
+                    level.replace_block_for_player(game, player, protected, air, water, flags),
+                    Ok(false)
+                );
+                assert_eq!(level.block_state(game, protected), Some(air));
+
+                assert_eq!(
+                    level.replace_block_for_player(game, player, open, water, air, flags),
+                    Ok(false)
+                );
+                assert_eq!(
+                    level.replace_block_for_player(game, player, open, air, air, flags),
+                    Ok(true)
+                );
+                assert_eq!(level.block_state(game, open), Some(air));
+                assert_eq!(
+                    level.replace_block_for_player(game, player, open, air, water, flags),
+                    Ok(true)
+                );
+                assert_eq!(level.block_state(game, open), Some(water));
+
+                game.options.execution_role =
+                    crate::game::execution_role::ExecutionRole::DedicatedServer;
+                game.level.world_spawn = Some(spawn);
+                game.level.world_spawn_dimension = Some(game.dim.id().to_owned());
+                let host = game.lan.as_mut().unwrap();
+                host.hub.ops.insert(12, 4);
+                host.hub.spawn_protection = 2;
+                assert_eq!(
+                    level.replace_block_for_player(game, player, spawn, air, water, flags),
+                    Ok(false)
+                );
+                assert_eq!(level.block_state(game, spawn), Some(air));
+            })
+        },
+    );
+}
+
 /// A bed written for a player gets its head (`setPlacedBy`).
 #[test]
 #[ignore = "daily"]

@@ -2,9 +2,70 @@
 use super::{Game, native_server::PlayerRead};
 use horizon_core::position::BlockPos;
 use horizon_world::registry::BlockStateId;
-use mod_api::{BlockUpdateFlags, LevelRef, PlayerRef, PlayerWorldRefusal as Refusal};
+use mod_api::{
+    BlockStateError, BlockUpdateFlags, LevelRef, LevelWriteError, PlayerRef,
+    PlayerWorldRefusal as Refusal,
+};
 
 impl Game<'_> {
+    pub(super) fn level_replace_block_for_player(
+        &mut self,
+        level: LevelRef,
+        player: PlayerRef,
+        pos: [i32; 3],
+        expected: BlockStateId,
+        replacement: BlockStateId,
+        flags: BlockUpdateFlags,
+    ) -> Result<bool, LevelWriteError> {
+        self.native_level_world_result(level)?;
+        if self.dim.key() != level.dimension() {
+            return Err(LevelWriteError::Unavailable);
+        }
+        let registry = &self.pack.assets.registry;
+        if registry.state(expected).is_none() || registry.state(replacement).is_none() {
+            return Err(BlockStateError::UnknownState.into());
+        }
+        let [x, y, z] = pos;
+        let current = |game: &Self| {
+            game.native_level_write_allowed(level, pos) && game.world.block(x, y, z) == expected
+        };
+        let allowed_player = |game: &Self| {
+            let in_level = match game.player_handle_read(player) {
+                Some(PlayerRead::Acting { mode, body, .. }) => {
+                    mode != 3 && body.is_some_and(|body| body.health.health() > 0.0)
+                }
+                Some(PlayerRead::Guest(guest)) => {
+                    !guest.dead && guest.game_mode != 3 && guest.dimension == game.dim.id()
+                }
+                None => false,
+            };
+            in_level
+                && !game.lan.as_ref().is_some_and(|host| {
+                    game.spawn_protection_for(host, player.uuid())
+                        .is_some_and(|radius| game.spawn_protects(radius, game.dim.id(), pos))
+                })
+        };
+        if !(-30_000_000..30_000_000).contains(&x)
+            || !(-30_000_000..30_000_000).contains(&z)
+            || !current(self)
+            || !allowed_player(self)
+            || self.landing_change_cancelled(
+                Some(player.uuid()),
+                BlockPos::new(x, y, z),
+                expected,
+                replacement,
+            )
+            || !current(self)
+            || !allowed_player(self)
+        {
+            return Ok(false);
+        }
+        if expected == replacement {
+            return Ok(true);
+        }
+        self.level_set_block(level, pos, replacement, flags)
+    }
+
     /// The one block write (`level_set_block`, its block entity included) with a placement's
     /// flags, then `Block.setPlacedBy` in the player's turn; nothing else of `BlockItem.place`.
     pub(super) fn player_place_block(

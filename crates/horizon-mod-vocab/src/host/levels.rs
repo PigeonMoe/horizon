@@ -920,6 +920,24 @@ pub trait LevelsBackendMut {
         flags: BlockUpdateFlags,
     ) -> Result<bool, LevelWriteError>;
     /// Side: server.
+    /// A block change made by a device on behalf of a live player in this level.
+    /// Applies dedicated spawn protection and the cancellable `entity_change_block_pre`
+    /// hook with the player's UUID. The target must equal `expected` before and after
+    /// the hook. Returns `Ok(false)` for a stale player, placement refusal, protection
+    /// denial or changed target. If `expected == replacement`, an allowed call returns
+    /// `Ok(true)` without writing. Like `set_block`, a successful write acts immediately.
+    /// Make it the last operation when an item transaction also pays for the change.
+    #[access(WorldOnly)]
+    fn level_replace_block_for_player(
+        &mut self,
+        level: LevelRef,
+        player: PlayerRef,
+        pos: [i32; 3],
+        expected: BlockState,
+        replacement: BlockState,
+        flags: BlockUpdateFlags,
+    ) -> Result<bool, LevelWriteError>;
+    /// Side: server.
     /// Remove a block in place (`Level.removeBlock`), preserving its fluid.
     #[access(WorldOnly)]
     fn level_remove_block(&mut self, level: LevelRef, pos: [i32; 3], moved: bool) -> bool;
