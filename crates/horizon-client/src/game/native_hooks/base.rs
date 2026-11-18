@@ -145,11 +145,8 @@ impl GameLevel<'_> {
         self.fire_neighbor_changed(ticks, dimension, pos, state, changed, moved);
     }
 
-    /// On an authoritative server, a fluid flows or fire spreads from `from`
-    /// into `to` (`kind` is `fluid` or `fire`): `FlowingFluid.spreadTo`, and
-    /// `FireBlock.tick` setting fire to `to` or burning it (`checkBurnOut`).
-    /// Set `canceled` to leave the block at `to` as it is. Fluids ask on
-    /// every flow: answer fast.
+    /// Check a fluid flow, fire spread or propagation by vegetation, buds or
+    /// sculk before changing the destination block.
     #[inline(always)]
     pub(in crate::game) fn native_block_spread(
         &self,

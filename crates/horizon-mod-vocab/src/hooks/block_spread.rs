@@ -2,9 +2,9 @@
 // catalog-order: 0040
 
 pub trait Hooks {
-    /// On an authoritative server, a fluid flows or fire spreads from `from`
-    /// into `to` (`kind` is `fluid` or `fire`): `FlowingFluid.spreadTo`, and
-    /// `FireBlock.tick` setting fire to `to` or burning it (`checkBurnOut`).
+    /// On an authoritative server, `kind` identifies fluid flow (`fluid`),
+    /// fire spread or burning (`fire`), or propagation by vegetation, buds
+    /// or sculk (`growth`). `from` is the original source block.
     /// Set `canceled` to leave the block at `to` as it is. Fluids ask on
     /// every flow: answer fast.
     #[hook(

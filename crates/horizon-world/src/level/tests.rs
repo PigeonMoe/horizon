@@ -53,8 +53,9 @@ pub(crate) struct TestLevel {
     pub cake_asks: std::cell::Cell<u32>,
     pub tick_ready: bool,
     pub block_events_ready: bool,
-    /// Positions that refuse fluids, fire and piston moves, as a land claim would.
+    /// Positions that refuse fluids, fire, growth and piston moves, as a land claim would.
     pub guarded: HashSet<BlockPos>,
+    pub growth_spread_checks: std::cell::RefCell<Vec<(BlockPos, BlockPos)>>,
     pub guarded_current: HashSet<BlockPos>,
     pub guarded_falling: HashSet<BlockPos>,
     pub guarded_physics: HashSet<BlockPos>,
@@ -140,6 +141,7 @@ impl TestLevel {
             tick_ready: true,
             block_events_ready: true,
             guarded: HashSet::new(),
+            growth_spread_checks: std::cell::RefCell::new(Vec::new()),
             guarded_current: HashSet::new(),
             guarded_falling: HashSet::new(),
             guarded_physics: HashSet::new(),
@@ -317,7 +319,10 @@ impl LevelAccess for TestLevel {
     fn allow_fluid_tick(&self, pos: BlockPos, _fluid: &'static str) -> bool {
         !self.guarded.contains(&pos)
     }
-    fn allow_spread(&self, _kind: Spread, _from: BlockPos, to: BlockPos) -> bool {
+    fn allow_spread(&self, kind: Spread, from: BlockPos, to: BlockPos) -> bool {
+        if kind == Spread::Growth {
+            self.growth_spread_checks.borrow_mut().push((from, to));
+        }
         !self.guarded.contains(&to)
     }
     fn allow_piston_move(
@@ -3141,6 +3146,128 @@ fn calibrated_sensor_is_active_for_ten_ticks() {
             .calibrated_back_signal(&mut w.level, &mut w.ticks, pos),
         15
     );
+}
+
+#[test]
+fn grass_spreads_to_each_allowed_target_from_the_original_block() {
+    let mut w = world!();
+    let source = BlockPos::new(0, 4, 0);
+    let guarded = source.offset(-1, 0, 0);
+    let open = source.offset(1, 0, 0);
+    let grass = w.id("grass_block", &[]);
+    let dirt = w.id("dirt", &[]);
+    w.put(source, grass);
+    w.put(guarded, dirt);
+    w.put(open, dirt);
+    w.level.guarded.insert(guarded);
+    for _ in 0..128 {
+        w.b().random_tick(&mut w.level, &mut w.ticks, source);
+    }
+    let checks = w.level.growth_spread_checks.borrow();
+    assert!(checks.contains(&(source, guarded)));
+    assert!(checks.contains(&(source, open)));
+    assert_eq!(w.get(guarded), dirt);
+    assert_eq!(w.get(open), grass);
+}
+
+#[test]
+fn refusing_chorus_spread_keeps_the_source_flower_and_skips_the_growth_event() {
+    let mut w = world!();
+    let flower = w.id("chorus_flower", &[("age", "0")]);
+    let plant = w.id("chorus_plant", &[("up", "true"), ("down", "true")]);
+    let end_stone = w.id("end_stone", &[]);
+    let source = BlockPos::new(0, 4, 0);
+    let target = source.offset(0, 1, 0);
+    w.put(source.offset(0, -1, 0), end_stone);
+    w.put(source, flower);
+    w.level.guarded.insert(target);
+    w.b().random_tick(&mut w.level, &mut w.ticks, source);
+    assert_eq!(*w.level.growth_spread_checks.borrow(), [(source, target)]);
+    assert_eq!(w.get(source), flower);
+    assert_eq!(w.get(target), w.b().air());
+    assert!(
+        !w.level
+            .events
+            .iter()
+            .any(|event| matches!(event, LevelEvent::LevelEvent { id: 1033, .. }))
+    );
+
+    w.level.guarded.remove(&target);
+    w.b().random_tick(&mut w.level, &mut w.ticks, source);
+    assert_eq!(w.get(source), plant);
+    assert_eq!(w.get(target), flower);
+}
+
+#[test]
+fn bamboo_does_not_rewrite_adjacent_leaves_if_the_top_cannot_spread() {
+    let mut w = world!();
+    let top = BlockPos::new(0, 4, 0);
+    let lower = top.offset(0, -1, 0);
+    let bottom = top.offset(0, -2, 0);
+    let target = top.offset(0, 1, 0);
+    let large = w.id("bamboo", &[("leaves", "large")]);
+    let small = w.id("bamboo", &[("leaves", "small")]);
+    let dirt = w.id("dirt", &[]);
+    w.put(bottom.offset(0, -1, 0), dirt);
+    w.put(bottom, small);
+    w.put(lower, large);
+    w.put(top, large);
+    w.level.guarded.insert(target);
+    for _ in 0..40 {
+        w.b().random_tick(&mut w.level, &mut w.ticks, top);
+    }
+    assert!(
+        w.level
+            .growth_spread_checks
+            .borrow()
+            .contains(&(top, target))
+    );
+    assert_eq!(w.get(target), w.b().air());
+    assert_eq!(w.get(lower), large);
+    assert_eq!(w.get(bottom), small);
+
+    w.level.guarded.remove(&target);
+    for _ in 0..40 {
+        w.b().random_tick(&mut w.level, &mut w.ticks, top);
+    }
+    assert_eq!(w.prop(target, "leaves"), "large");
+    assert_eq!(w.prop(lower, "leaves"), "small");
+    assert_eq!(w.prop(bottom, "leaves"), "none");
+}
+
+#[test]
+fn sculk_block_conversion_checks_the_catalyst_and_does_not_displace_on_refusal() {
+    let mut w = world!();
+    let origin = BlockPos::new(0, 1, 0);
+    let vein = BlockPos::new(2, 1, 0);
+    let support = vein.offset(0, -1, 0);
+    let catalyst = w.id("sculk_catalyst", &[]);
+    let stone = w.id("stone", &[]);
+    let sculk = w.id("sculk", &[]);
+    let vein_state = w.id("sculk_vein", &[("down", "true")]);
+    w.put(origin, catalyst);
+    w.put(vein, vein_state);
+    w.put(support, stone);
+    w.level.guarded.insert(support);
+    let mut spreader = sculk::SculkSpreader::default();
+    spreader.add_cursors(vein, 40);
+    w.b()
+        .sculk_update_cursors(&mut w.level, &mut w.ticks, &mut spreader, origin, true);
+    assert!(
+        w.level
+            .growth_spread_checks
+            .borrow()
+            .contains(&(origin, support))
+    );
+    assert_eq!(w.get(support), stone);
+    assert!(!w.level.events.iter().any(|event| matches!(event, LevelEvent::BlockEvent { pos, kind: "push_entities_up", .. } if *pos == support)));
+
+    w.level.guarded.remove(&support);
+    let mut spreader = sculk::SculkSpreader::default();
+    spreader.add_cursors(vein, 40);
+    w.b()
+        .sculk_update_cursors(&mut w.level, &mut w.ticks, &mut spreader, origin, true);
+    assert_eq!(w.get(support), sculk);
 }
 
 #[test]

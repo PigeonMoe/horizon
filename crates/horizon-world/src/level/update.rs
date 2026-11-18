@@ -322,6 +322,17 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId, flags: i32) -> bool {
         self.set_block_limit(pos, state, flags, flags::UPDATE_LIMIT)
     }
+    pub(super) fn set_growth_spread(
+        &mut self,
+        source: BlockPos,
+        target: BlockPos,
+        state: BlockStateId,
+        flags: i32,
+    ) -> bool {
+        self.level
+            .allow_spread(super::Spread::Growth, source, target)
+            && self.set_block(target, state, flags)
+    }
     pub fn set_block_and_update(&mut self, pos: BlockPos, state: BlockStateId) -> bool {
         self.set_block(pos, state, flags::UPDATE_ALL)
     }

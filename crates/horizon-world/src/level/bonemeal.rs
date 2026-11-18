@@ -673,7 +673,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     {
                         return;
                     }
-                    self.bamboo_grow(top_state, top, total + i);
+                    if !self.bamboo_grow(top_state, top, total + i) {
+                        return;
+                    }
                 }
             }
             Kind::Cocoa => {
@@ -1203,7 +1205,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     b.default_of(block)
                 };
                 let placed = b.table.set_bool(base, self.direction_prop(face), true);
-                if self.set_block(at, placed, 2) {
+                if self.set_growth_spread(pos, at, placed, 2) {
                     return;
                 }
             }

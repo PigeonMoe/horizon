@@ -448,6 +448,8 @@ pub enum Spread {
     /// Fire spreads to the block or burns it (`FireBlock.tick`,
     /// `checkBurnOut`).
     Fire,
+    /// Existing vegetation, buds or sculk propagate into a target block.
+    Growth,
 }
 
 mod block_entity_neighbors;

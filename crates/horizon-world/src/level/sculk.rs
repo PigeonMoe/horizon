@@ -2,7 +2,7 @@
 //! level `SculkSpreader` with the sculk, sculk vein and default charge-cursor
 //! behaviours (`SculkBlock`, `SculkVeinBlock`, `SculkBehaviour`).
 use super::{
-    Behaviours, LevelAccess, LevelEvent, Sim, Ticks,
+    Behaviours, LevelAccess, LevelEvent, Sim, Spread as BlockSpread, Ticks,
     classes::Class,
     update::{above, below, rel},
 };
@@ -356,7 +356,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         }
         let mut state = self.state(cursor.pos);
         let mut behaviour = self.sculk_behaviour(state);
-        if veins && self.sculk_attempt_spread_vein(behaviour, cursor.pos, state, &cursor.facings) {
+        if veins
+            && self.sculk_attempt_spread_vein(behaviour, origin, cursor.pos, state, &cursor.facings)
+        {
             // SculkBlock.canChangeBlockStateOnSpread is false.
             if behaviour != Behaviour::Sculk {
                 state = self.state(cursor.pos);
@@ -390,6 +392,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     fn sculk_attempt_spread_vein(
         &mut self,
         behaviour: Behaviour,
+        origin: BlockPos,
         pos: BlockPos,
         state: BlockStateId,
         facings: &Option<Vec<Direction>>,
@@ -398,7 +401,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             match facings {
                 None => {
                     let current = self.state(pos);
-                    return self.sculk_spread_all(current, pos, &[Spread::SamePosition]) > 0;
+                    return self.sculk_spread_all(current, origin, pos, &[Spread::SamePosition])
+                        > 0;
                 }
                 Some(faces) if !faces.is_empty() => {
                     let b = self.b;
@@ -410,7 +414,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Some(_) => {}
             }
         }
-        self.sculk_spread_all(state, pos, &ALL_SPREADS) > 0
+        self.sculk_spread_all(state, origin, pos, &ALL_SPREADS) > 0
     }
     /// `SculkVeinBlock.regrow`.
     fn sculk_regrow(&mut self, pos: BlockPos, existing: BlockStateId, faces: &[Direction]) -> bool {
@@ -433,7 +437,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         true
     }
     /// `MultifaceSpreader.spreadAll` with the sculk vein configuration.
-    fn sculk_spread_all(&mut self, state: BlockStateId, pos: BlockPos, types: &[Spread]) -> i64 {
+    fn sculk_spread_all(
+        &mut self,
+        state: BlockStateId,
+        origin: BlockPos,
+        pos: BlockPos,
+        types: &[Spread],
+    ) -> i64 {
         let other_source = !self.is_vein(state);
         let mut count = 0;
         for face in Direction::ALL {
@@ -470,7 +480,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let Some(new) = self.sculk_state_for_placement(old, target, face_to) else {
                     continue;
                 };
-                if self.set_block(target, new, 2) {
+                if self.set_growth_spread(origin, target, new, 2) {
                     count += 1;
                 }
             }
@@ -557,7 +567,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
             }
             Behaviour::Vein => {
-                if veins && self.sculk_place_sculk(cursor.pos) {
+                if veins && self.sculk_place_sculk(cursor.pos, origin) {
                     charge - 1
                 } else if self.sculk_rand(CHARGE_DECAY_RATE) == 0 {
                     (charge as f32 * 0.5).floor() as i32
@@ -580,14 +590,15 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     if self.sculk_rand(GROWTH_SPAWN_COST) < charge {
                         let growth_pos = above(pos);
                         let growth = self.sculk_random_growth(growth_pos);
-                        self.set_block_and_update(growth_pos, growth);
-                        let sounds = self.b.data(growth).sounds.clone();
-                        self.emit(LevelEvent::Sound {
-                            pos,
-                            sound: sounds.place.clone(),
-                            volume: 1.0,
-                            pitch: 1.0,
-                        });
+                        if self.set_growth_spread(origin, growth_pos, growth, 3) {
+                            let sounds = self.b.data(growth).sounds.clone();
+                            self.emit(LevelEvent::Sound {
+                                pos,
+                                sound: sounds.place.clone(),
+                                volume: 1.0,
+                                pitch: 1.0,
+                            });
+                        }
                     }
                     return (charge - GROWTH_SPAWN_COST).max(0);
                 }
@@ -647,7 +658,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         true
     }
     /// `SculkVeinBlock.attemptPlaceSculk`.
-    fn sculk_place_sculk(&mut self, pos: BlockPos) -> bool {
+    fn sculk_place_sculk(&mut self, pos: BlockPos, origin: BlockPos) -> bool {
         let state = self.state(pos);
         let mut directions = Direction::ALL;
         for i in (2..=directions.len()).rev() {
@@ -663,6 +674,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             if !self.sculk_in_tag(support_state, "minecraft:sculk_replaceable") {
                 continue;
             }
+            if !self
+                .level
+                .allow_spread(BlockSpread::Growth, origin, support_pos)
+            {
+                return false;
+            }
             let default_sculk = self.b.default_of(self.b.named.sculk);
             self.emit(LevelEvent::BlockEvent {
                 pos: support_pos,
@@ -671,7 +688,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             });
             self.set_block_and_update(support_pos, default_sculk);
             self.sculk_sound(support_pos, "minecraft:block.sculk.spread", 1.0, 1.0);
-            self.sculk_spread_all(default_sculk, support_pos, &ALL_SPREADS);
+            self.sculk_spread_all(default_sculk, origin, support_pos, &ALL_SPREADS);
             let skip = support.opposite();
             for direction in Direction::ALL {
                 if direction == skip {
