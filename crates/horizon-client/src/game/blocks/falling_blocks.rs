@@ -1,6 +1,40 @@
 //! Falling block entities (`FallingBlockEntity.tick`): one block's tick (`tick_one_falling`), its move
 //! (`fall_step`) and the item entity it leaves as a drop (`drop_falling_block`, `Entity.spawnAtLocation`).
 use super::*;
+use horizon_core::{LevelKey, nbt::Tag};
+
+impl FallingBlock {
+    pub(in crate::game) fn origin_from_nbt(tag: &Tag) -> Option<(LevelKey, BlockPos)> {
+        let Tag::String(level) = tag.get("horizon:falling_origin_level")? else {
+            return None;
+        };
+        let Tag::IntArray(pos) = tag.get("horizon:falling_origin_pos")? else {
+            return None;
+        };
+        let [x, y, z] = pos.as_slice() else {
+            return None;
+        };
+        Some((
+            LevelKey::parse(&level.to_string().ok()?).ok()?,
+            BlockPos::new(*x, *y, *z),
+        ))
+    }
+
+    pub(in crate::game) fn write_origin(&self, tag: &mut Tag) {
+        if let Some((level, pos)) = self.origin
+            && let Tag::Compound(fields) = tag
+        {
+            fields.insert(
+                "horizon:falling_origin_level".into(),
+                Tag::String(level.id().into()),
+            );
+            fields.insert(
+                "horizon:falling_origin_pos".into(),
+                Tag::IntArray(vec![pos.x, pos.y, pos.z]),
+            );
+        }
+    }
+}
 
 impl Game<'_> {
     /// Cache only model-dependent work, never an entity's seed, light or pose.
@@ -305,7 +339,8 @@ impl Game<'_> {
             // moving piston's cell the place/drop/discard branch is skipped and
             // the entity goes on to the air drag below.
             let facts = self.res.facts();
-            if &*facts.get(self.world.block(at[0], at[1], at[2])).name != "minecraft:moving_piston" {
+            if &*facts.get(self.world.block(at[0], at[1], at[2])).name != "minecraft:moving_piston"
+            {
                 return Ok(FallStep::Landed(at));
             }
             f.velocity = f.velocity.multiply(Vec3::new(0.7, -0.5, 0.7));

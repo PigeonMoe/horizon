@@ -3451,6 +3451,7 @@ impl Game<'_> {
                     // `resolve_arrivals` checks), where it then ticks without a player.
                     .map(|chunk| (chunk, 1)),
             )
+            .chain(self.pending_portal_chunks(self.dim).map(|chunk| (chunk, 2)))
             .chain(self.portal_ticket_areas())
             .chain(self.viewed_extra())
             .collect();

@@ -2262,6 +2262,7 @@ impl Game<'_> {
         if let Tag::Compound(fields) = &mut tag {
             fields.insert("PortalCooldown".into(), Tag::Int(f.portal.cooldown));
         }
+        f.write_origin(&mut tag);
         Some((chunk_of(f.position), tag))
     }
     pub(super) fn save_rocket(

@@ -116,6 +116,7 @@ fn main_landing(case: &Value, b: &Behaviours, air: BlockStateId, out: &mut Vec<S
             out.push(format!("decision placed {}", placed.0));
         }
         Landing::Broken => out.push("decision broken".into()),
+        Landing::Denied => out.push("decision denied".into()),
         Landing::Continue => out.push("decision continue".into()),
     }
     let mut changed: Vec<BlockPos> = before

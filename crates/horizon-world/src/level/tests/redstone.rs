@@ -668,6 +668,42 @@ fn a_redstone_lamp_lights_at_once_and_goes_dark_exactly_four_ticks_after_its_pow
     );
 }
 
+#[test]
+fn redstone_policy_holds_both_lamp_states_and_wire_current() {
+    for experimental in [false, true] {
+        let mut w = world!();
+        w.level.experimental_redstone = experimental;
+        let lamp = w.id("redstone_lamp", &[]);
+        let wire = w.id("redstone_wire", &[]);
+        let power = w.id("redstone_block", &[]);
+        let stone = w.id("stone", &[]);
+        let air = w.b().air();
+        let at = BlockPos::new(0, 5, 0);
+        let dust = BlockPos::new(2, 5, 0);
+        let source = BlockPos::new(1, 5, 0);
+        w.put(BlockPos::new(2, 4, 0), stone);
+        w.put(at, lamp);
+        w.put(dust, wire);
+        w.level.guarded_current.extend([at, dust]);
+        w.set(source, power);
+        assert_eq!(w.prop(at, "lit"), "false");
+        assert_eq!(w.prop(dust, "power"), "0");
+
+        w.set(source, air);
+        w.level.guarded_current.clear();
+        w.set(source, power);
+        assert_eq!(w.prop(at, "lit"), "true");
+        assert_eq!(w.prop(dust, "power"), "15");
+        w.level.guarded_current.extend([at, dust]);
+        w.set(source, air);
+        for _ in 0..4 {
+            w.tick();
+        }
+        assert_eq!(w.prop(at, "lit"), "true");
+        assert_eq!(w.prop(dust, "power"), "15");
+    }
+}
+
 /// `HopperBlock.checkPoweredState`: `ENABLED` is `!hasNeighborSignal`, so power at
 /// any of the hopper's six sides switches it off at once, and removing the power
 /// switches it back on. Unlike a piston, power diagonally above does nothing.

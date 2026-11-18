@@ -209,6 +209,84 @@ fn a_nether_portal_trip_is_heard_once_on_every_server() {
     }
 }
 
+type PortalEndpoints = ([f64; 3], [f64; 3], String, String, String);
+
+struct InspectPortal {
+    cancel: bool,
+    seen: Arc<Mutex<Vec<PortalEndpoints>>>,
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for InspectPortal {
+    fn player_teleport_pre(
+        &self,
+        _: &mut dyn ServerHost,
+        event: &mut mod_api::PlayerTeleportPreEvent<'_>,
+    ) -> mod_api::Flow {
+        self.seen.lock().unwrap().push((
+            event.from,
+            event.to,
+            event.from_level.to_owned(),
+            event.to_level.to_owned(),
+            event.cause.to_owned(),
+        ));
+        if self.cancel {
+            mod_api::Flow::Cancel
+        } else {
+            mod_api::Flow::Continue
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn the_end_portal_resolves_before_moving_a_player_and_can_be_vetoed() {
+    for cancel in [true, false] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mods: mod_api::Mods = vec![ModEntry::new(
+            "portal-recorder",
+            Box::new(InspectPortal {
+                cancel,
+                seen: Arc::clone(&seen),
+            }),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_server(ExecutionRole::DedicatedServer, |game| {
+                let from = [3.5, 64.0, 5.5];
+                let to = [100.5, 49.0, 0.5];
+                game.start_server_trip(CONN, Dim::End, None, false);
+                let guest = game.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+                assert_eq!(guest.dimension, Dim::Overworld.id());
+                assert_eq!(guest.position, from);
+                assert!(seen.lock().unwrap().is_empty());
+                finish_trip(game, Dim::End);
+                assert_eq!(
+                    &*seen.lock().unwrap(),
+                    &[(
+                        from,
+                        to,
+                        Dim::Overworld.id().into(),
+                        Dim::End.id().into(),
+                        "end_portal".into()
+                    )]
+                );
+                let guest = game.lan.as_ref().unwrap().hub.guest(CONN).unwrap();
+                assert_eq!(
+                    guest.dimension,
+                    if cancel {
+                        Dim::Overworld.id()
+                    } else {
+                        Dim::End.id()
+                    }
+                );
+                assert_eq!(guest.position, if cancel { from } else { to });
+                assert!(!guest.tp_held && !guest.landing);
+            })
+        });
+    }
+}
+
 #[test]
 #[ignore = "daily"]
 fn a_command_teleport_into_the_nether_is_heard_once_on_every_server() {

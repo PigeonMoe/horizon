@@ -699,6 +699,7 @@ fn a_falling_block_keeps_its_model_offset() {
         id: 0,
         state: BlockStateId(7),
         start_pos: BlockPos::new(3, 72, -2),
+        origin: None,
         position: at,
         previous: Vec3::new(3.5, 71.0, -1.5),
         velocity: Vec3::ZERO,

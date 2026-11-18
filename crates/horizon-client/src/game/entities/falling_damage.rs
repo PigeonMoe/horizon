@@ -325,12 +325,13 @@ impl Game<'_> {
             return;
         }
         let landing = self.with_level(|b, level, ticks| {
-            b.falling_block_landed(
+            b.falling_block_landed_from(
                 level,
                 ticks,
                 BlockPos::new(pos[0], pos[1], pos[2]),
                 block.state,
                 false,
+                block.origin,
             )
         });
         if let Landing::Placed(state) = landing {

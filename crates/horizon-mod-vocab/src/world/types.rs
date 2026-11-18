@@ -1333,6 +1333,19 @@ pub trait LevelHost {
         None
     }
 
+    /// Read a registered attachment's persisted value from this level, without
+    /// decoding it or inserting a default. During block drops, the handle reads
+    /// the removed block entity's snapshot. Stale handles and attachments with
+    /// no persistence codec return None.
+    fn block_entity_saved_attachment(
+        &self,
+        _entity: crate::BlockEntityRef,
+        _namespace: &str,
+        _name: &str,
+    ) -> Option<crate::Compound> {
+        None
+    }
+
     /// Read an owned block state through the level's engine read.
     /// Out-of-height or unloaded engine reads retain vanilla's air as `Some(air)`.
     /// Returns `None` when the owning state index is unavailable or refuses the state;

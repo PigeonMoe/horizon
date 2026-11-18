@@ -1764,6 +1764,7 @@ impl Game<'_> {
             uuid,
         );
         let mut tag = super::persist::with_raw(modelled, f.saved.as_ref().map(|s| &s.1));
+        f.write_origin(&mut tag);
         if let Tag::Compound(fields) = &mut tag {
             fields.insert("PortalCooldown".into(), Tag::Int(f.portal.cooldown));
             if f.no_gravity {

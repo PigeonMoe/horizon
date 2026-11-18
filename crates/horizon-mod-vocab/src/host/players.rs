@@ -1021,6 +1021,19 @@ pub trait PlayersBackendMut {
         pos: [i32; 3],
         into_inventory: bool,
     ) -> bool;
+    /// Side: server.
+    /// Remove exactly the expected block after the player's ordinary protection checks
+    /// and `break_block` veto. This is the scripted removal path for a tool that
+    /// generates its own rewards: there are no vanilla item drops, experience, tool
+    /// wear or mined statistics. Refuses unloaded blocks, stale players, restricted
+    /// game modes and blocks replaced by a listener during the check.
+    #[access(WorldOnly)]
+    fn player_remove_block_without_drops(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        expected: BlockState,
+    ) -> bool;
     /// Side: both.
     /// Simulate one client movement tick for this server player without changing the player. Refuses stale, absent, dead, spectator or riding players and invalid input.
     #[access(WorldOnly)]

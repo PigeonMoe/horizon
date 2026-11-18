@@ -220,12 +220,16 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
                 // LecternBlock.tick: the page-turn pulse ends.
                 Class::Lectern => {
-                    self.set_block_and_update(pos, b.table.set_bool(state, p.powered, false));
-                    self.lectern_update_below(pos, state);
+                    if !b.table.bool(state, p.powered) || self.allow_binary_redstone(pos, false) {
+                        self.set_block_and_update(pos, b.table.set_bool(state, p.powered, false));
+                        self.lectern_update_below(pos, state);
+                    }
                 }
                 Class::LightningRod => {
-                    self.set_block_and_update(pos, b.table.set_bool(state, p.powered, false));
-                    self.lightning_rod_update_neighbors(pos, state);
+                    if !b.table.bool(state, p.powered) || self.allow_binary_redstone(pos, false) {
+                        self.set_block_and_update(pos, b.table.set_bool(state, p.powered, false));
+                        self.lightning_rod_update_neighbors(pos, state);
+                    }
                 }
                 Class::Liquid => {
                     if self.should_bubble_column_occupy(state) {
@@ -254,7 +258,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     }
                 }
                 Class::Target => {
-                    if b.table.int(state, p.power) != 0 {
+                    let old = b.table.int(state, p.power);
+                    if old != 0 && self.level.redstone_current(pos, old, 0) == 0 {
                         self.set_block_and_update(pos, b.table.set_int(state, p.power, 0));
                     }
                 }

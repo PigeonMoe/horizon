@@ -3,7 +3,7 @@
 //! (motion, collision, entity damage) is simulated by the caller.
 use super::{Behaviours, LevelAccess, LevelEvent, Sim, Ticks, classes::Class, update::below};
 use crate::registry::BlockStateId;
-use horizon_core::{geometry::Direction, position::BlockPos};
+use horizon_core::{LevelKey, geometry::Direction, position::BlockPos};
 
 /// Outcome of [`Behaviours::falling_block_landed`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub enum Landing {
     /// 1029) and spawn the block's item from the entity's position (vanilla
     /// `spawnAtLocation`).
     Broken,
+    /// A policy refused the placement. Discard the entity without dropping an item.
+    Denied,
     /// The landing position holds a moving piston: keep falling.
     Continue,
 }
@@ -28,6 +30,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         state: BlockStateId,
         hurt_per_distance: Option<f32>,
     ) {
+        if !self
+            .level
+            .allow_falling_block_change(pos, Some((self.level.level_key(), pos)))
+        {
+            return;
+        }
         let b = self.b;
         let carried = b
             .table
@@ -84,6 +92,19 @@ impl Behaviours {
         state: BlockStateId,
         stuck_in_water: bool,
     ) -> Landing {
+        self.falling_block_landed_from(level, ticks, pos, state, stuck_in_water, None)
+    }
+
+    /// Complete a landing while preserving the original level and block position for policies.
+    pub fn falling_block_landed_from<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+        stuck_in_water: bool,
+        origin: Option<(LevelKey, BlockPos)>,
+    ) -> Landing {
         let mut sim = self.sim(level, ticks);
         let current = sim.state(pos);
         if self.is_block(current, self.named.moving_piston) {
@@ -118,6 +139,9 @@ impl Behaviours {
             && self.is_water_fluid(sim.fluid_at(pos).kind())
         {
             placed = self.table.set_bool(placed, self.props.waterlogged, true);
+        }
+        if !sim.level.allow_falling_block_change(pos, origin) {
+            return Landing::Denied;
         }
         if !sim.set_block_and_update(pos, placed) {
             return Landing::Broken;

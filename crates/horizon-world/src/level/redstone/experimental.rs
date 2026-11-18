@@ -159,9 +159,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let mut changed = Vec::new();
         for (index, (pos, power, orientation)) in evaluator.wires.into_iter().enumerate() {
             let state = self.state(pos);
-            if self.b.is_block(state, self.b.named.redstone_wire)
-                && self.wire_power_of(state) != power
-            {
+            if self.b.is_block(state, self.b.named.redstone_wire) {
+                let old = self.wire_power_of(state);
+                let power = self.level.redstone_current(pos, old, power);
+                if old == power {
+                    continue;
+                }
                 let flags = if update_shape && index == 0 {
                     2
                 } else {

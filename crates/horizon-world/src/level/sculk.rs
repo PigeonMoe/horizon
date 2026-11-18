@@ -163,6 +163,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `SculkSensorBlock.deactivate`.
     pub(crate) fn sculk_sensor_deactivate(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
+        let old = b.table.int(state, b.props.power);
+        if self.level.redstone_current(pos, old, 0) > 0 {
+            return;
+        }
         let next = b.table.set_int(
             b.table
                 .set_text(state, b.props.sculk_sensor_phase, "cooldown"),
@@ -182,8 +186,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         state: BlockStateId,
         power: i32,
         active_ticks: i32,
-    ) {
+    ) -> bool {
         let b = self.b;
+        let old = b.table.int(state, b.props.power);
+        let power = self.level.redstone_current(pos, old, power);
+        if power == 0 {
+            return false;
+        }
         let next = b.table.set_int(
             b.table
                 .set_text(state, b.props.sculk_sensor_phase, "active"),
@@ -194,6 +203,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let block = b.block(state);
         self.schedule_tick(pos, block, active_ticks);
         self.sensor_update_neighbours(pos, state);
+        true
     }
     /// The activation sound, played after the tendril event.
     pub(crate) fn sculk_sensor_click(&mut self, pos: BlockPos, state: BlockStateId) {
@@ -801,7 +811,7 @@ impl Behaviours {
         ticks: &mut Ticks,
         pos: BlockPos,
         power: i32,
-    ) {
+    ) -> bool {
         let mut sim = self.sim(level, ticks);
         let state = sim.state(pos);
         let active_ticks = if self.block(state) == self.named.calibrated_sculk_sensor {
@@ -809,7 +819,7 @@ impl Behaviours {
         } else {
             SENSOR_ACTIVE_TICKS
         };
-        sim.sculk_sensor_activate(pos, state, power, active_ticks);
+        sim.sculk_sensor_activate(pos, state, power, active_ticks)
     }
     /// The click sound after an activation.
     pub fn sculk_sensor_click<L: LevelAccess + ?Sized>(

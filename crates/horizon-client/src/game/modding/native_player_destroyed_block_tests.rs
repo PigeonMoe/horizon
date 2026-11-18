@@ -485,6 +485,18 @@ impl Hooks for DropsProbe {
             .and_then(|entity| level.block_entity_data(entity))
             .and_then(|data| data.get(&"CustomName".into()).cloned());
         if let Some(name) = name {
+            if name == mod_api::Tag::String("Loot Chest".into()) {
+                let marker = event.block_entity.and_then(|entity| {
+                    level.block_entity_saved_attachment(entity, "drops-probe", "marker")
+                });
+                assert_eq!(
+                    marker,
+                    Some(mod_api::Compound::from([(
+                        "output".into(),
+                        mod_api::Tag::Byte(1)
+                    )]))
+                );
+            }
             for drop in event.drops.iter_mut().filter(|drop| {
                 mod_api::__private::item_key_id(drop.stack.item()).unwrap() == "minecraft:chest"
             }) {
@@ -546,6 +558,17 @@ fn block_drops_reads_the_chest_a_players_break_removed_and_the_handle_goes_stale
                 (chest[0], chest[1], chest[2]),
                 mod_api::Tag::String("Loot Chest".into()),
             );
+            use mod_api::{Compound, Tag};
+            let marker = Compound::from([("output".into(), Tag::Byte(1))]);
+            let saved = Compound::from([("value".into(), Tag::Compound(marker))]);
+            let namespace = Compound::from([("marker".into(), Tag::Compound(saved))]);
+            game.world.block_entities.restore_attachments(
+                (chest[0], chest[1], chest[2]),
+                mod_api::Attachments::from_nbt(Compound::from([(
+                    "drops-probe".into(),
+                    Tag::Compound(namespace),
+                )])),
+            );
             game.dropped.clear();
             assert!(game.player_destroy_block(player, chest, false));
             assert_eq!(block(game, chest), "minecraft:air");
@@ -582,6 +605,15 @@ fn block_drops_reads_the_chest_a_players_break_removed_and_the_handle_goes_stale
             let stale = handle.lock().unwrap().expect("the event's handle");
             game.with_level(|_, level, _| {
                 assert!(mod_api::LevelHost::block_entity_data(level, stale).is_none());
+                assert!(
+                    mod_api::LevelHost::block_entity_saved_attachment(
+                        level,
+                        stale,
+                        "drops-probe",
+                        "marker"
+                    )
+                    .is_none()
+                );
             });
             assert!(
                 game.world

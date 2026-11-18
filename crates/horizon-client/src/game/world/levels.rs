@@ -1459,6 +1459,7 @@ impl Game<'_> {
                     // A pending portal arrival keeps its destination level
                     // running so it can land and tick (the portal ticket).
                     || !self.arrival_chunks(*d).is_empty()
+                    || self.pending_portal_chunks(*d).next().is_some()
                     // A portal ticket keeps its dimension active
                     // (`TicketType.shouldKeepDimensionActive`).
                     || !self.portal_tickets_in(*d).is_empty()

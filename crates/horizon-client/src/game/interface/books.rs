@@ -20,7 +20,10 @@ use horizon_client::{
 use horizon_core::nbt::Tag;
 use horizon_core::position::BlockPos;
 use horizon_protocol::packets::play::{self, Clientbound as C, Serverbound as S};
-use horizon_world::{level::flags as level_flags, registry::BlockStateId};
+use horizon_world::{
+    level::{LevelAccess, flags as level_flags},
+    registry::BlockStateId,
+};
 use winit::{
     event::{ElementState, KeyEvent},
     keyboard::{KeyCode, PhysicalKey},
@@ -900,8 +903,22 @@ impl Game<'_> {
             .play("minecraft:item.book.page_turn", None, 1.0, 1.0);
     }
     fn set_lectern_powered(&mut self, key: (i32, i32, i32), powered: bool) {
-        self.set_lectern_property(key, "powered", powered);
         let p = BlockPos::new(key.0, key.1, key.2);
+        let state = self.world.block(key.0, key.1, key.2);
+        let old = self.pack.assets.registry.state(state).is_some_and(|state| {
+            state
+                .properties
+                .get("powered")
+                .is_some_and(|value| value == "true")
+        });
+        if old != powered
+            && self.with_level(|_, level, _| {
+                level.redstone_current(p, i32::from(old) * 15, i32::from(powered) * 15)
+            }) == i32::from(old) * 15
+        {
+            return;
+        }
+        self.set_lectern_property(key, "powered", powered);
         let state = self.world.block(key.0, key.1, key.2);
         self.with_level(|b, level, ticks| {
             b.lectern_update_below(level, ticks, p, state);

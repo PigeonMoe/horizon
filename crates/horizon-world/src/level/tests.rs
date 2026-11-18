@@ -55,6 +55,10 @@ pub(crate) struct TestLevel {
     pub block_events_ready: bool,
     /// Positions that refuse fluids, fire and piston moves, as a land claim would.
     pub guarded: HashSet<BlockPos>,
+    pub guarded_current: HashSet<BlockPos>,
+    pub guarded_falling: HashSet<BlockPos>,
+    pub falling_checks: std::cell::RefCell<Vec<(BlockPos, Option<(LevelKey, BlockPos)>)>>,
+    pub experimental_redstone: bool,
     /// What `adjust_signal` answers at a position: the weak and direct signal,
     /// and the only direction they go in, if any.
     pub signals: HashMap<BlockPos, (i32, i32, Option<Direction>)>,
@@ -134,6 +138,10 @@ impl TestLevel {
             tick_ready: true,
             block_events_ready: true,
             guarded: HashSet::new(),
+            guarded_current: HashSet::new(),
+            guarded_falling: HashSet::new(),
+            falling_checks: Default::default(),
+            experimental_redstone: false,
             fire_asks: Default::default(),
             source_asks: Default::default(),
             lava_asks: Default::default(),
@@ -345,6 +353,24 @@ impl LevelAccess for TestLevel {
     }
     fn allow_sponge_absorb(&self, _sponge: BlockPos, pos: BlockPos) -> bool {
         !self.guarded.contains(&pos)
+    }
+    fn allow_falling_block_change(
+        &self,
+        pos: BlockPos,
+        origin: Option<(LevelKey, BlockPos)>,
+    ) -> bool {
+        self.falling_checks.borrow_mut().push((pos, origin));
+        !self.guarded_falling.contains(&pos)
+    }
+    fn redstone_current(&self, pos: BlockPos, old: i32, new: i32) -> i32 {
+        if self.guarded_current.contains(&pos) {
+            old
+        } else {
+            new
+        }
+    }
+    fn redstone_experiments(&self) -> bool {
+        self.experimental_redstone
     }
     fn allow_block_burn(&self, pos: BlockPos) -> bool {
         !self.unburnable.contains(&pos)
@@ -1418,6 +1444,44 @@ fn sponge_leaves_protected_water_but_reaches_water_beyond_it() {
     assert_eq!(w.get(protected), water);
     assert_eq!(w.get(beyond), w.b().air());
     assert_eq!(w.get(sponge), w.id("wet_sponge", &[]));
+}
+
+#[test]
+fn falling_policy_preserves_block_on_takeoff_and_discards_at_denied_landing() {
+    let mut w = world!();
+    let source = BlockPos::new(0, 5, 0);
+    let target = BlockPos::new(2, 1, 0);
+    let sand = w.id("sand", &[]);
+    w.level.guarded_falling.insert(source);
+    w.level.guarded_falling.insert(target);
+    w.set(source, sand);
+    w.tick();
+    w.tick();
+    assert_eq!(w.get(source), sand);
+    assert!(
+        !w.level
+            .events
+            .iter()
+            .any(|event| matches!(event, LevelEvent::FallingBlock { .. }))
+    );
+    assert!(
+        w.level
+            .falling_checks
+            .borrow()
+            .contains(&(source, Some((LevelKey::OVERWORLD, source))))
+    );
+
+    w.floor(0, 3, "stone");
+    let origin = Some((LevelKey::NETHER, source));
+    let result =
+        w.b()
+            .falling_block_landed_from(&mut w.level, &mut w.ticks, target, sand, false, origin);
+    assert_eq!(result, falling::Landing::Denied);
+    assert_eq!(w.get(target), w.b().air());
+    assert_eq!(
+        w.level.falling_checks.borrow().last(),
+        Some(&(target, origin))
+    );
 }
 
 #[test]

@@ -249,6 +249,7 @@ impl Game<'_> {
                 state,
                 // DATA_START_POS is not persisted by vanilla.
                 start_pos: horizon_core::position::BlockPos::default(),
+                origin: FallingBlock::origin_from_nbt(&tag),
                 position,
                 previous: position,
                 velocity,

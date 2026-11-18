@@ -48,8 +48,36 @@ impl TravelCause {
     }
 }
 
-/// A trip under way: the player is in the destination's level, whose
-/// chunks are loading around `target`.
+/// A player stays in the source until a subscribed teleport hook approves
+/// the resolved destination. Preserve that source while destination chunks load.
+#[derive(Clone, Copy)]
+struct PortalOrigin {
+    uuid: u128,
+    position: [f64; 3],
+    vehicle: Option<u32>,
+}
+
+impl PortalOrigin {
+    fn capture(guest: &horizon_client::lan::guest::Guest) -> Self {
+        Self {
+            uuid: guest.uuid,
+            position: guest.position,
+            vehicle: guest.vehicle,
+        }
+    }
+
+    fn matches(self, guest: &horizon_client::lan::guest::Guest, dim: Dim) -> bool {
+        guest.uuid == self.uuid
+            && guest.dimension == dim.id()
+            && guest.position == self.position
+            && guest.vehicle == self.vehicle
+            && !guest.dead
+            && guest.health > 0.0
+    }
+}
+
+/// Destination chunks are loading around `target`. A vetoable portal
+/// traveller's body only changes level after the exit is found.
 pub(super) struct Trip {
     conn: u32,
     dim: Dim,
@@ -59,6 +87,7 @@ pub(super) struct Trip {
     target: Vec3,
     /// Through an End portal.
     end: bool,
+    origin: Option<PortalOrigin>,
     /// The Nether portal plan, whose exit is found or built on arrival.
     plan: Option<Plan>,
     /// The vehicle the player rides, which travels with it
@@ -241,7 +270,7 @@ impl Trip {
     /// Respawn searches, like command arrivals, must finish before the client can leave
     /// their loading area. `hold` alone names a command's already-placed body.
     fn holds_movement(&self) -> bool {
-        self.hold || self.respawn.is_some() || self.world_spawn
+        self.hold || self.respawn.is_some() || self.world_spawn || self.origin.is_some()
     }
 }
 
@@ -278,6 +307,7 @@ impl Game<'_> {
             source: self.dim,
             target,
             end: false,
+            origin: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -891,16 +921,11 @@ impl Game<'_> {
         plan: Option<Plan>,
         credits_respawn: bool,
     ) {
-        let Some(host) = self.lan.as_mut() else {
+        let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
             return;
         };
-        let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn) else {
-            return;
-        };
-        if target != self.dim {
-            drop_hook(host, conn);
-        }
-        let g = &host.hub.guests[i];
+        let origin = (!credits_respawn && self.subscribed_portal_teleport())
+            .then(|| PortalOrigin::capture(g));
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let yaw = g.yaw;
         // The vehicle the player rides travels with it: the player is its
@@ -925,6 +950,13 @@ impl Game<'_> {
                 self.dimension_type_of(target),
             )
         };
+        let configured_spawn = if origin.is_some() && end && source == Dim::End {
+            self.as_guest(conn, |game| game.respawn_config)
+                .flatten()
+                .filter(|config| config.dim == target)
+        } else {
+            None
+        };
         self.end_portal_travel = end;
         // Leaving the End: the player's own respawn point.
         let own = if end {
@@ -942,8 +974,62 @@ impl Game<'_> {
         }
         let destination = match plan {
             Some(plan) => self.arrival_centre(&plan),
+            None if origin.is_some() && source == Dim::End && configured_spawn.is_none() => {
+                let [x, y, z] = self.world_spawn_position();
+                Vec3::new(x, y, z)
+            }
             None => scaled,
         };
+        if origin.is_none() {
+            self.place_portal_guest(conn, source, from, destination, yaw, credits_respawn);
+        } else if let Some(host) = self.lan.as_mut() {
+            host.hub.guests.update_connection(conn, |guest| {
+                guest.landing = true;
+                guest.tp_held = true;
+            });
+        }
+        self.server_trips.push(Trip {
+            conn,
+            dim: target,
+            source,
+            target: destination,
+            end,
+            origin,
+            plan,
+            vehicle,
+            gateway: None,
+            respawn: configured_spawn,
+            consume: false,
+            world_spawn: false,
+            missing: None,
+            finder: None,
+            placed: false,
+            hold: false,
+            left: Some(source),
+        });
+        if let Err(e) = self.enter_level(source) {
+            log::error!("could not reopen {}: {e}", source.id());
+        }
+    }
+
+    fn place_portal_guest(
+        &mut self,
+        conn: u32,
+        source: Dim,
+        from: Vec3,
+        destination: Vec3,
+        yaw: f32,
+        credits_respawn: bool,
+    ) {
+        let Some(i) = self.guest_index(conn) else {
+            return;
+        };
+        let target = self.dim;
+        if source != target
+            && let Some(host) = self.lan.as_mut()
+        {
+            drop_hook(host, conn);
+        }
         let at = [destination.x, destination.y, destination.z];
         let ctx = server_ctx!(self);
         // Through a portal: the client waits on its loading screen until
@@ -976,27 +1062,55 @@ impl Game<'_> {
                 }
             }
         });
-        self.server_trips.push(Trip {
-            conn,
-            dim: target,
-            source,
-            target: destination,
-            end,
-            plan,
-            vehicle,
-            gateway: None,
-            respawn: None,
-            consume: false,
-            world_spawn: false,
-            missing: None,
-            finder: None,
-            placed: false,
-            hold: false,
-            left: Some(source),
-        });
-        if let Err(e) = self.enter_level(source) {
-            log::error!("could not reopen {}: {e}", source.id());
+    }
+
+    fn subscribed_portal_teleport(&self) -> bool {
+        self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::PlayerTeleportPre)
+    }
+
+    fn admit_portal_destination(
+        &mut self,
+        conn: u32,
+        origin: PortalOrigin,
+        source: Dim,
+        position: Vec3,
+        cause: TravelCause,
+    ) -> bool {
+        let destination = self.dim;
+        let still_at_source = |game: &Self| {
+            !game.on_server_trip(conn)
+                && game
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guest(conn))
+                    .is_some_and(|guest| origin.matches(guest, source))
+        };
+        still_at_source(self)
+            && self.player_teleport_allowed(
+                origin.uuid,
+                (source, origin.position),
+                (destination, [position.x, position.y, position.z]),
+                cause.id(),
+            )
+            && self.dim == destination
+            && still_at_source(self)
+    }
+
+    fn cool_down_refused_portal(&mut self, conn: u32) {
+        if let Some(host) = self.lan.as_mut()
+            && let Some(play) = host.play.get_mut(&conn)
+        {
+            play.portal.cooldown = 10;
+            play.portal.process = None;
         }
+    }
+
+    pub(super) fn pending_portal_chunks(&self, dim: Dim) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.server_trips
+            .iter()
+            .filter(move |trip| trip.origin.is_some() && trip.dim == dim)
+            .map(|trip| Self::chunk_of(trip.target))
     }
 
     /// A respawned player waits at its point outside the Overworld for the
@@ -1009,6 +1123,7 @@ impl Game<'_> {
             source: self.dim,
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
+            origin: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1081,6 +1196,7 @@ impl Game<'_> {
             source: self.dim,
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
+            origin: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1126,12 +1242,31 @@ impl Game<'_> {
             return;
         };
         let (job, destination) = self.gateway_job(gateway);
-        let at = [destination.x, destination.y, destination.z];
-        // Relative.union(DELTA, ROTATION).
-        if let Some(host) = self.lan.as_mut() {
-            host.hub.teleport_keeping_motion(i, at);
+        let origin = self
+            .subscribed_portal_teleport()
+            .then(|| PortalOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
+        let exact = matches!(job, GatewayJob::Known { exact: true, .. });
+        if origin.is_none() || exact {
+            if let Some(origin) = origin
+                && !self.admit_portal_destination(
+                    conn,
+                    origin,
+                    self.dim,
+                    destination,
+                    TravelCause::EndGateway,
+                )
+            {
+                return;
+            }
+            // Relative.union(DELTA, ROTATION).
+            if let Some(i) = self.guest_index(conn)
+                && let Some(host) = self.lan.as_mut()
+            {
+                host.hub
+                    .teleport_keeping_motion(i, [destination.x, destination.y, destination.z]);
+            }
         }
-        if let GatewayJob::Known { exact: true, .. } = job {
+        if exact {
             return;
         }
         self.server_trips.push(Trip {
@@ -1140,6 +1275,7 @@ impl Game<'_> {
             source: self.dim,
             target: destination,
             end: false,
+            origin,
             plan: None,
             vehicle: None,
             gateway: Some(job),
@@ -1170,10 +1306,14 @@ impl Game<'_> {
                 self.server_trips.remove(k);
                 continue;
             };
-            let (cx, cz) = (
-                (trip.target.x.floor() as i32) >> 4,
-                (trip.target.z.floor() as i32) >> 4,
-            );
+            if trip
+                .origin
+                .is_some_and(|origin| !origin.matches(&host.hub.guests[i], trip.source))
+            {
+                self.server_trips.remove(k);
+                continue;
+            }
+            let (cx, cz) = Self::chunk_of(trip.target);
             if trip.holds_movement() {
                 self.lan.as_mut().unwrap().hub.guests.update(i, |g| {
                     g.landing = true;
@@ -1198,33 +1338,65 @@ impl Game<'_> {
             // A portal's trip (`start_server_trip`): its client waits to land.
             let portal = trip.end || trip.plan.is_some();
             self.resolve_arrivals();
-            let Some(host) = self.lan.as_ref() else {
-                return;
+            let Some(guest) = self.lan.as_ref().and_then(|host| host.hub.guest(trip.conn)) else {
+                continue;
             };
-            let yaw = host.hub.guests[i].yaw;
+            let yaw = guest.yaw;
+            let mut portal_pitch = None;
+            let mut destination_approved = false;
             let (position, yaw) = if let Some(config) = trip.respawn {
-                let (conn, consume) = (trip.conn, trip.consume);
-                let found = self.as_guest(conn, |g| g.resolve_server_respawn(config, consume));
-                match found {
-                    Some(Some((at, yaw, pitch))) => {
-                        if let Some(host) = self.lan.as_mut() {
-                            host.hub.guests.update(i, |guest| guest.pitch = pitch);
+                if trip.origin.is_some() {
+                    // Look up the safe spot without changing the still-unmoved player.
+                    match self.find_respawn_and_use(config, false) {
+                        Ok(Some((at, yaw, pitch))) => {
+                            portal_pitch = Some(pitch);
+                            (at, yaw)
                         }
-                        (at, yaw)
+                        _ => {
+                            let current = self.dim;
+                            if self.enter_level(Dim::Overworld).is_err() {
+                                continue;
+                            }
+                            let [x, y, z] = self.world_spawn_position();
+                            trip.target = Vec3::new(x, y, z);
+                            trip.dim = Dim::Overworld;
+                            trip.respawn = None;
+                            trip.world_spawn = true;
+                            trip.missing = Some(config);
+                            if let Err(error) = self.enter_level(current) {
+                                log::error!("could not reopen {}: {error}", current.id());
+                                return;
+                            }
+                            self.server_trips.insert(k, trip);
+                            k += 1;
+                            continue;
+                        }
                     }
-                    _ => {
-                        if let Some(host) = self.lan.as_mut() {
-                            host.hub.missing_respawn_block(trip.conn);
+                } else {
+                    let (conn, consume) = (trip.conn, trip.consume);
+                    let found = self.as_guest(conn, |g| g.resolve_server_respawn(config, consume));
+                    match found {
+                        Some(Some((at, yaw, pitch))) => {
+                            if let Some(host) = self.lan.as_mut() {
+                                host.hub.guests.update(i, |guest| guest.pitch = pitch);
+                            }
+                            (at, yaw)
                         }
-                        self.respawn_at_world_spawn(trip.conn, config);
-                        // The move to the world spawn ends the player's move
-                        // from the level they left.
-                        if let Some(left) = trip.left
-                            && let Some(t) = self.server_trips.iter_mut().find(|t| t.is(trip.conn))
-                        {
-                            t.left = Some(left);
+                        _ => {
+                            if let Some(host) = self.lan.as_mut() {
+                                host.hub.missing_respawn_block(trip.conn);
+                            }
+                            self.respawn_at_world_spawn(trip.conn, config);
+                            // The move to the world spawn ends the player's move
+                            // from the level they left.
+                            if let Some(left) = trip.left
+                                && let Some(t) =
+                                    self.server_trips.iter_mut().find(|t| t.is(trip.conn))
+                            {
+                                t.left = Some(left);
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 }
             } else if trip.world_spawn {
@@ -1235,9 +1407,10 @@ impl Game<'_> {
                     // The respawn already put the player on this column:
                     // vanilla teleports once, so no second move.
                     Ok(at)
-                        if self.lan.as_ref().is_some_and(|host| {
-                            host.hub.guests[i].position == [at.x, at.y, at.z]
-                        }) =>
+                        if trip.origin.is_none()
+                            && self.lan.as_ref().is_some_and(|host| {
+                                host.hub.guests[i].position == [at.x, at.y, at.z]
+                            }) =>
                     {
                         self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
                         // PlayerRespawnPositionEvent: the column is the point.
@@ -1288,11 +1461,28 @@ impl Game<'_> {
                     }
                 }
             } else if trip.end {
-                let guest_arrival =
-                    self.as_guest(trip.conn, |g| g.end_arrival(trip.target, &mut trip.finder));
-                let arrival = match guest_arrival {
-                    Some(arrival) => arrival,
-                    None => self.end_arrival(trip.target, &mut trip.finder),
+                if let Some(origin) = trip.origin
+                    && self.dim == Dim::End
+                {
+                    // This exit is exact before the platform is rebuilt. Do not
+                    // let a denied transfer mutate the End's entry platform.
+                    if !self.admit_portal_destination(
+                        trip.conn,
+                        origin,
+                        trip.source,
+                        trip.target,
+                        TravelCause::EndPortal,
+                    ) {
+                        self.cool_down_refused_portal(trip.conn);
+                        continue;
+                    }
+                    destination_approved = true;
+                }
+                let arrival = if trip.origin.is_some() {
+                    self.end_arrival_at_world_spawn(trip.target, &mut trip.finder)
+                } else {
+                    self.as_guest(trip.conn, |g| g.end_arrival(trip.target, &mut trip.finder))
+                        .unwrap_or_else(|| self.end_arrival(trip.target, &mut trip.finder))
                 };
                 match arrival {
                     Ok(Some((at, turned))) => {
@@ -1320,35 +1510,99 @@ impl Game<'_> {
                         let (at, rotation) = self.arrival(&plan, exit);
                         (at, yaw + rotation)
                     }
+                    (Some(_), None) if trip.origin.is_some() => {
+                        self.cool_down_refused_portal(trip.conn);
+                        continue;
+                    }
                     _ => (trip.target, yaw),
                 }
             };
-            // PlayerRespawnPositionEvent: a deferred respawn's point is found.
-            let mut pitch = None;
-            let (position, yaw) = if trip.respawn.is_some() || trip.world_spawn {
-                let pitch_now = self.lan.as_ref().map_or(0.0, |h| h.hub.guests[i].pitch);
-                let found = Respawn {
-                    dim: trip.dim,
-                    at: position,
-                    yaw,
-                    pitch: pitch_now,
+            if let Some(origin) = trip.origin {
+                let cause = if trip.gateway.is_some() {
+                    TravelCause::EndGateway
+                } else if trip.end {
+                    TravelCause::EndPortal
+                } else {
+                    TravelCause::NetherPortal
                 };
-                match self.respawn_position(trip.conn, found, trip.missing) {
-                    Some(d) => {
-                        self.apply_respawn_copy(trip.conn, &d, trip.missing);
-                        if d.to.dim != trip.dim {
-                            self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
-                            self.respawn_into_other_level(trip.conn, d.to);
-                            continue;
-                        }
-                        pitch = Some(d.to.pitch);
-                        (d.to.at, d.to.yaw)
-                    }
-                    None => (position, yaw),
+                if !destination_approved
+                    && !self.admit_portal_destination(
+                        trip.conn,
+                        origin,
+                        trip.source,
+                        position,
+                        cause,
+                    )
+                {
+                    self.cool_down_refused_portal(trip.conn);
+                    continue;
                 }
-            } else {
-                (position, yaw)
+                if !self
+                    .lan
+                    .as_ref()
+                    .and_then(|host| host.hub.guest(trip.conn))
+                    .is_some_and(|guest| origin.matches(guest, trip.source))
+                {
+                    continue;
+                }
+                if trip.gateway.is_some() {
+                    if let Some(i) = self.guest_index(trip.conn)
+                        && let Some(host) = self.lan.as_mut()
+                    {
+                        host.hub
+                            .teleport_keeping_motion(i, [position.x, position.y, position.z]);
+                    }
+                    continue;
+                }
+                let [x, y, z] = origin.position;
+                self.place_portal_guest(
+                    trip.conn,
+                    trip.source,
+                    Vec3::new(x, y, z),
+                    position,
+                    yaw,
+                    false,
+                );
+                if trip.missing.is_some()
+                    && let Some(host) = self.lan.as_mut()
+                {
+                    host.hub.guests.update_connection(trip.conn, |guest| {
+                        guest.spawn = None;
+                        guest.respawn_elsewhere = None;
+                    });
+                    host.hub.missing_respawn_block(trip.conn);
+                }
+            }
+            let Some(i) = self.guest_index(trip.conn) else {
+                continue;
             };
+            // PlayerRespawnPositionEvent: a deferred respawn's point is found.
+            let mut pitch = portal_pitch;
+            let (position, yaw) =
+                if trip.origin.is_none() && (trip.respawn.is_some() || trip.world_spawn) {
+                    let pitch_now = self.lan.as_ref().map_or(0.0, |h| h.hub.guests[i].pitch);
+                    let found = Respawn {
+                        dim: trip.dim,
+                        at: position,
+                        yaw,
+                        pitch: pitch_now,
+                    };
+                    match self.respawn_position(trip.conn, found, trip.missing) {
+                        Some(d) => {
+                            self.apply_respawn_copy(trip.conn, &d, trip.missing);
+                            if d.to.dim != trip.dim {
+                                self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
+                                self.respawn_into_other_level(trip.conn, d.to);
+                                continue;
+                            }
+                            pitch = Some(d.to.pitch);
+                            (d.to.at, d.to.yaw)
+                        }
+                        None => (position, yaw),
+                    }
+                } else {
+                    (position, yaw)
+                };
             // The vehicle the player rode comes with it, and waits for it
             // where it arrives (`Entity.teleportCrossDimension` carries the
             // passengers).
@@ -1551,6 +1805,7 @@ impl Game<'_> {
                 source,
                 target: Vec3::new(t.at[0], t.at[1], t.at[2]),
                 end: false,
+                origin: None,
                 plan: None,
                 // A command teleports the player alone: it is not a
                 // passenger any more (`ServerPlayer.teleport`).

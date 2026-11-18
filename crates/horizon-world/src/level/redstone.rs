@@ -29,6 +29,11 @@ const SIGNAL_ORDER: [Direction; 6] = [
 ];
 
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
+    pub(crate) fn allow_binary_redstone(&self, pos: BlockPos, proposed: bool) -> bool {
+        let (old, new) = if proposed { (0, 15) } else { (15, 0) };
+        self.level.redstone_current(pos, old, new) == new
+    }
+
     /// `SignalGetter.getControlInputSignal`.
     fn control_input_signal(&self, pos: BlockPos, direction: Direction, only_diodes: bool) -> i32 {
         let b = self.b;
@@ -197,7 +202,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         } else {
             block_signal.max(self.wire_incoming_signal(pos))
         };
-        if self.b.table.int(state, self.b.props.power) != target {
+        let old = self.b.table.int(state, self.b.props.power);
+        let target = if old != target && self.state(pos) == state {
+            self.level.redstone_current(pos, old, target)
+        } else {
+            target
+        };
+        if old != target {
             if self.state(pos) == state {
                 let next = self.b.table.set_int(state, self.b.props.power, target);
                 self.set_block(pos, next, 2);
@@ -383,8 +394,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let on = b.table.bool(state, b.props.powered);
         let should = self.diode_should_turn_on(pos, state);
         if on && !should {
+            if !self.allow_binary_redstone(pos, false) {
+                return;
+            }
             self.set_block(pos, b.table.set_bool(state, b.props.powered, false), 2);
         } else if !on {
+            if !self.allow_binary_redstone(pos, true) {
+                return;
+            }
             self.set_block(pos, b.table.set_bool(state, b.props.powered, true), 2);
             if !should {
                 let delay = self.diode_delay(state);
@@ -403,6 +420,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if old != output || b.table.text(state, b.props.mode) == "compare" {
             let should = self.diode_should_turn_on(pos, state);
             let on = b.table.bool(state, b.props.powered);
+            if on != should && !self.allow_binary_redstone(pos, should) {
+                return;
+            }
             if on && !should {
                 self.set_block(pos, b.table.set_bool(state, b.props.powered, false), 2);
             } else if !on && should {
@@ -548,7 +568,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.ticks.torch_toggles.remove(0);
         }
         if b.table.bool(state, b.props.lit) {
-            if signal {
+            if signal && self.allow_binary_redstone(pos, false) {
                 self.set_block_and_update(pos, b.table.set_bool(state, b.props.lit, false));
                 if self.torch_toggled_too_frequently(pos, true) {
                     self.level_event(1502, pos, 0);
@@ -556,7 +576,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     self.schedule_tick(pos, block, 160);
                 }
             }
-        } else if !signal && !self.torch_toggled_too_frequently(pos, false) {
+        } else if !signal
+            && !self.torch_toggled_too_frequently(pos, false)
+            && self.allow_binary_redstone(pos, true)
+        {
             self.set_block_and_update(pos, b.table.set_bool(state, b.props.lit, true));
         }
     }
@@ -578,7 +601,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     pub(crate) fn observer_tick(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
-        if b.table.bool(state, b.props.powered) {
+        let powered = b.table.bool(state, b.props.powered);
+        if !self.allow_binary_redstone(pos, !powered) {
+            return;
+        }
+        if powered {
             self.set_block(pos, b.table.set_bool(state, b.props.powered, false), 2);
         } else {
             self.set_block(pos, b.table.set_bool(state, b.props.powered, true), 2);
@@ -687,6 +714,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     ) {
         let b = self.b;
         let signal = self.plate_signal_strength(pos, state);
+        let signal = self.level.redstone_current(pos, old_signal, signal);
         let was = old_signal > 0;
         let is = signal > 0;
         let block = b.block(state);
@@ -719,6 +747,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     /// `ButtonBlock.press`.
     pub(crate) fn button_press(&mut self, pos: BlockPos, state: BlockStateId) {
+        if !self.allow_binary_redstone(pos, true) {
+            return;
+        }
         let b = self.b;
         self.set_block_and_update(pos, b.table.set_bool(state, b.props.powered, true));
         self.attached_update_neighbours(pos, state);
@@ -749,6 +780,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 > 0;
         let was_pressed = b.table.bool(state, b.props.powered);
         if should_be_pressed != was_pressed {
+            if !self.allow_binary_redstone(pos, should_be_pressed) {
+                return;
+            }
             self.set_block_and_update(
                 pos,
                 b.table.set_bool(state, b.props.powered, should_be_pressed),
@@ -829,13 +863,18 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             target = (f64::from(scaled) + 0.5).floor() as i32;
         }
         let target = target.clamp(0, 15);
-        if b.table.int(state, b.props.power) != target {
+        let old = b.table.int(state, b.props.power);
+        let target = self.level.redstone_current(pos, old, target);
+        if old != target {
             self.set_block_and_update(pos, b.table.set_int(state, b.props.power, target));
         }
     }
     /// `LeverBlock.pull`.
     pub(crate) fn lever_pull(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
+        if !self.allow_binary_redstone(pos, !b.table.bool(state, b.props.powered)) {
+            return;
+        }
         let state = b.table.cycle(state, b.props.powered);
         self.set_block_and_update(pos, state);
         self.attached_update_neighbours(pos, state);
@@ -873,6 +912,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         };
         let signal = self.has_neighbor_signal(pos) || self.has_neighbor_signal(rel(pos, other));
         if b.block(state) != changed && signal != b.table.bool(state, p.powered) {
+            if !self.allow_binary_redstone(pos, signal) {
+                return;
+            }
             if signal != b.table.bool(state, p.open) {
                 self.door_sound(pos, state, signal);
                 self.game_event(
@@ -925,6 +967,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let p = b.props;
         let signal = self.has_neighbor_signal(pos);
         if signal != b.table.bool(state, p.powered) {
+            if !self.allow_binary_redstone(pos, signal) {
+                return;
+            }
             let mut state = state;
             if b.table.bool(state, p.open) != signal {
                 state = b.table.set_bool(state, p.open, signal);
@@ -941,6 +986,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let p = b.props;
         let power = self.has_neighbor_signal(pos);
         if b.table.bool(state, p.powered) != power {
+            if !self.allow_binary_redstone(pos, power) {
+                return;
+            }
             let next = b
                 .table
                 .set_bool(b.table.set_bool(state, p.powered, power), p.open, power);
@@ -973,14 +1021,17 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if lit != self.has_neighbor_signal(pos) {
             if lit {
                 self.schedule_tick(pos, b.block(state), 4);
-            } else {
+            } else if self.allow_binary_redstone(pos, true) {
                 self.set_block(pos, b.table.cycle(state, b.props.lit), 2);
             }
         }
     }
     pub(crate) fn lamp_tick(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
-        if b.table.bool(state, b.props.lit) && !self.has_neighbor_signal(pos) {
+        if b.table.bool(state, b.props.lit)
+            && !self.has_neighbor_signal(pos)
+            && self.allow_binary_redstone(pos, false)
+        {
             self.set_block(pos, b.table.cycle(state, b.props.lit), 2);
         }
     }
@@ -990,6 +1041,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let p = b.props;
         let signal = self.has_neighbor_signal(pos);
         if signal != b.table.bool(state, p.powered) {
+            if !self.allow_binary_redstone(pos, signal) {
+                return;
+            }
             let mut next = state;
             if !b.table.bool(state, p.powered) {
                 next = b.table.cycle(next, p.lit);
@@ -1108,6 +1162,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let signal = self.has_neighbor_signal(pos);
         if signal != b.table.bool(state, b.props.powered) {
+            if !self.allow_binary_redstone(pos, signal) {
+                return;
+            }
             if signal {
                 self.note_play(pos, state, false);
             }
@@ -1152,6 +1209,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let signal = self.has_neighbor_signal(pos);
         if signal != b.table.bool(state, b.props.powered) {
+            if !self.allow_binary_redstone(pos, signal) {
+                return;
+            }
             if signal {
                 self.bell_ring(pos, state, b.facing(state));
             }
@@ -1246,7 +1306,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let block = b.block(state);
         if !self.ticks.has_block_tick(pos, block) {
             // `setOutputPower`.
-            self.set_block_and_update(pos, b.table.set_int(state, b.props.power, strength));
+            let old = b.table.int(state, b.props.power);
+            let next = self.level.redstone_current(pos, old, strength);
+            self.set_block_and_update(pos, b.table.set_int(state, b.props.power, next));
             self.schedule_tick(pos, block, if arrow { 20 } else { 8 });
         }
         Some(strength)

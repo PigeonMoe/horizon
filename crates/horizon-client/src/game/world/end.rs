@@ -728,6 +728,25 @@ impl Game<'_> {
         target: Vec3,
         finder: &mut Option<PlayerSpawnFinder>,
     ) -> Result<Option<(Vec3, Option<f32>)>> {
+        let mut target = target;
+        if self.dim != Dim::End
+            && let Some(c) = self.respawn_config.filter(|c| c.dim == self.dim)
+        {
+            // This existing owner transition adapter carries yaw only; its pitch path remains open.
+            if let Some((at, yaw, _pitch)) = self.find_respawn_and_use(c, false)? {
+                return Ok(Some((at, Some(yaw))));
+            }
+            target = fallback_spawn(self.spawn, self.level.world_spawn);
+        }
+        self.end_arrival_at_world_spawn(target, finder)
+    }
+
+    /// End platform or world spawn search without reading an acting player's respawn state.
+    pub(super) fn end_arrival_at_world_spawn(
+        &mut self,
+        target: Vec3,
+        finder: &mut Option<PlayerSpawnFinder>,
+    ) -> Result<Option<(Vec3, Option<f32>)>> {
         if self.dim == Dim::End {
             // EndPlatformFeature.createEndPlatform below the spawn point.
             let origin = [END_SPAWN[0], END_SPAWN[1] - 1, END_SPAWN[2]];
@@ -758,16 +777,6 @@ impl Game<'_> {
             self.native_portal_create("minecraft:the_end", origin);
             // Direction.WEST.toYRot().
             return Ok(Some((target, Some(90.0))));
-        }
-        // ServerPlayer.findRespawnPositionAndUseSpawnBlock: where the bed or
-        // anchor puts the player, facing it; else onto the spawn column.
-        let mut target = target;
-        if let Some(c) = self.respawn_config.filter(|c| c.dim == self.dim) {
-            // This existing owner transition adapter carries yaw only; its pitch path remains open.
-            if let Some((at, yaw, _pitch)) = self.find_respawn_and_use(c, false)? {
-                return Ok(Some((at, Some(yaw))));
-            }
-            target = fallback_spawn(self.spawn, self.level.world_spawn);
         }
         let (x, z) = (target.x.floor() as i32, target.z.floor() as i32);
         // TeleportTransition.missingRespawnBlock: PlayerSpawnFinder around

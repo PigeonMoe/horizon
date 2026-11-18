@@ -426,7 +426,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let should = self.has_neighbor_signal(pos)
             || self.powered_rail_find(pos, state, true, 0)
             || self.powered_rail_find(pos, state, false, 0);
-        if should != powered {
+        if should != powered && self.allow_binary_redstone(pos, should) {
             self.set_block_and_update(pos, b.table.set_bool(state, b.props.powered, should));
             let block = b.block(state);
             self.update_neighbors_at(below(pos), block);
@@ -754,19 +754,24 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if receiver > 0 {
             let test = pos.offset(dx * receiver, dy * receiver, dz * receiver);
             let opposite = direction.opposite();
-            self.set_block_and_update(test, b.table.set_dir(new_state, p.facing, opposite));
-            self.tripwire_hook_notify(block, test, opposite);
-            if !b.is_block(self.state(pos), b.named.tripwire_hook) {
-                self.tripwire_hook_removed(pos, new_state);
-                return;
+            let receiver_powered = b.table.bool(self.state(test), p.powered);
+            if receiver_powered == powered || self.allow_binary_redstone(test, powered) {
+                self.set_block_and_update(test, b.table.set_dir(new_state, p.facing, opposite));
+                self.tripwire_hook_notify(block, test, opposite);
+                if !b.is_block(self.state(pos), b.named.tripwire_hook) {
+                    self.tripwire_hook_removed(pos, new_state);
+                    return;
+                }
+                self.tripwire_emit(test, attached, powered, was_attached, was_powered);
             }
-            self.tripwire_emit(test, attached, powered, was_attached, was_powered);
         }
-        self.tripwire_emit(pos, attached, powered, was_attached, was_powered);
-        if !destroyed {
-            self.set_block_and_update(pos, b.table.set_dir(new_state, p.facing, direction));
-            if can_update {
-                self.tripwire_hook_notify(block, pos, direction);
+        if was_powered == powered || self.allow_binary_redstone(pos, powered) {
+            self.tripwire_emit(pos, attached, powered, was_attached, was_powered);
+            if !destroyed {
+                self.set_block_and_update(pos, b.table.set_dir(new_state, p.facing, direction));
+                if can_update {
+                    self.tripwire_hook_notify(block, pos, direction);
+                }
             }
         }
         if was_attached != attached {

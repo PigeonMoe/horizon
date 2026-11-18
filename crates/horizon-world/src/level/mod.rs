@@ -543,6 +543,18 @@ pub trait LevelAccess: BlockEntityNeighbors {
         true
     }
     fn observe_sponge_absorb(&self, _pos: BlockPos) {}
+    /// Whether a falling block may replace this block at takeoff or landing.
+    fn allow_falling_block_change(
+        &self,
+        _pos: BlockPos,
+        _origin: Option<(LevelKey, BlockPos)>,
+    ) -> bool {
+        true
+    }
+    /// The effective redstone current after mods respond to a proposed change.
+    fn redstone_current(&self, _pos: BlockPos, _old: i32, new: i32) -> i32 {
+        new
+    }
     fn allow_block_fade(&self, _pos: BlockPos, _from: BlockStateId, _to: BlockStateId) -> bool {
         true
     }

@@ -153,6 +153,7 @@ pub struct Broken {
     pub pos: Pos,
     pub generation: u64,
     pub data: horizon_core::nbt::Compound,
+    pub attachments: Option<horizon_mod_runtime::attachments::Attachments>,
 }
 
 /// A client copy of a mod block entity as its client tick shows it to mods: made once for each
@@ -802,12 +803,8 @@ impl BlockEntities {
     /// answers reads, and nothing else. One slot: a second hold replaces the first. Listeners of
     /// the event it serves read through a shared host and cannot start another break, so the two
     /// do not nest today; a hook that could would hold per break instead.
-    pub fn hold_broken(&mut self, pos: Pos, generation: u64, data: horizon_core::nbt::Compound) {
-        self.broken = Some(Broken {
-            pos,
-            generation,
-            data,
-        });
+    pub fn hold_broken(&mut self, snapshot: Broken) {
+        self.broken = Some(snapshot);
     }
     /// The data [`Self::hold_broken`] holds, if it is that of the block entity at `pos` with
     /// `generation`.

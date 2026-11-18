@@ -622,6 +622,8 @@ struct FallingBlock {
     state: BlockStateId,
     /// `DATA_START_POS`: spawn position used to select weighted block models.
     start_pos: BlockPos,
+    /// Where this entity first began falling, preserved through saves and portals.
+    origin: Option<(horizon_core::LevelKey, BlockPos)>,
     position: Vec3,
     previous: Vec3,
     velocity: Vec3,
@@ -3633,6 +3635,7 @@ impl Game<'_> {
                         id: self.next_entity,
                         state,
                         start_pos: pos,
+                        origin: Some((self.dim.level().key(), pos)),
                         position: p,
                         previous: p,
                         velocity: Vec3::ZERO,

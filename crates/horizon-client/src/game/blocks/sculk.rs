@@ -1262,7 +1262,9 @@ impl Game<'_> {
         frequency: i32,
     ) -> Result<()> {
         let pos = BlockPos::new(key.0, key.1, key.2);
-        self.with_level(|b, level, ticks| b.sculk_sensor_activate(level, ticks, pos, power));
+        if !self.with_level(|b, level, ticks| b.sculk_sensor_activate(level, ticks, pos, power)) {
+            return Ok(());
+        }
         self.process_level_events()?;
         // tryResonateVibration.
         if (1..=15).contains(&frequency) {

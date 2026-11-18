@@ -392,6 +392,7 @@ impl Game<'_> {
                 id,
                 state: BlockStateId(data.max(0) as u32),
                 start_pos: BlockPos::default(),
+                origin: None,
                 position: at,
                 previous: at,
                 velocity,

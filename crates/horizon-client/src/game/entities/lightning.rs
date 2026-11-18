@@ -21,7 +21,7 @@ use horizon_core::{
     position::BlockPos,
     random::{EntityRandom, RandomSource},
 };
-use horizon_world::level::Ticks;
+use horizon_world::level::{LevelAccess, Ticks};
 
 pub(super) struct Bolt {
     /// The entity id a server's players know it by (0 until it has one).
@@ -462,6 +462,15 @@ impl Game<'_> {
         }
         let registry = self.pack.assets.registry;
         if let Some(mut s) = registry.state(state).cloned() {
+            if s.properties
+                .get("powered")
+                .is_none_or(|value| value != "true")
+                && self.with_level(|_, level, _| {
+                    level.redstone_current(BlockPos::new(p[0], p[1], p[2]), 0, 15)
+                }) == 0
+            {
+                return;
+            }
             s.properties.insert("powered".into(), "true".into());
             if let Some(powered) = registry.id(&s) {
                 let _ = self.level_set(p, powered);
@@ -876,8 +885,8 @@ mod tests {
     use super::*;
     use horizon_client::mobs::{Anim, Brain, Mob, MobType, Part, Species};
     use horizon_core::geometry::Vec3;
-    use mod_api::{self, ServerHost};
     use horizon_core::random::LegacyRandom;
+    use mod_api::{self, ServerHost};
     use std::sync::Arc;
 
     /// `LightningBolt.spawnFire` places nothing, and draws no extra sources,

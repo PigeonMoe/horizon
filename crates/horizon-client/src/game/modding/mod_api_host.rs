@@ -387,6 +387,35 @@ impl mod_api::LevelHost for super::GameLevel<'_> {
         super::native_block_entity_refs::save_without_metadata(self.world, key, entity, name)
     }
 
+    fn block_entity_saved_attachment(
+        &self,
+        entity: mod_api::BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Option<mod_api::Compound> {
+        use mod_api::__private::game::Fields;
+        let fields = entity.fields();
+        if self.api_level != Some(fields.level) {
+            return None;
+        }
+        let [x, y, z] = fields.position;
+        let key = (x, y, z);
+        let entities = &self.world.block_entities;
+        let attachments = if entities.generation(&key) == Some(fields.generation) {
+            entities.attachments(key)?
+        } else {
+            entities
+                .broken(&key, fields.generation)?
+                .attachments
+                .as_ref()?
+        };
+        let mut envelope = attachments.entry(namespace, name).ok()??.saved()?;
+        match envelope.remove(&"value".into())? {
+            mod_api::Tag::Compound(value) => Some(value),
+            _ => None,
+        }
+    }
+
     fn block_state_id(&self, name: &str) -> Option<mod_api::BlockState> {
         super::native_block_states::parse(self.block_registries, self.registry, name)?
             .try_into_api()

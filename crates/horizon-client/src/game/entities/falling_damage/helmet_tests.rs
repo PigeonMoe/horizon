@@ -51,6 +51,7 @@ fn falling_impacts_wear_the_helmet_before_normal_armor_and_reduction() {
             .default_state("minecraft:anvil")
             .unwrap(),
         start_pos: BlockPos::new(4, 100, 4),
+        origin: None,
         position,
         previous: position,
         velocity: Vec3::ZERO,

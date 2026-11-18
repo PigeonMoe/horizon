@@ -65,6 +65,54 @@ impl Game<'_> {
         broke
     }
 
+    pub(super) fn player_remove_block_without_drops(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        state: horizon_world::registry::BlockStateId,
+    ) -> bool {
+        if !self.native_authoritative() || !self.native_player_current(player) {
+            return false;
+        }
+        let Some(_nested) = NestedBreak::enter() else {
+            return false;
+        };
+        let mut removed = false;
+        self.native_as_player_handle(player, |game| {
+            let Some(epoch) = game.native_lifecycle.epoch() else {
+                return;
+            };
+            let dim = game.dim;
+            let level = game.level_ref(epoch, dim.key());
+            let matches = |game: &Game<'_>| {
+                game.dim == dim
+                    && game.native_level_write_allowed(level, pos)
+                    && game.world.block(pos[0], pos[1], pos[2]) == state
+                    && !game.block_action_restricted(pos)
+                    && !game
+                        .lan_acting_spawn_protection
+                        .is_some_and(|radius| game.spawn_protects(radius, dim.id(), pos))
+            };
+            if !matches(game)
+                || game.res.behaviours().is_air(state)
+                || game.res.facts().get(state).hardness < 0.0
+                || (!game.can_use_game_master_blocks()
+                    && crate::game::is_game_master_block(&game.res.facts().get(state).name))
+            {
+                return;
+            }
+            let mut canceled = false;
+            game.native_break_block(pos, state, &mut canceled, &mut None);
+            if !canceled && game.native_player_current(player) && matches(game) {
+                removed = game.with_player_actor(|game| {
+                    game.level_destroy_block(level, pos, false, None, false)
+                        .is_some()
+                });
+            }
+        });
+        removed
+    }
+
     fn break_as_acting_player(&mut self, pos: [i32; 3], into_inventory: bool) -> bool {
         if !self.world.loaded(pos[0], pos[2]) {
             return false;
@@ -192,6 +240,60 @@ mod tests {
             assert!(popped(game, "minecraft:cobblestone"));
             assert_eq!(game.held().unwrap().damage, 1);
             assert_eq!(game.stats.get("mined", "minecraft:stone"), 1);
+        });
+    }
+
+    struct ProtectGravel([i32; 3]);
+
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for ProtectGravel {
+        fn break_block(
+            &self,
+            _: &mut dyn mod_api::ServerHost,
+            event: &mut mod_api::BreakBlockEvent<'_>,
+        ) -> mod_api::Flow {
+            if event.pos == self.0 {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn scripted_removal_obeys_break_protection_and_never_drops_vanilla_loot() {
+        let guarded = [6, 64, 4];
+        let open = [7, 64, 4];
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "protect-gravel",
+            Box::new(ProtectGravel(guarded)),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                game.world.chunks.insert(
+                    (0, 0),
+                    std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+                );
+                let player = with_player(game, ItemStack::new("minecraft:diamond_shovel", 1));
+                place(game, guarded, "minecraft:gravel");
+                place(game, open, "minecraft:gravel");
+                let gravel = game.world.block(guarded[0], guarded[1], guarded[2]);
+                let stone = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:stone")
+                    .unwrap();
+                assert!(!game.player_remove_block_without_drops(player, open, stone));
+                assert!(!game.player_remove_block_without_drops(player, guarded, gravel));
+                assert_eq!(block(game, guarded), "minecraft:gravel");
+                assert!(game.player_remove_block_without_drops(player, open, gravel));
+                assert_eq!(block(game, open), "minecraft:air");
+                assert!(!popped(game, "minecraft:gravel") && !popped(game, "minecraft:flint"));
+                assert_eq!(game.held().unwrap().damage, 0);
+            })
         });
     }
 

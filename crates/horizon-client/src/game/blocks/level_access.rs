@@ -244,6 +244,39 @@ impl LevelAccess for GameLevel<'_> {
             self.native_sponge_absorb(self.dimension, pos);
         }
     }
+    fn allow_falling_block_change(
+        &self,
+        pos: BlockPos,
+        origin: Option<(horizon_core::LevelKey, BlockPos)>,
+    ) -> bool {
+        if !self.native_authoritative
+            || !mod_api::__private::listened(mod_api::HookId::FallingBlockChangePre)
+        {
+            return true;
+        }
+        let (origin_dimension, origin_pos) =
+            origin.map_or(("", BlockPos::default()), |(level, pos)| (level.id(), pos));
+        let mut cancel = false;
+        self.native_falling_block_change_pre(
+            self.dimension,
+            pos,
+            origin_dimension,
+            origin_pos,
+            &mut cancel,
+        );
+        !cancel
+    }
+    fn redstone_current(&self, pos: BlockPos, old: i32, new: i32) -> i32 {
+        if old == new
+            || !self.native_authoritative
+            || !mod_api::__private::listened(mod_api::HookId::BlockRedstoneCurrentPre)
+        {
+            return new;
+        }
+        let mut cancel = false;
+        self.native_block_redstone_current_pre(self.dimension, pos, old, new, &mut cancel);
+        if cancel { old } else { new }
+    }
     fn allow_block_fade(&self, pos: BlockPos, from: BlockStateId, to: BlockStateId) -> bool {
         let mut cancel = false;
         if self.native_authoritative {

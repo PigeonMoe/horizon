@@ -147,7 +147,7 @@ impl Game<'_> {
 /// removal clears from the level.
 pub(in crate::game) type LiveBlockEntity = (
     horizon_client::containers::BlockEntity,
-    Option<(Compound, u64)>,
+    Option<horizon_client::block_entities::Broken>,
 );
 
 impl Game<'_> {
@@ -163,7 +163,12 @@ impl Game<'_> {
             && mod_api::__private::listened(mod_api::HookId::BlockDrops))
         .then(|| {
             let data = self.saved_block_entity_data(key, &entity, block)?;
-            Some((data, self.world.block_entities.generation(&key)?))
+            Some(horizon_client::block_entities::Broken {
+                pos: key,
+                generation: self.world.block_entities.generation(&key)?,
+                data,
+                attachments: self.world.block_entities.attachments(key).cloned(),
+            })
         })
         .flatten();
         Some((entity, view))
@@ -182,10 +187,8 @@ impl Game<'_> {
     ) -> crate::game::spill::BlockDrops {
         let ([x, y, z], state) = at;
         let (breaker, tool, live) = who;
-        if let Some((data, generation)) = live.and_then(|(_, view)| view) {
-            self.world
-                .block_entities
-                .hold_broken((x, y, z), generation, data);
+        if let Some(snapshot) = live.and_then(|(_, view)| view) {
+            self.world.block_entities.hold_broken(snapshot);
         }
         let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.with_level(|_, level, _| {
