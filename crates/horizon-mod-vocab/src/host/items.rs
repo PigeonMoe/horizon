@@ -48,6 +48,10 @@ pub trait ItemsHost {
     /// using this game's enchantment definitions and item tags.
     #[access(ClientSetup)]
     fn enchantment_supports(&self, id: &str, item: ItemKey) -> bool;
+    /// Side: both. The registered enchantment's maximum level (`Enchantment.getMaxLevel`),
+    /// including data-pack overrides, or none for an unknown identifier.
+    #[access(ClientSetup)]
+    fn enchantment_max_level(&self, id: &str) -> Option<u32>;
     /// Side: both.
     /// `EntityType.is(TagKey)`: whether `entity_type` (`minecraft:player`) is in the entity
     /// type tag `tag` (`minecraft:cannot_be_pushed_onto_boats`).

@@ -339,6 +339,12 @@ impl crate::prelude::ItemsHost for FakeHost {
     fn enchantment_supports(&self, id: &str, item: crate::ItemKey) -> bool {
         self.registries.enchantment_supports(id, item)
     }
+    fn enchantment_max_level(&self, id: &str) -> Option<u32> {
+        self.registries.enchantment_max_level(id)
+    }
+    fn enchantments_compatible(&self, first: &str, second: &str) -> bool {
+        self.registries.enchantments_compatible(first, second)
+    }
     fn max_stack_size(&self, item: crate::ItemKey) -> Option<u32> {
         Some(
             self.registries

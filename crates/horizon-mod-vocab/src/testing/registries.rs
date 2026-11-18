@@ -13,6 +13,8 @@ pub struct FakeRegistries {
     loaded: HashSet<String>,
     fluid_sounds: HashMap<String, (&'static str, &'static str)>,
     enchantments: HashMap<String, HashSet<String>>,
+    enchantment_limits: HashMap<String, u32>,
+    enchantment_conflicts: HashMap<String, HashSet<String>>,
 }
 
 impl FakeRegistries {
@@ -69,6 +71,39 @@ impl FakeRegistries {
         self.enchantments
             .get(enchantment)
             .is_some_and(|items| items.contains(item))
+    }
+    /// Registers the maximum level of one enchantment for tests.
+    pub fn register_enchantment(&mut self, id: &str, max_level: u32) -> &mut Self {
+        self.enchantment_limits.insert(id.to_owned(), max_level);
+        self
+    }
+    /// Declares that the two enchantments are mutually exclusive.
+    pub fn conflict_enchantments(&mut self, first: &str, second: &str) -> &mut Self {
+        let (first, second) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        self.enchantment_conflicts
+            .entry(first.to_owned())
+            .or_default()
+            .insert(second.to_owned());
+        self
+    }
+    pub(super) fn enchantment_max_level(&self, id: &str) -> Option<u32> {
+        self.enchantment_limits.get(id).copied()
+    }
+    pub(super) fn enchantments_compatible(&self, first: &str, second: &str) -> bool {
+        let (first, second) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        first != second
+            && !self
+                .enchantment_conflicts
+                .get(first)
+                .is_some_and(|ids| ids.contains(second))
     }
     /// Gives item `item` `slots` slots of the game's own, as `item_container` answers for a
     /// mod's backpack; they read empty.

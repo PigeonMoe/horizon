@@ -3738,6 +3738,26 @@ mod tests {
                         &expected,
                     );
                 }
+                for (enchantment, expected) in [
+                    ("minecraft:sharpness", Some(5)),
+                    ("minecraft:vanishing_curse", Some(1)),
+                    ("missing:unknown", None),
+                ] {
+                    assert_eq!(
+                        ItemsHost::enchantment_max_level(game, enchantment),
+                        expected
+                    );
+                    let mut input = Writer::new();
+                    input.put(&enchantment.to_owned());
+                    wasm_host_answer(
+                        game,
+                        level,
+                        "Host",
+                        "enchantment_max_level",
+                        input,
+                        &expected,
+                    );
+                }
             })
         });
     }

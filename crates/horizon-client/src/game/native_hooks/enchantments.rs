@@ -26,6 +26,12 @@ impl Game<'_> {
             .get(id)
             .map(|e| e.min_cost.calculate(level))
     }
+    pub(in crate::game) fn enchantment_max_level(&self, id: &str) -> Option<u32> {
+        self.stations()
+            .enchantments
+            .get(id)
+            .map(|enchantment| enchantment.max_level)
+    }
     /// `ItemStack.getHoverName()` as plain text, in the client's language.
     pub(in crate::game) fn hover_name(&self, stack: &ItemStack) -> String {
         horizon_client::stations::hover_name(&self.pack.names, stack)
