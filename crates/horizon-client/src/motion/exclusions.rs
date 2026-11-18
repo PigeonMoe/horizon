@@ -58,6 +58,7 @@ mod tests {
                     original: Some(delta),
                 });
             let mut w = MotionWorld {
+                footwear: None,
                 tag_items: None,
                 block_registries: None,
                 loop_context: crate::test_resources::server_loop_context(),

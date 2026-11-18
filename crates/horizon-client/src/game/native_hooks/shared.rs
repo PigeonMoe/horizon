@@ -1326,7 +1326,7 @@ pub(super) fn incoming_damage(
     let regular = mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage);
     let protection = !level.client_side()
         && mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre);
-    if !regular && !protection {
+    if !regular && !protection && !level.has_footwear() {
         return false;
     }
     let (entity, kind, source) = hurt_server_args(hurting, level.attack());
@@ -1352,28 +1352,28 @@ pub(super) fn incoming_damage(
             return true;
         }
     }
-    if !regular {
-        return false;
+    if regular && let Ok(weapon) = level.attack().weapon_of(source.direct).try_into_api() {
+        let mut canceled = false;
+        let mut snapshot = (*container).try_into_api().expect("scalar damage snapshot");
+        HitLevel(level.reborrow()).native_living_incoming_damage(
+            mod_api::__private::LivingIncomingDamageCall {
+                entity,
+                kind,
+                source: &source,
+                victim: &victim,
+                weapon: weapon.as_ref(),
+                container: &mut snapshot,
+                canceled: &mut canceled,
+            },
+        );
+        *container = snapshot
+            .try_into_engine(&())
+            .expect("scalar damage snapshot");
+        if canceled {
+            return true;
+        }
     }
-    let mut canceled = false;
-    let attack = level.attack();
-    let Ok(weapon) = attack.weapon_of(source.direct).try_into_api() else {
-        return false;
-    };
-    let mut snapshot = (*container).try_into_api().expect("scalar damage snapshot");
-    HitLevel(level).native_living_incoming_damage(mod_api::__private::LivingIncomingDamageCall {
-        entity,
-        kind,
-        source: &source,
-        victim: &victim,
-        weapon: weapon.as_ref(),
-        container: &mut snapshot,
-        canceled: &mut canceled,
-    });
-    *container = snapshot
-        .try_into_engine(&())
-        .expect("scalar damage snapshot");
-    canceled
+    kind == "minecraft:player" && level.footwear_cancels()
 }
 
 /// `native_living_damage_pre` for the damage code.

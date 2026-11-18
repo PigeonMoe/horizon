@@ -955,6 +955,7 @@ impl Game<'_> {
             return;
         };
         let _ = MotionWorld {
+            footwear: acting_footwear!(self),
             entities: &[],
             player,
             scene: &mut self.world,

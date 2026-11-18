@@ -275,6 +275,16 @@ pub(crate) fn install_client_hooks() {
             let context = reader.context();
             mod_api::dispatch_farmland_trample(&context, entity, pos, state, distance, cancel);
         },
+        player_footwear_listened: || {
+            mod_api::__private::listened(mod_api::HookId::PlayerFootwearReaction)
+        },
+        player_footwear_reaction: |context, action, actor, boots, persisted, sound, cancel| {
+            let reader = horizon_client_render::api_context::LoopReader(context);
+            let context = reader.context();
+            mod_api::dispatch_player_footwear_reaction(
+                &context, action, actor, boots, persisted, sound, cancel,
+            );
+        },
         has_mods: || !mod_api::__private::mods().is_empty(),
         player_name_format: |context, username, displayname| {
             use game::api_values::{TryIntoApi, TryIntoEngine};

@@ -233,3 +233,142 @@ fn mob_pearls_use_the_hook_and_recheck_listener_writes_without_player_side_effec
         })
     });
 }
+
+struct FootwearProbe(Arc<Mutex<Vec<String>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for FootwearProbe {
+    fn player_footwear_reaction(
+        &self,
+        _: &dyn mod_api::LoopContext,
+        event: &mut mod_api::PlayerFootwearReactionEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.actor, (7, mod_api::GameMode::Survival));
+        assert_eq!(
+            event.boots.item(),
+            mod_api::__private::item_key("minecraft:leather_boots").unwrap()
+        );
+        assert_eq!(
+            event
+                .persisted
+                .and_then(|data| data.get(&"probe:unlocked".into())),
+            Some(&mod_api::Tag::Byte(1))
+        );
+        assert!(
+            !event
+                .persisted
+                .unwrap()
+                .contains_key(&"probe:hidden".into())
+        );
+        self.0.lock().unwrap().push(event.action.into());
+        if event.action == "fall_damage" {
+            *event.sound = Some("minecraft:block.slime_block.fall".into());
+        }
+        Flow::Cancel
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn footwear_checks_current_gear_before_farmland_and_pearls_write() {
+    use horizon_client::motion::{MotionEvent, MotionWorld, PlayerMotion};
+    use horizon_world::fall_damage::FallDamageWorld;
+    use mod_api::{Compound, Tag};
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mods: mod_api::Mods = vec![ModEntry::new(
+        "player-footwear-proof",
+        Box::new(FootwearProbe(Arc::clone(&calls))),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::entry::install_client_hooks();
+        with_game(|game| {
+            let from = Vec3::new(6.5, 65.0, 6.5);
+            game.player = Some(PlayerMotion::new(game.motion, from).unwrap());
+            game.lan_acting = Some(12);
+            game.mode = mod_api::GameMode::Survival;
+            game.lan_acting_uuid = Some(7);
+            crate::game::native_entity_refs::tests::bind_local_player(game, 2, 7);
+            game.lan_acting_name = Some("FootwearTest".into());
+            game.lan_acting_permission = Some(4);
+            game.lan_acting_entity = Some(2);
+            crate::game::native_entity_refs::tests::bind_acting_guest(game);
+            game.armor[3] = Some(ItemStack {
+                item: "minecraft:leather_boots".into(),
+                count: 1,
+                damage: 0,
+                extra: None,
+            });
+            game.level.player_extra = Some(Tag::Compound(Compound::from([(
+                "NeoForgeData".into(),
+                Tag::compound([
+                    ("probe:hidden", Tag::Byte(1)),
+                    (
+                        "PlayerPersisted",
+                        Tag::compound([("probe:unlocked", Tag::Byte(1))]),
+                    ),
+                ]),
+            )])));
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            let farmland = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:farmland")
+                .unwrap();
+            game.world.set(6, 64, 6, farmland).unwrap();
+            let health = game.player.as_ref().unwrap().health.health();
+            let mut w = MotionWorld {
+                footwear: acting_footwear!(game),
+                entities: &[],
+                player: game.player.as_mut().unwrap(),
+                scene: &mut game.world,
+                assets: &game.pack.assets,
+                collision_binding: game.collision,
+                resources: game.motion,
+                health: &game.health_resources,
+                tag_items: Some(world_items!(game)),
+                loop_context: &game.loop_context,
+                damage_hooks: &game.damage_hooks,
+                block_registries: Some(&game.pack.block_registries),
+            };
+            w.fall_on(farmland, BlockPos::new(6, 64, 6), 8.0).unwrap();
+            assert_eq!(w.scene.block(6, 64, 6), farmland);
+            assert_eq!(w.player.health.health(), health);
+            assert!(w.player.events.iter().any(|event| matches!(
+                event,
+                MotionEvent::Fall(horizon_client::landing::FallEvent::FootwearSound(
+                    "minecraft:block.slime_block.fall"
+                ))
+            )));
+
+            let pearl = Projectile::new(
+                ProjectileKind::EnderPearl,
+                Vec3::new(12.0, 75.0, 6.0),
+                Some(Who::Player),
+            );
+            let hit = || Hit::Block {
+                pos: [12, 75, 6],
+                at: pearl.position,
+                face: [0, 1, 0],
+            };
+            game.projectile_hit(&pearl, hit()).unwrap();
+            let player = game.player.as_ref().unwrap();
+            assert_eq!(player.position, pearl.previous);
+            assert_eq!(player.health.health(), health);
+            assert_eq!(player.health.invulnerable_time, 0);
+            assert_eq!(
+                &*calls.lock().unwrap(),
+                &["farmland_trample", "fall_damage", "ender_pearl_damage"]
+            );
+
+            // The next action in the same tick uses the actual slot again.
+            game.armor[3] = None;
+            game.projectile_hit(&pearl, hit()).unwrap();
+            assert!(game.player.as_ref().unwrap().health.health() < health);
+            assert_eq!(calls.lock().unwrap().len(), 3);
+        })
+    });
+}

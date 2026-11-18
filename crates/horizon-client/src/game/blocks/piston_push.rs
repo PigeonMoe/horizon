@@ -582,6 +582,7 @@ impl Game<'_> {
         let entities = self.player_entity_collisions();
         if let Some(player) = self.player.as_mut() {
             let _ = MotionWorld {
+                footwear: acting_footwear!(self),
                 entities: &entities,
                 player,
                 scene: &mut self.world,

@@ -53,6 +53,7 @@ fn replayed_landing_reads_restitution_again_and_moves_identically() {
                     PlayerMotion::new(game.motion, Vec3::new(3.5, 65.25, 5.5)).unwrap();
                 player.velocity.y = -1.0;
                 let mut world = MotionWorld {
+                    footwear: None,
                     entities: &[],
                     player: &mut player,
                     scene: &mut game.world,

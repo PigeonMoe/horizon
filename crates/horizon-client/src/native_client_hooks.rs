@@ -14,6 +14,8 @@ pub struct NativeClientHooks {
     pub living_heal: fn(&LoopContext, u32, &mut f32, &mut bool),
     pub living_breathe: fn(&LoopContext, u32, &str, &mut bool, &mut i32, &mut i32),
     pub farmland_trample: fn(&LoopContext, u32, [i32; 3], u32, f64, &mut bool),
+    pub player_footwear_listened: fn() -> bool,
+    pub player_footwear_reaction: PlayerFootwearHook,
     pub has_mods: fn() -> bool,
     pub player_name_format: fn(&LoopContext, &crate::text::Text, &mut crate::text::Text),
     pub player_tab_list_name_format: fn(&LoopContext, u128, &str, &mut Option<crate::text::Text>),
@@ -48,6 +50,40 @@ pub struct NativeClientHooks {
     /// `ItemPart::can_fit_inside_container_items` of the stack's item; `fits` arrives with
     /// vanilla's.
     pub can_fit_inside_container_items: fn(&LoopContext, &ItemStack, &mut bool),
+}
+
+pub type PlayerFootwearHook = fn(
+    &LoopContext,
+    &str,
+    (u128, mod_api::GameMode),
+    &mod_api::ItemStack,
+    Option<&horizon_core::nbt::Compound>,
+    &mut Option<String>,
+    &mut bool,
+);
+
+pub(crate) fn player_footwear_listened() -> bool {
+    HOOKS
+        .get()
+        .is_some_and(|hooks| (hooks.player_footwear_listened)())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn player_footwear_reaction(
+    context: &LoopContext,
+    action: &str,
+    actor: (u128, mod_api::GameMode),
+    boots: &mod_api::ItemStack,
+    persisted: Option<&horizon_core::nbt::Compound>,
+    sound: &mut Option<String>,
+    cancel: &mut bool,
+) {
+    if let Some(hooks) = HOOKS
+        .get()
+        .filter(|hooks| (hooks.player_footwear_listened)())
+    {
+        (hooks.player_footwear_reaction)(context, action, actor, boots, persisted, sound, cancel);
+    }
 }
 
 static HOOKS: OnceLock<NativeClientHooks> = OnceLock::new();

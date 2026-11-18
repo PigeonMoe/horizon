@@ -302,6 +302,7 @@ impl Game<'_> {
         };
         let bounds = player.dimensions.bounds(at);
         let free = horizon_client::motion::MotionWorld {
+            footwear: None,
             entities: &entities,
             player,
             scene: &mut self.world,

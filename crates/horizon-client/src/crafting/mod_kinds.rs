@@ -105,7 +105,7 @@ fn snapshot_dimensions(
     CraftingGrid::new(width as u32, height as u32, cells).ok()
 }
 
-fn to_api(stack: &ItemStack) -> Option<mod_api::ItemStack> {
+pub(crate) fn to_api(stack: &ItemStack) -> Option<mod_api::ItemStack> {
     let key = mod_api::__private::item_key(&stack.item)?;
     let mut out = mod_api::ItemStack::new(key, stack.count)?;
     if stack.carries_component(None, "minecraft:damage") {

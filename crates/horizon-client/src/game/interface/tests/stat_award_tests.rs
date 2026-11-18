@@ -296,6 +296,7 @@ fn real_integrated_stone_break_updates_counter_score_and_dirty_award() {
                 let player = game.player.as_mut().unwrap();
                 player.ground.on_ground = true;
                 let mut world = horizon_client::motion::MotionWorld {
+                    footwear: None,
                     entities: &[],
                     player,
                     scene: &mut game.world,

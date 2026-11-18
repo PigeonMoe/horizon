@@ -23,6 +23,22 @@ macro_rules! world_items {
         }
     };
 }
+/// Borrow the exact currently installed body, including a guest temporarily acting as player.
+macro_rules! acting_footwear {
+    ($game:ident) => {
+        horizon_client::landing::PlayerFootwear::new(
+            $game.lan_acting_uuid.or_else(|| {
+                $game
+                    .level
+                    .player_uuid
+                    .map(horizon_client::lan::playerdata::ints_uuid)
+            }),
+            $game.mode,
+            $game.armor[3].as_ref(),
+            $game.level.player_extra.as_ref(),
+        )
+    };
+}
 macro_rules! world_recipes {
     ($s:ident) => {
         match &$s.world_tables {

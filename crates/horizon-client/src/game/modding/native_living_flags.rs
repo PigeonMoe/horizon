@@ -1374,6 +1374,7 @@ pub(in crate::game) mod tests {
         let mut player = PlayerMotion::new(game.motion, Vec3::new(5.5, 64.0, 5.5)).unwrap();
         player.entity_id = id;
         let mut world = MotionWorld {
+            footwear: None,
             entities: &[],
             player: &mut player,
             scene: &mut game.world,

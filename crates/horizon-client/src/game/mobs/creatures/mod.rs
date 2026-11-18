@@ -4332,12 +4332,22 @@ impl Game<'_> {
         self.give_player_effect("minecraft:wither", 40, 0);
     }
     pub(in crate::game) fn hurt_player_by(&mut self, damage_type: &str, amount: f32) {
+        self.hurt_player_by_action(damage_type, amount, None);
+    }
+
+    fn hurt_player_by_action(
+        &mut self,
+        damage_type: &str,
+        amount: f32,
+        footwear: Option<&'static str>,
+    ) {
         let mut canceled = false;
         let attack = self.current_attack();
         if self.player.is_some()
             && let Some(id) = self.health_resources.damage.id(damage_type)
-            && let Ok(o) =
-                self.hurt_player_equipment(id, amount, None, false, 0, false, &attack, None)
+            && let Ok(o) = self.hurt_player_equipment_for(
+                id, amount, None, false, 0, false, &attack, None, footwear,
+            )
         {
             canceled = o.canceled;
         }
@@ -5886,7 +5896,11 @@ impl Game<'_> {
                     }
                     // ServerPlayer.teleport: removeVehicle before the placement.
                     section_steps::teleport_player(self, to);
-                    self.hurt_player_by("minecraft:ender_pearl", damage);
+                    self.hurt_player_by_action(
+                        "minecraft:ender_pearl",
+                        damage,
+                        Some("ender_pearl_damage"),
+                    );
                     self.audio.play(
                         "minecraft:entity.player.teleport",
                         Some([to.x, to.y, to.z]),
@@ -9094,6 +9108,7 @@ mod tests {
         assert_eq!(player.position, destination);
         assert_eq!(player.fall_distance, 0.0);
         let damaged = MotionWorld {
+            footwear: None,
             entities: &[],
             player,
             scene: &mut game.world,

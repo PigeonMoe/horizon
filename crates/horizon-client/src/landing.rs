@@ -24,6 +24,7 @@ use horizon_world::{
     movement_properties::MovementProperties,
     registry::BlockStateId,
 };
+use mod_api::{Compound, GameMode, ItemStack};
 use std::{collections::BTreeMap, fs, path::Path};
 
 /// Called on the server before a landing converts farmland to its base block.
@@ -37,6 +38,88 @@ pub fn native_farmland_trample(
     cancel: &mut bool,
 ) {
     crate::native_client_hooks::farmland_trample(context, entity, pos, state, distance, cancel);
+}
+
+/// Call the footwear policy only while the action owns the worn feet item.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn native_player_footwear_reaction(
+    context: &LoopContext,
+    action: &str,
+    actor: (u128, GameMode),
+    boots: &ItemStack,
+    persisted: Option<&Compound>,
+    sound: &mut Option<String>,
+    cancel: &mut bool,
+) {
+    crate::native_client_hooks::player_footwear_reaction(
+        context, action, actor, boots, persisted, sound, cancel,
+    );
+}
+
+/// Read-only, short-lived references to the authoritative player's worn feet and saved data.
+#[derive(Clone, Copy)]
+pub struct PlayerFootwear<'a> {
+    player: u128,
+    mode: mod_api::GameMode,
+    boots: &'a crate::items::ItemStack,
+    persisted: Option<&'a horizon_core::nbt::Compound>,
+}
+
+impl<'a> PlayerFootwear<'a> {
+    pub fn new(
+        uuid: Option<u128>,
+        mode: mod_api::GameMode,
+        boots: Option<&'a crate::items::ItemStack>,
+        saved: Option<&'a horizon_core::nbt::Tag>,
+    ) -> Option<Self> {
+        if !crate::native_client_hooks::player_footwear_listened() {
+            return None;
+        }
+        let player = uuid?;
+        let boots = boots.filter(|stack| stack.count > 0 && &*stack.item != "minecraft:air")?;
+        let persisted = saved
+            .and_then(|saved| saved.get("NeoForgeData"))
+            .and_then(|data| data.get("PlayerPersisted"))
+            .and_then(|tag| match tag {
+                horizon_core::nbt::Tag::Compound(data) => Some(data),
+                _ => None,
+            });
+        Some(Self {
+            player,
+            mode,
+            boots,
+            persisted,
+        })
+    }
+
+    /// A canceled action and its optional, registry-validated level sound.
+    pub fn reaction(self, context: &LoopContext, action: &str) -> Option<Option<&'static str>> {
+        use horizon_world::native_load_context::LoopSide;
+        if context.side() != LoopSide::Server {
+            return None;
+        }
+        let mut sound = None;
+        let mut cancel = false;
+        let boots = crate::crafting::mod_kinds::to_api(self.boots)?;
+        native_player_footwear_reaction(
+            context,
+            action,
+            (self.player, self.mode),
+            &boots,
+            self.persisted,
+            &mut sound,
+            &mut cancel,
+        );
+        cancel.then(|| {
+            let sound = sound?;
+            let registry = context.registry("minecraft:sound_event")?;
+            registry
+                .iter()
+                .any(|id| id == &sound)
+                .then(|| crate::mobs::entity_sounds::intern_full_id(&sound))
+        })
+    }
 }
 
 /// A living entity is about to handle a fall (`LivingFallEvent`). Mods may
@@ -184,6 +267,7 @@ pub enum FallEvent {
         position: BlockPos,
         state: BlockStateId,
     },
+    FootwearSound(&'static str),
     Broadcast(u8),
     Write {
         position: BlockPos,
@@ -270,6 +354,7 @@ impl FallEvent {
                 pitch.to_bits()
             ),
             Self::BlockFallSound { .. } => "block-fall-sound".into(),
+            Self::FootwearSound(name) => format!("footwear-sound {name}"),
             Self::Broadcast(event) => format!("broadcast {event}"),
             Self::Write {
                 position,
@@ -568,6 +653,11 @@ impl BlockLandingWorld for MotionWorld<'_, '_, '_> {
             &mut cancel,
         );
         cancel
+            || self.footwear.is_some_and(|footwear| {
+                footwear
+                    .reaction(self.loop_context, "farmland_trample")
+                    .is_some()
+            })
     }
     fn suppressing_bounce(&mut self) -> Result<bool> {
         Ok(self.player.shift_key_down)
@@ -742,6 +832,11 @@ impl LivingFallWorld for FallCall<'_, '_, '_, '_> {
         });
         let resources = self.world.health;
         let rules = self.world.scene.health_rules;
+        let footwear = self
+            .world
+            .footwear
+            .filter(|_| matches!(self.source, LandingDamage::Fall));
+        let sound = std::cell::Cell::new(None);
         self.world.player.hurt(
             &mut crate::health::DamageLevel::of(
                 self.world.scene,
@@ -749,12 +844,16 @@ impl LivingFallWorld for FallCall<'_, '_, '_, '_> {
                 self.world.tag_items,
                 self.world.block_registries,
                 self.world.damage_hooks,
-            ),
+            )
+            .with_footwear(footwear, self.world.loop_context, "fall_damage", &sound),
             resources,
             rules,
             resources.landing_source(self.source),
             amount,
         )?;
+        if let Some(sound) = sound.get() {
+            self.world.fall_event(FallEvent::FootwearSound(sound));
+        }
         Ok(())
     }
 }
@@ -814,6 +913,7 @@ mod tests {
                     .unwrap();
                 BlockLandingWorld::cause_fall_damage(
                     &mut MotionWorld {
+                        footwear: None,
                         entities: &[],
                         player: &mut player,
                         scene: &mut scene,

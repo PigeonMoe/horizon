@@ -127,6 +127,15 @@ pub struct DamageLevel<'a> {
     /// Which entry of `LivingEntity.knockback` a push in progress came through, for
     /// `living_knockback` ([`Self::through_short_knockback`]).
     knock_entry: mod_api::KnockbackEntry,
+    footwear: Option<FootwearHit<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct FootwearHit<'a> {
+    boots: crate::landing::PlayerFootwear<'a>,
+    context: &'a horizon_world::native_load_context::LoopContext,
+    action: &'static str,
+    sound: &'a std::cell::Cell<Option<&'static str>>,
 }
 impl<'a> DamageLevel<'a> {
     /// The level of `world`, whose blocks `registry` names.
@@ -161,6 +170,7 @@ impl<'a> DamageLevel<'a> {
             attack: &NO_ATTACK,
             client_side: false,
             knock_entry: mod_api::KnockbackEntry::Full,
+            footwear: None,
         }
     }
     /// The level of `world`, with the random and attachments `lent` took out of it.
@@ -187,6 +197,7 @@ impl<'a> DamageLevel<'a> {
             attack: &NO_ATTACK,
             client_side: false,
             knock_entry: mod_api::KnockbackEntry::Full,
+            footwear: None,
         }
     }
     /// The same level, for a shorter borrow.
@@ -206,6 +217,7 @@ impl<'a> DamageLevel<'a> {
             attack: self.attack,
             client_side: self.client_side,
             knock_entry: self.knock_entry,
+            footwear: self.footwear,
         }
     }
     /// The same level with a task-local random, retaining its typed hook and attachment context.
@@ -228,6 +240,40 @@ impl<'a> DamageLevel<'a> {
             attack: self.attack,
             client_side: self.client_side,
             knock_entry: self.knock_entry,
+            footwear: self.footwear,
+        }
+    }
+    /// Borrow equipment for this particular player hit. Ordinary damage sites have none.
+    pub fn with_footwear(
+        mut self,
+        boots: Option<crate::landing::PlayerFootwear<'a>>,
+        context: &'a horizon_world::native_load_context::LoopContext,
+        action: &'static str,
+        sound: &'a std::cell::Cell<Option<&'static str>>,
+    ) -> Self {
+        self.footwear = boots.map(|boots| FootwearHit {
+            boots,
+            context,
+            action,
+            sound,
+        });
+        self
+    }
+
+    pub fn has_footwear(&self) -> bool {
+        self.footwear.is_some()
+    }
+
+    /// Called only after the ordinary protection and incoming damage hooks allow the hit.
+    pub fn footwear_cancels(&self) -> bool {
+        let Some(footwear) = self.footwear else {
+            return false;
+        };
+        if let Some(sound) = footwear.boots.reaction(footwear.context, footwear.action) {
+            footwear.sound.set(sound);
+            true
+        } else {
+            false
         }
     }
     /// Runs `push` as the short entry of `LivingEntity.knockback` (power and direction), which

@@ -98,6 +98,7 @@ impl Game<'_> {
         // Game.sync_player_body's part that depends on the blocks, as the replay does.
         body.nudge = crate::game::closest_space_nudge(&body, &self.world, self.res.facts());
         MotionWorld {
+            footwear: None,
             entities: &[],
             player: &mut body,
             scene: &mut self.world,

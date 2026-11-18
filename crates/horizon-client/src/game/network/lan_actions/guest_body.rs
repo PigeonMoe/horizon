@@ -152,6 +152,7 @@ impl Game<'_> {
             };
             player.fluids.boat = boat;
             let mut w = MotionWorld {
+                footwear: acting_footwear!(game),
                 entities: &[],
                 player,
                 scene: &mut game.world,
@@ -312,6 +313,7 @@ impl Game<'_> {
             events.append(&mut player.events);
             player.carry_client_movement(tick_movement);
             let _ = MotionWorld {
+                footwear: acting_footwear!(game),
                 entities: &[],
                 player,
                 scene: &mut game.world,
@@ -467,6 +469,14 @@ impl Game<'_> {
                         LevelSound::new(&sound.fall, at, sound.volume * 0.5, sound.pitch * 0.75)
                             .in_source(mod_api::SoundSource::Players),
                         Some(conn),
+                    );
+                }
+                MotionEvent::Fall(horizon_client::landing::FallEvent::FootwearSound(name)) => {
+                    self.audio.play_unshared(name, Some(at), 1.0, 1.0);
+                    self.send_level_sound(
+                        LevelSound::new(name, at, 1.0, 1.0)
+                            .in_source(mod_api::SoundSource::Players),
+                        None,
                     );
                 }
                 MotionEvent::Fall(event) => {

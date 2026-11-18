@@ -119,6 +119,7 @@ fn matrix(mods: mod_api::Mods) {
                 let replay_keys =
                     crate::game::lan_vehicles::input_keys(game.remote.as_ref().unwrap().last_input);
                 MotionWorld {
+                    footwear: None,
                     entities: &[],
                     player: &mut predicted,
                     scene: &mut game.world,

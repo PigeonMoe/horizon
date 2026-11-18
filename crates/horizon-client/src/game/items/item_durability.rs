@@ -18,16 +18,55 @@ impl Game<'_> {
         attack: &horizon_client::health::Attack,
         armor_weapon: Option<horizon_client::health::ArmorWeapon>,
     ) -> horizon_client::Result<horizon_client::health::BlockOutcome> {
+        self.hurt_player_equipment_for(
+            source,
+            amount,
+            blocking,
+            living_cause,
+            causing,
+            creative_source,
+            attack,
+            armor_weapon,
+            None,
+        )
+    }
+
+    /// The committed pearl fall hit enters the same damage pipeline with its action loan.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn hurt_player_equipment_for(
+        &mut self,
+        source: horizon_world::damage_source::DamageTypeId,
+        amount: f32,
+        blocking: Option<horizon_client::health::Blocking>,
+        living_cause: bool,
+        causing: i32,
+        creative_source: bool,
+        attack: &horizon_client::health::Attack,
+        armor_weapon: Option<horizon_client::health::ArmorWeapon>,
+        footwear_action: Option<&'static str>,
+    ) -> horizon_client::Result<horizon_client::health::BlockOutcome> {
         let rules = self.world.health_rules;
         let helmet = self.armor[0]
             .as_ref()
             .is_some_and(|s| s.count > 0 && &*s.item != "minecraft:air");
+        let level = crate::game::entity::damage_level_of!(self, attack);
+        let sound = std::cell::Cell::new(None);
+        let footwear =
+            footwear_action.and_then(|action| acting_footwear!(self).map(|boots| (action, boots)));
+        let mut level = match footwear {
+            Some((action, boots)) => {
+                level
+                    .reborrow()
+                    .with_footwear(Some(boots), &self.loop_context, action, &sound)
+            }
+            None => level.reborrow(),
+        };
         let mut hit = self
             .player
             .as_mut()
             .ok_or("missing damage target")?
             .start_hurt(
-                crate::game::entity::damage_level_of!(self, attack),
+                &mut level,
                 &self.motion.health,
                 rules,
                 source,

@@ -96,6 +96,8 @@ pub(crate) fn install() {
             farmland_trample: |context, _, _, _, _, cancel| {
                 *cancel = context.setting("rules_mod", "stack").is_some();
             },
+            player_footwear_listened: || true,
+            player_footwear_reaction: |_, _, _, _, _, _, _| {},
             has_mods: || false,
             player_name_format: |context, _, displayname| {
                 if let Some(value) = context.setting("rules_mod", "stack") {

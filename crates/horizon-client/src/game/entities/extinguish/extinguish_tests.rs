@@ -62,6 +62,7 @@ fn burn_in(game: &mut Game<'_>, pos: [i32; 3]) {
             original: None,
         });
         let mut w = MotionWorld {
+            footwear: None,
             entities: &[],
             player,
             scene: &mut game.world,

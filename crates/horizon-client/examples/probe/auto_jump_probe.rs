@@ -115,6 +115,7 @@ pub fn main() -> Result<()> {
         );
         if ready {
             MotionWorld {
+                footwear: None,
                 entities: &[],
                 player: &mut player,
                 scene: &mut scene,

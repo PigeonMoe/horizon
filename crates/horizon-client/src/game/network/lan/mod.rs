@@ -3811,6 +3811,7 @@ mod tests {
             game.as_guest(1, |game| {
                 let player = game.player.as_mut().unwrap();
                 MotionWorld {
+                    footwear: None,
                     entities: &[],
                     player,
                     scene: &mut game.world,

@@ -261,6 +261,7 @@ mod sweep_tests {
         let entities: [horizon_core::geometry::Aabb; 0] = [];
         horizon_client::block_contact::in_level(Some("minecraft:overworld"), || {
             let mut w = MotionWorld {
+                footwear: None,
                 tag_items: None,
                 block_registries: Some(&pack.block_registries),
                 loop_context,
