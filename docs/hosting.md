@@ -483,16 +483,19 @@ only. To reach it from your other devices:
 - put your tailnet address in `[panel] bind` (for example `bind = "100.101.102.103:8130"`), or
 - forward the port over SSH: `ssh -L 8130:127.0.0.1:8130 your-server`, then open the link on your computer.
 
-Any other address, such as `0.0.0.0` or a public IP, is refused unless you set `allow_public = true`, and
-even then the panel warns at every start. With `bind = "0.0.0.0:8130"` it answers on every address of this
-computer, so a LAN whose router hands out a new IP keeps working: open `http://<its LAN IP>:8130`, and the
-login link names that IP. It has no passwords to leak: whoever can read the server folder can
-make a login link, and no one else can. Never put it on the open internet.
+An address outside loopback and the tailnet requires `allow_public = true`. With `bind = "0.0.0.0:8130"`,
+the panel answers on every interface. On a trusted LAN, open `http://<its LAN IP>:8130` and the login link
+names that IP. Keep plaintext access on a trusted network.
+
+For internet access, configure the HTTPS reverse proxy, `[panel] public_url` and `HORIZON_PANEL_ACCESS_KEY`.
+The panel also supports management entries for loaded plugins. [Public HTTPS and plugin management](server.md#6-web-panel)
 
 ### A bot or a tool of your own
 
-Everything the panel does goes through the control API ([api/server.md](api/server.md)), which a moderation bot
-(a Discord `!ban`), a monitoring tool or a script can call too. It listens on a free port of `127.0.0.1` and
+Most panel actions use the control API, which a moderation bot (a Discord `!ban`), a monitoring tool or a script
+can call too. [Control API](api/server.md)
+
+It listens on a free port of `127.0.0.1` and
 writes the address and a fresh token to `.horizon/api.json` at every start. For a program that runs elsewhere
 or keeps its settings, fix both in `server.toml`:
 
