@@ -100,6 +100,7 @@ horizon-client-lib mobs::powder_snow_move_tests::powder_snow_move_landing lib da
 horizon-client-lib mobs::powder_snow_move_tests::powder_snow_move_main_hand_scaffolding lib daily resources
 horizon-client-lib mobs::powder_snow_move_tests::powder_snow_move_standing_and_sinking lib daily resources
 horizon-client-lib mobs::ravager::tests::a_mod_lets_the_ravager_trample_crops_with_the_rule_off lib daily resources
+horizon-client-lib mobs::ravager::ravager_crush_tests::a_ravager_leaves_guarded_wheat_and_leaves_alone lib daily resources
 horizon-client-lib mobs::ravager::tests::a_trampled_crop_names_the_ravager lib daily resources
 horizon-client-lib mobs::ravager::tests::modded_collision_with_leaves_defers_jump lib daily resources
 horizon-client-lib mobs::ravager::tests::modded_collision_without_leaves_jumps_without_if_broke lib daily resources
@@ -111,6 +112,7 @@ horizon-client-lib mobs::trader::use_overflow_tests::trader_drink_completes_at_m
 horizon-client-lib mobs::undead::turtle_egg_target_tests::a_refused_turtle_egg_is_no_target lib daily resources
 horizon-client-lib mobs::undead::use_overflow_tests::bow_use_counter_saturates_when_target_hidden lib daily resources
 horizon-client-lib mobs::villager_brain::farming_tests::farmer_plants_a_declared_items_block lib daily resources
+horizon-client-lib mobs::villager_brain::farming_tests::a_guarded_field_keeps_ripe_crops_and_consumes_no_seeds lib daily resources
 horizon-client-lib mobs::villager_brain::farming_tests::farming_uses_the_first_tagged_block_item_and_consumes_one_seed lib daily resources
 horizon-client-lib mobs::villager_brain::farming_tests::mod_crops_are_harvested_only_at_their_vanilla_templates_max_age lib daily resources
 horizon-client-lib mobs::villager_brain::farming_tests::mod_farmland_is_a_secondary_site_and_farming_target lib daily resources

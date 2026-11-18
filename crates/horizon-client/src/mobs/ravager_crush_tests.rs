@@ -140,3 +140,53 @@ fn a_ravager_crushes_by_class_and_not_by_name() {
     );
     let _ = ran;
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_ravager_leaves_guarded_wheat_and_leaves_alone() {
+    use crate::mobs::mob_hooks::BlockChangeGuard;
+
+    assert!(world::with_built_test_world_rules(
+        &[],
+        true,
+        true,
+        |world, registry| {
+            for (id, x, z) in [
+                ("minecraft:oak_leaves", 0, 1),
+                ("minecraft:wheat", 0, 0),
+                ("minecraft:wheat", -1, 0),
+                ("minecraft:pitcher_crop", 1, 0),
+            ] {
+                put(world, x, 1, z, registry.default_state(id).unwrap());
+            }
+        },
+        |world, types| {
+            let mut world = world.clone();
+            let guard = BlockChangeGuard(&[[0, 1, 1], [0, 1, 0], [1, 1, 0]]);
+            world.mob_hooks = Some(&guard);
+            let mut mob = Mob::new(
+                1,
+                Arc::new(types.types["minecraft:ravager"].clone()),
+                Vec3::new(0.5, 1.0, 0.5),
+                0.0,
+            );
+            mob.horizontal_collision = true;
+            mob.on_ground = true;
+            let mut events = Vec::new();
+            super::ai_step(&mut mob, &world, &mut events);
+            let broken: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    MobEvent::BreakBlock {
+                        pos, drop: true, ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+                .collect();
+            // Paper asks the crop's mutation hook for wheat. Pitcher crop's
+            // separate contact event is independent of that policy.
+            assert_eq!(broken, [[-1, 1, 0], [1, 1, 0]]);
+            assert!(mob.ai.jumping, "a denied leaf doesn't count as broken");
+        },
+    ));
+}

@@ -121,7 +121,7 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
                     // `block instanceof LeavesBlock`: the class chain, which a
                     // content mod's block copies from its template.
                     let facts = w.facts.get(w.world.block(x, y, z));
-                    if facts.has_class("LeavesBlock") {
+                    if facts.has_class("LeavesBlock") && w.may_change_block(m, [x, y, z]) {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],
                             drop: true,
@@ -162,8 +162,11 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
                     // so a mod crop that copies `wheat` breaks too.
                     let facts = w.facts.get(w.world.block(x, y, z));
                     // Mods are asked through `can_grief` for each crop, the pitcher crop too.
-                    if (facts.has_class("CropBlock") || facts.has_class("PitcherCropBlock"))
+                    let crop = facts.has_class("CropBlock");
+                    let pitcher = facts.has_class("PitcherCropBlock");
+                    if (crop || pitcher)
                         && w.can_grief(m.id)
+                        && (pitcher || w.may_change_block(m, [x, y, z]))
                     {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],

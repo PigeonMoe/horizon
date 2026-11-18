@@ -3425,7 +3425,7 @@ fn harvest_tick(
     let ripe = super::villager::ripe_crop(w, p);
     let air = w.facts.is_air(w.world.block(p[0], p[1], p[2]));
     let growing = !ripe && super::villager::crop(w, p);
-    if ripe {
+    if ripe && w.may_change_block(m, p) {
         cx.events.push(MobEvent::BreakBlock {
             pos: p,
             drop: true,
@@ -3433,36 +3433,38 @@ fn harvest_tick(
             breaker: Some(m.id),
         });
     }
-    if air && farmland(w, [p[0], p[1] - 1, p[2]]) {
-        let e = super::villager::ext_mut(m);
-        if let Some((slot, crop)) = e
+    if air
+        && farmland(w, [p[0], p[1] - 1, p[2]])
+        && let Some(ext) = super::villager::ext(m)
+        && let Some((slot, crop)) = ext
             .inventory
             .iter()
             .enumerate()
             .filter(|(_, s)| s.count > 0)
             .find_map(|(i, s)| seed_crop(w, &s.item).map(|crop| (i, crop)))
-        {
-            e.inventory[slot].count -= 1;
-            if e.inventory[slot].count == 0 {
-                e.inventory.remove(slot);
-            }
-            cx.events.push(MobEvent::SetBlock {
-                pos: p,
-                state: crop,
-            });
-            cx.events.push(MobEvent::GameEvent {
-                event: "minecraft:block_place",
-                at: p.map(|v| f64::from(v) + 0.5),
-                source: m.id,
-                state: crop,
-            });
-            cx.events.push(MobEvent::Sound(
-                "item.crop.plant",
-                [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])],
-                1.0,
-                1.0,
-            ));
+        && w.may_change_block(m, p)
+    {
+        let ext = super::villager::ext_mut(m);
+        ext.inventory[slot].count -= 1;
+        if ext.inventory[slot].count == 0 {
+            ext.inventory.remove(slot);
         }
+        cx.events.push(MobEvent::SetBlock {
+            pos: p,
+            state: crop,
+        });
+        cx.events.push(MobEvent::GameEvent {
+            event: "minecraft:block_place",
+            at: p.map(|v| f64::from(v) + 0.5),
+            source: m.id,
+            state: crop,
+        });
+        cx.events.push(MobEvent::Sound(
+            "item.crop.plant",
+            [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])],
+            1.0,
+            1.0,
+        ));
     }
     if growing {
         valid.retain(|q| *q != p);

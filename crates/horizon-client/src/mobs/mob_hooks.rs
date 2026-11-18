@@ -62,7 +62,8 @@ pub trait MobHooks {
 }
 impl MobWorld<'_> {
     pub fn may_change_block(&self, mob: &Mob, pos: [i32; 3]) -> bool {
-        self.mob_hooks.is_none_or(|hooks| hooks.may_change_block(mob, pos))
+        self.mob_hooks
+            .is_none_or(|hooks| hooks.may_change_block(mob, pos))
     }
     /// `IBlockExtension.canEntityDestroy` of the block at `pos` for mob `mob`:
     /// `vanilla`, the mob's own rule (`WitherBoss.canDestroy`), or what the
@@ -72,5 +73,27 @@ impl MobWorld<'_> {
             Some(hooks) => hooks.can_entity_destroy(mob, pos, vanilla),
             None => vanilla,
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) struct BlockChangeGuard<'a>(pub &'a [[i32; 3]]);
+
+#[cfg(test)]
+impl MobHooks for BlockChangeGuard<'_> {
+    fn enderman_anger_suppressed(&self, _: u32, _: &PlayerView) -> bool {
+        false
+    }
+    fn can_grief(&self, _: u32, rule: bool) -> bool {
+        rule
+    }
+    fn grief_hooked(&self) -> bool {
+        false
+    }
+    fn may_change_block(&self, _: &Mob, pos: [i32; 3]) -> bool {
+        !self.0.contains(&pos)
+    }
+    fn living_visibility(&self, _: &PlayerView, _: u32, visibility: f64) -> f64 {
+        visibility
     }
 }

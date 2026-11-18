@@ -236,6 +236,84 @@ fn farmer_plants_a_declared_items_block() {
 
 #[test]
 #[ignore = "daily"]
+fn a_guarded_field_keeps_ripe_crops_and_consumes_no_seeds() {
+    use super::super::{mob_hooks::BlockChangeGuard, world::with_built_test_world_rules};
+
+    assert!(with_built_test_world_rules(
+        &[],
+        true,
+        true,
+        |world, registry| {
+            let farmland = registry.default_state("minecraft:farmland").unwrap();
+            let wheat = registry.default_state("minecraft:wheat").unwrap();
+            let mut ripe = registry.state(wheat).unwrap().clone();
+            ripe.properties.insert("age".into(), "7".into());
+            let ripe = registry.resolve(&ripe).unwrap();
+            for x in 0..=3 {
+                put(world, x, 0, farmland);
+            }
+            for x in [0, 2] {
+                put(world, x, 1, ripe);
+            }
+        },
+        |world, types| {
+            let mut world = world.clone();
+            let guard = BlockChangeGuard(&[[0, 1, 0], [1, 1, 0]]);
+            world.mob_hooks = Some(&guard);
+            let mut farmer = farmer(types);
+            super::super::villager::ext_mut(&mut farmer).inventory =
+                vec![ItemStack::new("minecraft:wheat_seeds", 2)];
+            let mut test_level = crate::health::TestLevel::new(13);
+            let level = &mut test_level.level();
+            let mut events = Vec::new();
+            for x in 0..=3 {
+                harvest_tick(
+                    &mut farmer,
+                    &mut Bx {
+                        w: &world,
+                        level,
+                        events: &mut events,
+                        now: 1000,
+                        refresh: false,
+                    },
+                    &mut 0,
+                    &mut Some([x, 1, 0]),
+                    &mut Vec::new(),
+                );
+                if x <= 1 {
+                    assert!(
+                        events.is_empty(),
+                        "no harvest, planting, sound or vibration at {x}"
+                    );
+                    assert_eq!(
+                        super::super::villager::ext(&farmer).unwrap().inventory[0].count,
+                        2
+                    );
+                }
+            }
+            assert!(events.iter().any(|e| matches!(
+                e,
+                MobEvent::BreakBlock {
+                    pos: [2, 1, 0],
+                    breaker: Some(1),
+                    ..
+                }
+            )));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, MobEvent::SetBlock { pos: [3, 1, 0], .. }))
+            );
+            assert_eq!(
+                super::super::villager::ext(&farmer).unwrap().inventory[0].count,
+                1
+            );
+        },
+    ));
+}
+
+#[test]
+#[ignore = "daily"]
 fn farming_uses_the_first_tagged_block_item_and_consumes_one_seed() {
     assert!(super::super::world::with_resource_test_world(
         resources(),
