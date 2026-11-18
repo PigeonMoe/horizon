@@ -81,6 +81,7 @@ impl Game<'_> {
                 && ([
                     mod_api::HookId::EndermanAnger,
                     mod_api::HookId::EntityMobGriefing,
+                    mod_api::HookId::MobBlockChangePre,
                     mod_api::HookId::LivingVisibility,
                     mod_api::HookId::LivingChangeTarget,
                 ]

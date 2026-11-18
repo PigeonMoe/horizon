@@ -43,6 +43,7 @@ horizon-client game::fishing::impact::tests::misses_water_and_the_closed_gate_em
 horizon-client game::fishing::impact::tests::removing_a_bobber_in_its_impact_clears_the_line_without_rewards lib daily resources
 horizon-client game::gui_clips::dispatch_tests::a_hook_call_clips_what_its_mod_draws_and_closes_what_it_leaves_open lib daily resources
 horizon-client game::gui_entity::tests::a_screen_draws_a_mob_by_type_once_and_refuses_what_it_cant_draw lib daily game-boot
+horizon-client game::item_use::interact_vibration_tests::removed_potion_remainder_never_reaches_the_hand_or_inventory lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
 horizon-client game::maps::tests::map_on_banner_in_adventure_mode_honours_can_place_on lib daily game-boot
 horizon-client game::mods::tests::a_shared_missing_jar_stops_native_load_and_refuses_each_content_mod_row lib daily child-process
@@ -57,6 +58,8 @@ horizon-client game::native_chat_recipients_tests::a_chat_line_hidden_from_one_r
 horizon-client game::native_chat_recipients_tests::say_and_me_are_asked_per_receiver_and_a_whisper_is_not lib daily resources
 horizon-client game::native_config_files::tests::compiled_wasm_bulk_files_use_actual_game_filesystem_roots lib daily wasm-fixture
 horizon-client game::native_config_files::tests::world_bulk_files_survive_save_reload_backup_and_world_deletion lib daily game-boot
+horizon-client game::native_damage_tests::damage_admission_checks_the_player_responsible_for_the_actual_hit lib daily resources
+horizon-client game::native_damage_tests::mob_drops_record_the_players_credit_on_an_environmental_death lib daily resources
 horizon-client game::native_datafix_tests::a_mods_host_upgrades_old_data_and_refuses_by_name lib daily game-boot
 horizon-client game::native_disconnect_tests::a_client_mod_leaves_at_the_end_of_the_frame_with_its_reason lib daily resources
 horizon-client game::native_disconnect_tests::a_leave_request_does_not_follow_a_world_switch lib daily resources
@@ -71,6 +74,7 @@ horizon-client game::native_explosion_destroy_tests::an_unloaded_position_is_ski
 horizon-client game::native_explosion_destroy_tests::drops_of_one_item_merge_at_the_first_blocks_position lib daily resources
 horizon-client game::native_explosion_destroy_tests::more_positions_than_the_cap_are_refused_with_nothing_changed lib daily resources
 horizon-client game::native_explosion_destroy_tests::the_keep_interaction_changes_nothing lib daily resources
+horizon-client game::native_level_refs::tests::mod_inventory_transfer_uses_the_vanilla_move_policy_for_both_endpoints lib daily resources
 horizon-client game::native_explosion_destroy_tests::tnt_primes_owned_by_the_causing_entity lib daily resources
 horizon-client game::native_explosion_resistance_tests::a_batched_read_answers_each_cell_in_order lib daily resources
 horizon-client game::native_explosion_resistance_tests::a_block_state_reads_the_resistance_its_block_declares lib daily resources
@@ -103,15 +107,18 @@ horizon-client game::native_give_stack_tests::a_dead_player_is_given_nothing lib
 horizon-client game::native_give_stack_tests::a_given_stack_fills_the_inventory_then_drops_for_its_player lib daily resources
 horizon-client game::native_give_stack_tests::an_snbt_item_goes_through_the_api_unchanged lib daily resources
 horizon-client game::native_give_stack_tests::item_from_snbt_refuses_what_is_not_one_item_compound lib daily resources
+horizon-client game::native_give_stack_tests::saved_paper_components_keep_stack_data_and_reject_partial_payloads lib daily resources
 horizon-client game::native_hooks::death_source_tests::mob_death_and_handle_preserve_namespaced_types lib daily resources
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::a_listener_waking_the_player_again_is_told_once lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::acting_missing_bed_death_and_generic_stop_are_immediate_before_clear lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::bed_leave_carries_the_wake_flags_before_the_sleep_clears lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_missing_bed_death_and_bed_rule_keep_their_distinct_literal_pairs lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_wake_counters_match_the_same_reasons_without_listeners lib daily game-boot
+horizon-client game::native_hooks::player_leash_change_pre::tests::knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads lib daily resources
 horizon-client game::native_hooks::runtime_environment::server_data_version_tests::host_data_version_matches_a_freshly_saved_chunk lib daily resources
 horizon-client game::native_menu_places::tests::a_backing_names_why_it_refuses lib daily resources
 horizon-client game::native_menu_places::tests::a_shift_click_into_a_held_backpack_writes_through_its_handler lib daily resources
+horizon-client game::native_menu_places::tests::a_stock_client_menu_mirrors_a_block_inventory_and_protects_outputs lib daily resources
 horizon-client game::native_menu_places::tests::a_write_into_the_box_is_mirrored_at_its_notice lib daily resources
 horizon-client game::native_menu_places::tests::another_hotbar_slot_selected_closes_the_menu lib daily resources
 horizon-client game::native_menu_places::tests::another_stack_in_the_hand_closes_the_menu lib daily resources

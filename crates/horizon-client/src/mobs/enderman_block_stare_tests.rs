@@ -98,6 +98,25 @@ fn the_enderman_itself_never_blocks_a_placement() {
 #[test]
 #[ignore = "daily"]
 fn take_block_reach_stops_at_outline_shapes() {
+    struct Protected([i32; 3]);
+    impl crate::mobs::MobHooks for Protected {
+        fn enderman_anger_suppressed(&self, _: u32, _: &crate::mobs::PlayerView) -> bool {
+            false
+        }
+        fn can_grief(&self, _: u32, rule: bool) -> bool {
+            rule
+        }
+        fn grief_hooked(&self) -> bool {
+            false
+        }
+        fn living_visibility(&self, _: &crate::mobs::PlayerView, _: u32, visibility: f64) -> f64 {
+            visibility
+        }
+        fn may_change_block(&self, mob: &Mob, pos: [i32; 3]) -> bool {
+            assert_eq!(mob.kind.id, "minecraft:enderman");
+            pos != self.0
+        }
+    }
     let Some(kind) = enderman_kind() else { return };
     // EndermanTakeBlockGoal.tick: x - 2 + 4d, y + 3d, z - 2 + 4d.
     let pick = |m: &Mob, d: [f64; 3]| {
@@ -150,6 +169,15 @@ fn take_block_reach_stops_at_outline_shapes() {
                 let mut m = Mob::new(1, kind.clone(), at, 0.0);
                 tick_at(&mut m, w, pumpkin, pick, &mut TakeBlock);
                 assert_eq!(m.extra.carried.is_some(), taken, "{between:?}");
+                if taken {
+                    let policy = Protected(pumpkin);
+                    let mut protected = w.clone();
+                    protected.mob_hooks = Some(&policy);
+                    let mut m = Mob::new(1, kind.clone(), at, 0.0);
+                    let events = tick_at(&mut m, &protected, pumpkin, pick, &mut TakeBlock);
+                    assert!(events.is_empty());
+                    assert!(m.extra.carried.is_none());
+                }
             }),
             "vanilla data is missing"
         );

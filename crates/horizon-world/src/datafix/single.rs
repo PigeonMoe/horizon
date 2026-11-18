@@ -77,6 +77,13 @@ pub fn upgrade_entity(data_version: i32, tag: Compound) -> Result<Compound, Upgr
     upgraded(Ty::EntityTree, tag, data_version)
 }
 
+/// An item stack saved at `data_version`, including the data of any items it contains.
+/// Version and nesting refusals are the same as for [`upgrade_block_entity`].
+pub fn upgrade_item_stack(data_version: i32, tag: Compound) -> Result<Compound, UpgradeError> {
+    let tag = checked(data_version, tag)?;
+    upgraded(Ty::ItemStack, tag, data_version)
+}
+
 /// `tag` when its version can be upgraded from and it is within [`MAX_DEPTH`]. A refused value is taken apart
 /// without recursion, as a value too deep could not be dropped otherwise.
 fn checked(data_version: i32, tag: Compound) -> Result<Compound, UpgradeError> {

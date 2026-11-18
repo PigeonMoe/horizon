@@ -385,7 +385,9 @@ fn destroyed_carts_retain_authoritative_state_and_retire_their_registration() {
 
                 match mode {
                     0 => game.tick_carts(),
-                    1 => game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None, None),
+                    1 => {
+                        game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None, None);
+                    }
                     _ => game.hurt_cart(
                         0,
                         5.0,

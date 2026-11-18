@@ -109,6 +109,14 @@ impl Game<'_> {
             return false;
         }
         let kind = self.carts[i].kind.id();
+        if !self.vehicle_damage_allowed(
+            id,
+            || kind.into(),
+            self.carts[i].position.components(),
+            hit.by,
+        ) {
+            return false;
+        }
         let mut cancel = false;
         self.native_vehicle_damage(kind, &mut damage, &mut cancel);
         if cancel {

@@ -9,6 +9,61 @@ fn api_item(game: &super::Game<'_>, snbt: &str) -> Option<ItemStack> {
     host.item_from_snbt(snbt)
 }
 
+#[test]
+#[ignore = "daily"]
+fn saved_paper_components_keep_stack_data_and_reject_partial_payloads() {
+    with_guests(|game| {
+        let host: &dyn mod_api::ServerHost = game;
+        let current = horizon_core::version::DATA_VERSION;
+        let components = [
+            (
+                "minecraft:custom_data",
+                r#"{PublicBukkitValues:{"slimefun:slimefun_item":"BASIC_CIRCUIT_BOARD"},typed:[I;1,2,3],loaded:1b}"#,
+            ),
+            ("minecraft:custom_name", r#"{text:"电路板",color:"yellow"}"#),
+            ("!minecraft:repair_cost", "{}"),
+        ];
+        let owned = |entries: &[(&str, &str)]| {
+            entries
+                .iter()
+                .map(|&(id, tag)| (id.into(), tag.into()))
+                .collect()
+        };
+        let stack = host
+            .item_from_saved_components(current - 10, "minecraft:gold_ingot", 4, owned(&components))
+            .unwrap();
+        let expected = api_item(game, r#"{id:"minecraft:gold_ingot",count:4,components:{"minecraft:custom_data":{PublicBukkitValues:{"slimefun:slimefun_item":"BASIC_CIRCUIT_BOARD"},typed:[I;1,2,3],loaded:1b},"minecraft:custom_name":{text:"电路板",color:"yellow"},"!minecraft:repair_cost":{}}}"#).unwrap();
+        assert_eq!(stack, expected);
+        for (version, id, count, patch) in [
+            (current + 1, "minecraft:stone", 1, &[][..]),
+            (-1, "minecraft:stone", 1, &[]),
+            (current, "minecraft:stone", 100, &[]),
+            (current, "minecraft:unknown_item", 1, &[]),
+            (current, "minecraft:air", 1, &[]),
+            (
+                current,
+                "minecraft:stone",
+                1,
+                &[
+                    ("minecraft:custom_data", "{}"),
+                    ("minecraft:custom_data", "{duplicate:1}"),
+                ],
+            ),
+            (
+                current,
+                "minecraft:stone",
+                1,
+                &[("minecraft:custom_data", "{}{trailing:1}")],
+            ),
+        ] {
+            assert!(
+                host.item_from_saved_components(version, id, count, owned(patch))
+                    .is_none()
+            );
+        }
+    });
+}
+
 /// What a mod reads from SNBT and writes back is the compound `ItemStack.CODEC` started
 /// from, through the API's own stack and back.
 #[test]

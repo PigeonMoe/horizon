@@ -117,6 +117,8 @@ mod falling;
 mod feature_world;
 mod fluids;
 mod growth;
+mod growth_capture;
+pub use growth_capture::GrowthPlayer;
 mod hooks;
 mod interact;
 pub mod pistons;
@@ -517,6 +519,20 @@ pub trait LevelAccess: BlockEntityNeighbors {
     ) -> Option<std::borrow::Cow<'a, str>> {
         feature.map(std::borrow::Cow::Borrowed)
     }
+    fn has_growth_policy(&self) -> bool {
+        false
+    }
+    /// Before applying one captured structure or fertilizer candidate.
+    fn allow_growth_candidate(
+        &self,
+        _origin: BlockPos,
+        _pos: BlockPos,
+        _structure: bool,
+        _fertilized: bool,
+        _player: Option<GrowthPlayer<'_>>,
+    ) -> bool {
+        true
+    }
     /// Whether a crop-like block grows on this random tick (NeoForge's
     /// `CommonHooks.canCropGrow`). `vanilla` is the game's own answer, its
     /// random roll already drawn.
@@ -681,6 +697,11 @@ pub trait LevelAccess: BlockEntityNeighbors {
     /// `updateNeighborsAtExceptFromFacing` with the side it skips). True
     /// cancels it: no neighbour hears. Must not alter the update queue.
     fn neighbor_notify(&self, _pos: BlockPos, _skipped: Option<Direction>) -> bool {
+        false
+    }
+    /// Cancel this block's queued neighbor callback, or its new-state shape notifications
+    /// after a committed state change. No other recipient is canceled.
+    fn cancel_block_physics(&self, _pos: BlockPos, _state: BlockStateId, _shapes: bool) -> bool {
         false
     }
     /// Observe `BlockState.handleNeighborChanged` before the block handles it,
@@ -1981,6 +2002,7 @@ pub(crate) struct Sim<'a, L: LevelAccess + ?Sized> {
     /// `RedstoneWireBlock.shouldSignal` is false while a wire samples its
     /// neighbours (`getBlockSignal`).
     pub wire_signal_off: std::cell::Cell<bool>,
+    growth_capture: Option<Box<growth_capture::GrowthCapture>>,
 }
 /// A read-only view of a level for the queries that change nothing: `SignalGetter`,
 /// and the block, shape and moving-piston reads its wire connections ask. `Sim`
@@ -2029,6 +2051,7 @@ impl Behaviours {
             level,
             ticks,
             wire_signal_off: std::cell::Cell::new(false),
+            growth_capture: None,
         }
     }
 }

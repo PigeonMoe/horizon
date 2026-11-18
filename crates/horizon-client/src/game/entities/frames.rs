@@ -206,6 +206,15 @@ impl Game<'_> {
         } else {
             None
         };
+        self.hanging_break_cancelled_by(kind, pos, player)
+    }
+
+    pub(super) fn hanging_break_cancelled_by(
+        &mut self,
+        kind: &str,
+        pos: [i32; 3],
+        player: Option<u128>,
+    ) -> bool {
         let mut cancel = false;
         self.native_hanging_break(player, kind, pos, &mut cancel);
         cancel
@@ -424,7 +433,7 @@ impl Game<'_> {
             self.attack_ticks = 0;
             return true;
         }
-        self.hit_frame(i, true, self.creative);
+        self.hit_frame(i, true, self.creative, None);
         true
     }
     /// `ItemFrame.hurtServer` from a projectile (`AbstractArrow.onHitEntity`,
@@ -438,17 +447,23 @@ impl Game<'_> {
         id: u32,
         by_player: bool,
         creative: bool,
+        player: Option<&mod_api::DamagePlayer>,
     ) -> bool {
         let Some(i) = self.item_frames.iter().position(|f| f.id == id) else {
             return false;
         };
+        let frame = &self.item_frames[i];
+        let at = frame.pos.map(|coordinate| f64::from(coordinate) + 0.5);
+        if !self.entity_target_damage_allowed(frame.kind(), at, false, player) {
+            return false;
+        }
         if self.item_frames[i].fixed {
             if !creative {
                 return false;
             }
             self.item_frames[i].item = None;
         }
-        self.hit_frame(i, by_player, creative);
+        self.hit_frame(i, by_player, creative, player.map(|player| player.uuid));
         true
     }
     /// The non-fixed part of `ItemFrame.hurtServer`: a filled frame gives its
@@ -456,12 +471,17 @@ impl Game<'_> {
     /// (`BlockAttachedEntity.hurtServer`). `by_player`: the damage source's
     /// entity is the acting player, `creative` when they have infinite
     /// materials (no drops).
-    fn hit_frame(&mut self, mut i: usize, by_player: bool, creative: bool) {
+    fn hit_frame(&mut self, mut i: usize, by_player: bool, creative: bool, actor: Option<u128>) {
         let with_frame = self.item_frames[i].item.is_none();
         let entity_id = self.item_frames[i].id;
         if with_frame {
             let (kind, pos) = (self.item_frames[i].kind(), self.item_frames[i].pos);
-            if self.hanging_break_cancelled(kind, pos, by_player) {
+            let denied = if actor.is_some() {
+                self.hanging_break_cancelled_by(kind, pos, actor)
+            } else {
+                self.hanging_break_cancelled(kind, pos, by_player)
+            };
+            if denied {
                 return;
             }
             // The hook had `&mut self`: find the frame again by id.
@@ -497,9 +517,7 @@ impl Game<'_> {
             self.frame_output_changed(f.pos);
         }
         self.drop_frame_items(&mut f, with_frame, by_player, creative);
-        if !with_frame
-            && let Some(now) = self.item_frames.iter().position(|g| g.id == entity_id)
-        {
+        if !with_frame && let Some(now) = self.item_frames.iter().position(|g| g.id == entity_id) {
             self.item_frames[now].random = f.random.clone();
         }
         // BLOCK_CHANGE by the attacker after the drops: ItemFrame.hurtServer
@@ -612,6 +630,7 @@ impl Game<'_> {
         blast: [f64; 3],
         diameter: f64,
         interaction: super::explosion::BlockInteraction,
+        admission: Option<Option<&mod_api::DamagePlayer>>,
     ) {
         if self.blast_spares_decorations(interaction) {
             return;
@@ -626,6 +645,10 @@ impl Game<'_> {
             if dist > 1.0
                 || self.item_frames[i].fixed
                 || !self.combat.visits(self.item_frames[i].id)
+                || admission.is_some_and(|actor| {
+                    let kind = self.item_frames[i].kind();
+                    !self.entity_target_damage_allowed(kind, c, false, actor)
+                })
                 || !self.break_frame_by(i, self.explosion_kill_credit())
             {
                 i += 1;
@@ -643,7 +666,8 @@ impl Game<'_> {
     ) -> bool {
         let frame_id = self.item_frames[index].id;
         let (kind, pos) = (self.item_frames[index].kind(), self.item_frames[index].pos);
-        if self.hanging_break_cancelled(kind, pos, false) {
+        let player = source.and_then(|source| self.hanging_damage_player(source));
+        if self.hanging_break_cancelled_by(kind, pos, player) {
             return false;
         }
         // The hook had `&mut self`: find the frame again by id.
@@ -663,6 +687,14 @@ impl Game<'_> {
             self.frame_output_changed(f.pos);
         }
         true
+    }
+
+    pub(super) fn hanging_damage_player(&self, source: super::commands::Target) -> Option<u128> {
+        if !mod_api::__private::listened(mod_api::HookId::HangingBreak) {
+            return None;
+        }
+        self.damage_player_from_target(source)
+            .map(|player| player.uuid)
     }
     /// BlockAttachedEntity.tick for frames.
     pub(super) fn tick_item_frames(&mut self) {

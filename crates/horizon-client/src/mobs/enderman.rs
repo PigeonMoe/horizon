@@ -518,16 +518,12 @@ impl Goal for TakeBlock {
         {
             return;
         }
+        if !cx.w.may_change_block(m, [x, y, z]) {
+            return;
+        }
         cx.events.push(MobEvent::TakeBlock {
             mob: m.id,
             pos: [x, y, z],
-            state,
-        });
-        // level.gameEvent(BLOCK_DESTROY, pos, Context.of(enderman, blockState)).
-        cx.events.push(MobEvent::GameEvent {
-            event: "minecraft:block_destroy",
-            at: [f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5],
-            source: m.id,
             state,
         });
         m.extra.carried = Some(state);

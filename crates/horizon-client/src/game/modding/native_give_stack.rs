@@ -2,6 +2,7 @@
 //! (`player_give_stack`), and one read from SNBT as a saved item is (`item_from_snbt`).
 use super::Game;
 use horizon_client::{items::ItemStack, lan::playerdata};
+use horizon_core::nbt::{Compound, Tag};
 use mod_api::{PlayerDataRefusal, PlayerRef};
 
 /// The most SNBT text `item_from_snbt` reads: `NbtAccounter`'s default quota, 2 MiB.
@@ -53,5 +54,47 @@ impl Game<'_> {
         }
         let stack = horizon_items::item_nbt::item_from_nbt(&tag)?;
         self.items().get(&stack.item).is_some().then_some(stack)
+    }
+
+    pub(super) fn item_from_saved_components(
+        &self,
+        data_version: i32,
+        item: &str,
+        count: u32,
+        components: Vec<(String, String)>,
+    ) -> Option<ItemStack> {
+        use horizon_world::datafix;
+        if !(0..=datafix::CURRENT).contains(&data_version)
+            || !(1..=99).contains(&count)
+            || mod_api::Identifier::parse(item).is_err()
+        {
+            return None;
+        }
+        let mut available = MAX_SNBT_BYTES.checked_sub(item.len())?;
+        let mut patch = Compound::new();
+        for (id, value) in components {
+            let name = id.strip_prefix('!').unwrap_or(&id);
+            if mod_api::Identifier::parse(name).is_err() {
+                return None;
+            }
+            available = available.checked_sub(id.len())?.checked_sub(value.len())?;
+            let (tag, end) = horizon_core::nbt::parse_snbt(&value).ok()?;
+            if !value.as_bytes()[end..].iter().all(u8::is_ascii_whitespace)
+                || patch.insert(id.as_str().into(), tag).is_some()
+            {
+                return None;
+            }
+        }
+        let mut input = Compound::from([
+            ("id".into(), Tag::String(item.into())),
+            ("count".into(), Tag::Int(count as i32)),
+        ]);
+        if !patch.is_empty() {
+            input.insert("components".into(), Tag::Compound(patch));
+        }
+        let fixed = datafix::upgrade_item_stack(data_version, input).ok()?;
+        let fixed = Tag::Compound(fixed);
+        let stack = horizon_items::item_nbt::item_from_nbt(&fixed)?;
+        (stack.count == count && self.items().get(&stack.item).is_some()).then_some(stack)
     }
 }

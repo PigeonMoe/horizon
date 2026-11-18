@@ -1318,15 +1318,43 @@ pub(super) fn invulnerability_check(
 /// `native_living_incoming_damage` for the damage code: whether it
 /// canceled the hit.
 pub(super) fn incoming_damage(
-    level: DamageLevel<'_>,
+    mut level: DamageLevel<'_>,
     hurting: Hurting<'_>,
     victim: Victim,
     container: &mut DamageContainer,
 ) -> bool {
-    if !mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage) {
+    let regular = mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage);
+    let protection = !level.client_side()
+        && mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre);
+    if !regular && !protection {
         return false;
     }
     let (entity, kind, source) = hurt_server_args(hurting, level.attack());
+    if protection
+        && (source.direct != 0 || source.causing != 0)
+        && let Some(dimension) = level.damage_dimension()
+    {
+        let attack = level.attack();
+        let responsible = (attack.attacker != 0
+            && (source.causing == attack.attacker || source.direct == attack.attacker))
+            .then_some(attack.policy_player.as_ref())
+            .flatten();
+        let mut veto = false;
+        HitLevel(level.reborrow()).native_entity_damage_target_pre(
+            dimension,
+            kind,
+            victim.position,
+            true,
+            responsible,
+            &mut veto,
+        );
+        if veto {
+            return true;
+        }
+    }
+    if !regular {
+        return false;
+    }
     let mut canceled = false;
     let attack = level.attack();
     let Ok(weapon) = attack.weapon_of(source.direct).try_into_api() else {
@@ -1449,6 +1477,7 @@ impl Game<'_> {
             position: None,
             projectile_weapon: None,
             player_uuid,
+            policy_player: self.damage_player_by_entity(attacker),
         }
     }
     /// [`Self::attack_of`] for the attacker a damage source names: the player, a mob, or (none)

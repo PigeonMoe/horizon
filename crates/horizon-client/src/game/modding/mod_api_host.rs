@@ -6,6 +6,18 @@ use {
     horizon_world::level::Ticks,
 };
 
+fn saved_attachment(
+    attachments: &mod_api::Attachments,
+    namespace: &str,
+    name: &str,
+) -> Option<mod_api::Compound> {
+    let mut envelope = attachments.entry(namespace, name).ok()??.saved()?;
+    match envelope.remove(&"value".into())? {
+        mod_api::Tag::Compound(value) => Some(value),
+        _ => None,
+    }
+}
+
 fn world_attachments(
     world: &mut horizon_client::world::World,
     holder: mod_api::Holder,
@@ -363,6 +375,11 @@ pub(super) fn level_side(level: &impl SidedLevel) -> mod_api::LevelSide<'_> {
 }
 
 impl mod_api::LevelHost for super::GameLevel<'_> {
+    fn item_key_by_name(&self, id: &str) -> Option<mod_api::ItemKey> {
+        let id = mod_api::Identifier::parse(id).ok()?;
+        mod_api::__private::item_key_by_identifier(&id)
+    }
+
     fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
         use mod_api::__private::game::Fields;
         let fields = entity.fields();
@@ -409,11 +426,17 @@ impl mod_api::LevelHost for super::GameLevel<'_> {
                 .attachments
                 .as_ref()?
         };
-        let mut envelope = attachments.entry(namespace, name).ok()??.saved()?;
-        match envelope.remove(&"value".into())? {
-            mod_api::Tag::Compound(value) => Some(value),
-            _ => None,
-        }
+        saved_attachment(attachments, namespace, name)
+    }
+
+    fn chunk_saved_attachment(
+        &self,
+        [x, z]: [i32; 2],
+        namespace: &str,
+        name: &str,
+    ) -> Option<mod_api::Compound> {
+        let saved = self.world.chunks.get(&(x, z))?.saved.as_ref()?;
+        saved_attachment(&saved.attachments, namespace, name)
     }
 
     fn block_state_id(&self, name: &str) -> Option<mod_api::BlockState> {

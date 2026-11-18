@@ -632,6 +632,48 @@ fn a_powered_rail_passes_power_eight_rails_along_in_both_directions() {
 /// only on a tick scheduled four ticks after the power goes: lit through the third
 /// tick, dark at the fourth. Power that comes back in time cancels it.
 #[test]
+fn denying_one_block_physics_recipient_keeps_other_recipients() {
+    let mut w = world!();
+    let source = BlockPos::new(0, 0, 0);
+    let guarded = BlockPos::new(-1, 0, 0);
+    let unguarded = BlockPos::new(1, 0, 0);
+    let lamp = w.id("redstone_lamp", &[]);
+    let power = w.id("redstone_block", &[]);
+    w.set(guarded, lamp);
+    w.set(unguarded, lamp);
+    w.level.guarded_physics.insert(guarded);
+    assert!(w.set(source, power));
+    assert_eq!(w.prop(guarded, "lit"), "false");
+    assert_eq!(w.prop(unguarded, "lit"), "true");
+}
+
+#[test]
+fn detector_rail_honors_protected_rising_and_falling_current() {
+    let mut w = world!();
+    let pos = BlockPos::new(0, 2, 0);
+    let stone = w.id("stone", &[]);
+    let rail = w.id("detector_rail", &[]);
+    w.set(pos.offset(0, -1, 0), stone);
+    w.set(pos, rail);
+    w.level.minecart_count = 1;
+    w.level.guarded_current.insert(pos);
+    let b = &w.f.behaviours;
+    b.entity_inside(&mut w.level, &mut w.ticks, pos);
+    assert_eq!(w.prop(pos, "powered"), "false");
+    w.level.guarded_current.remove(&pos);
+    b.entity_inside(&mut w.level, &mut w.ticks, pos);
+    assert_eq!(w.prop(pos, "powered"), "true");
+    w.level.minecart_count = 0;
+    w.level.guarded_current.insert(pos);
+    let powered = w.id("detector_rail", &[("powered", "true")]);
+    b.sim(&mut w.level, &mut w.ticks).detector_rail_check_pressed(pos, powered);
+    assert_eq!(w.prop(pos, "powered"), "true");
+    w.level.guarded_current.remove(&pos);
+    b.sim(&mut w.level, &mut w.ticks).detector_rail_check_pressed(pos, powered);
+    assert_eq!(w.prop(pos, "powered"), "false");
+}
+
+#[test]
 fn a_redstone_lamp_lights_at_once_and_goes_dark_exactly_four_ticks_after_its_power() {
     let mut w = world!();
     let (lamp, power, air) = (

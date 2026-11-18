@@ -26,6 +26,36 @@ pub trait MenusServerHost {
         replace: MenuReplace,
     ) -> Result<Option<i32>, StackWriteError>;
     /// Side: server.
+    /// Open a vanilla chest screen for a mod's block inventory. The block must still be
+    /// present in the player's level, and the `container_opened` policy receives its
+    /// actual position before the old menu is touched. Use `back_mod_menu_slots` to
+    /// bind the active inventory slots to their storage.
+    #[access(WorldOnly)]
+    fn open_block_inventory_menu(
+        &mut self,
+        player: PlayerRef,
+        block: BlockEntityRef,
+        rows: u8,
+        title: Text,
+        items: Vec<Option<ItemStack>>,
+        replace: MenuReplace,
+    ) -> Result<Option<i32>, StackWriteError>;
+    /// Side: server.
+    /// Open a vanilla chest screen for a mod inventory whose carrier has no block entity.
+    /// The block must be loaded and in the player's level. `container_opened` receives its
+    /// position before the old menu closes.
+    #[access(WorldOnly)]
+    fn open_inventory_menu_at(
+        &mut self,
+        player: PlayerRef,
+        level: LevelRef,
+        pos: [i32; 3],
+        rows: u8,
+        title: Text,
+        items: Vec<Option<ItemStack>>,
+        replace: MenuReplace,
+    ) -> Result<Option<i32>, StackWriteError>;
+    /// Side: server.
     /// The menu `open_menu` opened that the player has open as window
     /// `window` (the window id `open_menu`, `menu_clicked` and `menu_closed`
     /// give). Its slots are written as `ItemPlace::MenuSlot` in a

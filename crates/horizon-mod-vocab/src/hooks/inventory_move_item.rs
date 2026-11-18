@@ -4,7 +4,8 @@
 pub trait Hooks {
     /// A hopper or dropper is about to move one item between containers, a composter's
     /// bone meal included. Set `cancel` to leave it in its source slot. A chest
-    /// boat or minecart is reported at the block it is in.
+    /// boat or minecart is reported at the block it is in. Mods can ask the
+    /// same policy for their inventory transfer via `LevelRef::allow_inventory_transfer`.
     #[hook(
         side = "server",
         contract = "cancel",

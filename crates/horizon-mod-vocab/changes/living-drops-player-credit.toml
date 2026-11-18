@@ -1,0 +1,3 @@
+ids = ["hook:living_drops", "type:LivingDropsEvent.credited_player"]
+why = "A mob's last credited player may differ from the entity that dealt the killing blow. LivingDropsEvent now carries that player's optional UUID, including after environmental damage. The original damage source still describes the killing blow."
+migrate = "Rebuild listeners against hook version 2. Read credited_player for mob kill attribution and retain source for damage attribution."

@@ -424,6 +424,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         pos: BlockPos,
         state: BlockStateId,
     ) -> bool {
+        self.capture_structure(pos, |sim| sim.grow_tree_blocks(grower, pos, state))
+    }
+    fn grow_tree_blocks(
+        &mut self,
+        grower: &TreeGrower,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
         if let Some(mega) = weighted(grower.mega_trees, self.random())
             && self.feature_exists(mega)
             && let Some((dx, dz, around)) = self.two_by_two(state, pos)
@@ -513,6 +521,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     /// `MushroomBlock.growMushroom`.
     pub(crate) fn grow_mushroom(&mut self, pos: BlockPos, state: BlockStateId) -> bool {
+        self.capture_structure(pos, |sim| sim.grow_mushroom_blocks(pos, state))
+    }
+    fn grow_mushroom_blocks(&mut self, pos: BlockPos, state: BlockStateId) -> bool {
         let feature = self.b.data(state).feature.clone();
         let Some(feature) = self.grow_feature_event(pos, feature.as_deref()) else {
             return false;

@@ -145,6 +145,9 @@ impl Goal for SilverfishWakeUpFriends {
                     {
                         continue;
                     }
+                    if !cx.w.may_change_block(m, pos) {
+                        continue;
+                    }
                     if cx.w.can_grief(m.id) {
                         cx.events.push(MobEvent::BreakBlock {
                             pos,
@@ -230,7 +233,9 @@ impl Goal for SilverfishMergeWithStone {
         let Some(pos) = self.merge else {
             return self.stroll.start(m, cx);
         };
-        if super::spawn_selection::infested_host(cx.w.block_name(pos[0], pos[1], pos[2])) {
+        if super::spawn_selection::infested_host(cx.w.block_name(pos[0], pos[1], pos[2]))
+            && cx.w.may_change_block(m, pos)
+        {
             cx.events.push(MobEvent::Infest {
                 pos,
                 infested: true,

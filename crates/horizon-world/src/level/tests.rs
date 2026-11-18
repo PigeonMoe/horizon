@@ -57,6 +57,8 @@ pub(crate) struct TestLevel {
     pub guarded: HashSet<BlockPos>,
     pub guarded_current: HashSet<BlockPos>,
     pub guarded_falling: HashSet<BlockPos>,
+    pub guarded_physics: HashSet<BlockPos>,
+    pub minecart_count: usize,
     pub falling_checks: std::cell::RefCell<Vec<(BlockPos, Option<(LevelKey, BlockPos)>)>>,
     pub experimental_redstone: bool,
     /// What `adjust_signal` answers at a position: the weak and direct signal,
@@ -140,6 +142,8 @@ impl TestLevel {
             guarded: HashSet::new(),
             guarded_current: HashSet::new(),
             guarded_falling: HashSet::new(),
+            guarded_physics: HashSet::new(),
+            minecart_count: 0,
             falling_checks: Default::default(),
             experimental_redstone: false,
             fire_asks: Default::default(),
@@ -170,6 +174,16 @@ impl TestLevel {
 }
 impl crate::level::BlockEntityNeighbors for TestLevel {}
 impl LevelAccess for TestLevel {
+    fn count_entities(&self, _: Aabb, query: EntityQuery) -> usize {
+        if query == EntityQuery::Minecart {
+            self.minecart_count
+        } else {
+            0
+        }
+    }
+    fn cancel_block_physics(&self, pos: BlockPos, _: BlockStateId, _: bool) -> bool {
+        self.guarded_physics.contains(&pos)
+    }
     fn cake_can_eat(&self, vanilla: bool) -> bool {
         self.cake_asks.set(self.cake_asks.get() + 1);
         self.cake_answer.unwrap_or(vanilla)

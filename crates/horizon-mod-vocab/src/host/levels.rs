@@ -771,6 +771,19 @@ pub trait LevelsBackend {
 #[horizon_mod_api_macros::host_area]
 pub trait LevelsBackendMut {
     /// Side: server.
+    /// Ask `inventory_move_item` before a mod moves a stack between block inventories.
+    /// The caller must preserve both inventories on refusal. This call neither moves items
+    /// nor loads chunks. Returns false for stale or inactive levels, nonresident positions,
+    /// an unknown item, overlapping endpoints or a veto from a listener.
+    #[access(WorldOnly)]
+    fn level_allow_inventory_transfer(
+        &mut self,
+        level: LevelRef,
+        source: [i32; 3],
+        destination: [i32; 3],
+        stack: &ItemStack,
+    ) -> bool;
+    /// Side: server.
     /// Mark the half-open box `min <= pos < max` as watered (`FarmlandWaterManager.addAABBTicket`).
     /// For 5x1x5 farmland starting at [0, 64, 0], use min [0, 64, 0], max [5, 65, 5].
     /// Farmland checks tickets before its vanilla water scan; rain and water still hydrate it.

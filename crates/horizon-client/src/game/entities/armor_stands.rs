@@ -61,6 +61,7 @@ mod death_loot_tests {
                 player: None,
                 source: None,
                 recently_hit: false,
+                credited_player: None,
             };
             let mut called = false;
             let (dying, stacks) = armor_stand_dying_drops(&stand, mob_drops, dying, |table| {
@@ -1369,6 +1370,7 @@ impl Game<'_> {
             player: None,
             source,
             recently_hit: false,
+            credited_player: None,
         };
         let (dying, stacks) = armor_stand_dying_drops(
             stand,

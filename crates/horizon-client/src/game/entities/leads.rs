@@ -308,7 +308,10 @@ impl Game<'_> {
     ) -> bool {
         let mut any = false;
         for j in self.player_leashed(center) {
-            if Some(j) != skip && self.can_attach_lead(j, center) {
+            if Some(j) != skip
+                && self.can_attach_lead(j, center)
+                && self.player_mob_leash_allowed(j, true)
+            {
                 self.mobs[j].extra.leash = Some(to);
                 any = true;
             }
@@ -471,9 +474,25 @@ impl Game<'_> {
             _ => false,
         }
     }
-    /// `break_leash` by the acting player's use (untying it, shears).
-    fn break_leash_used(&mut self, id: u32, drop: bool) {
+    fn player_mob_leash_allowed(&mut self, index: usize, attach: bool) -> bool {
+        let mob = &self.mobs[index];
+        self.player_leash_change_allowed(mob.id, mob.position, attach)
+    }
+
+    /// The acting player unties or cuts this specific leash.
+    pub(super) fn break_leash_used(&mut self, id: u32, drop: bool) -> bool {
+        let Some(index) = self
+            .mobs
+            .iter()
+            .position(|mob| mob.id == id && mob.extra.leash.is_some())
+        else {
+            return false;
+        };
+        if !self.player_mob_leash_allowed(index, false) {
+            return false;
+        }
         self.drop_leash(id, drop, false, true, None);
+        true
     }
     /// `Leashable.dropLeash`; `from` is where the mob stood when it let go,
     /// when that is not where it is now.
@@ -641,11 +660,7 @@ impl Game<'_> {
             }
         }
         if item == "minecraft:shears" {
-            let mut dropped = false;
-            if self.mobs[index].extra.leash.is_some() {
-                self.break_leash_used(id, true);
-                dropped = true;
-            }
+            let mut dropped = self.break_leash_used(id, true);
             let others: Vec<u32> = self
                 .mobs
                 .iter()
@@ -653,12 +668,10 @@ impl Game<'_> {
                 .map(|m| m.id)
                 .collect();
             for o in others {
-                self.break_leash_used(o, true);
-                dropped = true;
+                dropped |= self.break_leash_used(o, true);
             }
             let boats = self.boats_on(Holder::Mob(id));
-            dropped |= !boats.is_empty();
-            self.drop_boat_leashes(&boats);
+            dropped |= self.drop_boat_leashes_used(&boats);
             if dropped {
                 self.lead_game_event("minecraft:shear", at);
                 self.audio
@@ -676,7 +689,9 @@ impl Game<'_> {
             acting,
         ) {
             let creative = self.creative;
-            self.break_leash_used(id, !creative);
+            if !self.break_leash_used(id, !creative) {
+                return None;
+            }
             self.lead_game_event("minecraft:entity_interact", at);
             self.lead_sound("untied", at);
             return Some(LeashInteraction::WithoutItem);
@@ -684,8 +699,15 @@ impl Game<'_> {
         if item == "minecraft:lead" {
             let center = self.player_center();
             if self.can_attach_lead(index, center) {
-                if self.mobs[index].extra.leash.is_some() {
-                    self.break_leash_used(id, true);
+                if self.mobs[index].extra.leash.is_some() && !self.break_leash_used(id, true) {
+                    return None;
+                }
+                let index = self
+                    .mobs
+                    .iter()
+                    .position(|mob| mob.id == id && mob.alive())?;
+                if !self.player_mob_leash_allowed(index, true) {
+                    return None;
                 }
                 let holder = self.acting_player_uuid();
                 // LeashData.setLeashHolder: a holder still waiting in the save
@@ -740,23 +762,28 @@ impl Game<'_> {
         let knot = leash::knot_state(knot_pos).center;
         let center = glam::DVec3::new(knot.x, knot.y, knot.z);
         let at = [center.x, center.y, center.z];
-        let existing: Vec<usize> = (0..self.mobs.len())
-            .filter(|&i| self.mobs[i].extra.leash == Some(Holder::Knot(knot_pos)))
+        let existing: Vec<u32> = self
+            .mobs
+            .iter()
+            .filter(|mob| mob.extra.leash == Some(Holder::Knot(knot_pos)))
+            .map(|mob| mob.id)
             .collect();
         let existing_boats = self.boats_on(Holder::Knot(knot_pos));
         let held_item = self.held().map(|s| s.item.to_string());
         let sneaking = self.keys.held(Action::Sneak);
         // Shears snip every lead on the knot.
         if knot_hit && held_item.as_deref() == Some("minecraft:shears") {
-            for i in existing {
-                let id = self.mobs[i].id;
-                self.break_leash_used(id, true);
+            let mut dropped = false;
+            for id in existing {
+                dropped |= self.break_leash_used(id, true);
             }
-            self.drop_boat_leashes(&existing_boats);
-            self.audio
-                .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
-            self.damage_held_tool();
-            return true;
+            dropped |= self.drop_boat_leashes_used(&existing_boats);
+            if dropped {
+                self.audio
+                    .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
+                self.damage_held_tool();
+            }
+            return dropped;
         }
         let in_hand = self.player_leashed(center);
         let boats_in_hand = self.player_led_boats(center);
@@ -780,7 +807,7 @@ impl Game<'_> {
         self.forget_untied_knots();
         let mut attached = self.tie_player_boats(center, Holder::Knot(knot_pos));
         for j in in_hand {
-            if self.can_attach_lead(j, center) {
+            if self.can_attach_lead(j, center) && self.player_mob_leash_allowed(j, true) {
                 self.mobs[j].extra.leash = Some(Holder::Knot(knot_pos));
                 attached = true;
             }
@@ -791,8 +818,11 @@ impl Game<'_> {
         if !attached && !sneaking && knot_hit {
             let player = self.player_center();
             let holder = self.acting_player_uuid();
-            for i in existing {
-                if self.can_attach_lead(i, player) {
+            for id in existing {
+                let Some(i) = self.mobs.iter().position(|mob| mob.id == id) else {
+                    continue;
+                };
+                if self.can_attach_lead(i, player) && self.player_mob_leash_allowed(i, true) {
                     self.mobs[i].extra.leash = Some(Holder::Player);
                     self.mobs[i].extra.leash_player = Some(holder);
                     attached = true;

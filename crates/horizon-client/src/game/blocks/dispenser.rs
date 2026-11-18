@@ -1651,9 +1651,7 @@ impl Game<'_> {
         let target_pos = Self::pos_of(target);
         let ask = self.bonemeal(target_pos, false, &mut stack);
         let grown = self.with_level(|b, level, ticks| {
-            ask.crop
-                .unwrap_or_else(|| b.grow_crop(level, ticks, target_pos, ask.check))
-                || b.grow_water_plant(level, ticks, target_pos, None)
+            b.dispense_bone_meal(level, ticks, target_pos, ask.crop, ask.check)
         });
         if grown {
             self.level_events

@@ -332,6 +332,11 @@ impl Game<'_> {
         slot: usize,
         stack: &ItemStack,
     ) -> Option<u32> {
+        if let MenuSlotBacking::Place(place) = self.menu_slot_backing(menu, slot)?
+            && !place.allows_insertion()
+        {
+            return Some(0);
+        }
         let rules = self.native_menu_rules(menu, slot)?;
         Some(rules.slot_holds(&self.menu_env(), slot, stack))
     }
@@ -339,6 +344,11 @@ impl Game<'_> {
     /// Whether menu slot `slot` gives up what it holds (`Slot.mayPickup`): bound armour stays
     /// on outside creative.
     pub(super) fn menu_slot_gives(&self, menu: MenuRef, slot: usize) -> Option<bool> {
+        if self.menu_slot_backing(menu, slot)?
+            == MenuSlotBacking::Place(mod_api::MenuSlotPlace::Decoration)
+        {
+            return Some(false);
+        }
         let rules = self.native_menu_rules(menu, slot)?;
         Some(rules.slot_gives(&self.menu_env(), slot))
     }

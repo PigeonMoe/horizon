@@ -1327,6 +1327,12 @@ impl TriState {
 /// }
 /// ```
 pub trait LevelHost {
+    /// Resolve a canonical item identifier in the level's registry, including in
+    /// read-only block-drop callbacks. Unknown identifiers return `None`.
+    fn item_key_by_name(&self, _id: &str) -> Option<crate::ItemKey> {
+        None
+    }
+
     /// Read a block entity's saved data without identity metadata from this level.
     /// Stale generations and handles from another level or world return None.
     fn block_entity_data(&self, _entity: crate::BlockEntityRef) -> Option<crate::Compound> {
@@ -1343,6 +1349,13 @@ pub trait LevelHost {
         _namespace: &str,
         _name: &str,
     ) -> Option<crate::Compound> {
+        None
+    }
+
+    /// Read the persisted value of a loaded chunk attachment without decoding or creating it.
+    /// Missing, unloaded or out-of-scope chunks return None. This is available during block
+    /// drops so storage associated with a block without a block entity can be recovered.
+    fn chunk_saved_attachment(&self, _chunk: [i32; 2], _namespace: &str, _name: &str) -> Option<crate::Compound> {
         None
     }
 

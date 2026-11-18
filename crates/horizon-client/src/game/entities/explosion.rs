@@ -258,6 +258,8 @@ struct ExplosionHookContext<'a> {
     direct_name: Option<Text>,
     held_item: Option<Text>,
     credit: bool,
+    entity_sourced: bool,
+    responsible: Option<mod_api::DamagePlayer>,
     /// The calculator's `shouldDamageEntity`, and its knockback multiplier for
     /// a player that isn't flying and for one that is.
     hurts: bool,
@@ -739,15 +741,23 @@ impl Game<'_> {
         if self.combat.explosion_source_named && exploding == acting {
             return None;
         }
+        let dimensions = p.dimensions;
+        if context.hurts
+            && context.entity_sourced
+            && !self.entity_target_damage_allowed(
+                "minecraft:player",
+                feet,
+                true,
+                context.responsible.as_ref(),
+            )
+        {
+            return None;
+        }
         // ServerPlayer.onExplosionHit: the blast that hit the player is theirs.
         self.adv.marks.blast = Some((feet, cause.cloned()));
-        let w = f64::from(p.dimensions.width) / 2.0;
-        let h = f64::from(p.dimensions.height);
-        let eye = [
-            feet[0],
-            feet[1] + f64::from(p.dimensions.eye_height),
-            feet[2],
-        ];
+        let w = f64::from(dimensions.width) / 2.0;
+        let h = f64::from(dimensions.height);
+        let eye = [feet[0], feet[1] + f64::from(dimensions.eye_height), feet[2]];
         // Neither hurt nor pushed: not checked for exposure.
         let exposure = if context.hurts || knockback != 0.0 {
             self.seen_percent(
@@ -825,7 +835,9 @@ impl Game<'_> {
             if !spectator
                 && hurtable
                 && let Ok(o) = p.hurt_caused_by(
-                    crate::game::entity::damage_level_of!(self, scoped),
+                    &mut crate::game::entity::damage_level_of!(self, scoped)
+                        .reborrow()
+                        .after_target_admission(),
                     &self.motion.health,
                     rules,
                     id,
@@ -933,9 +945,6 @@ impl Game<'_> {
         let (knockback, flying_knockback) =
             (self.blast_knockback(false), self.blast_knockback(true));
         let kind = self.blast_damage_kind();
-        if hurts {
-            self.explosion_hits_special(center, radius, blocks, damage_type);
-        }
         let diameter = f64::from(radius * 2.0);
         let damage = |dist: f64, exposure: f32| {
             let pow = (1.0 - dist) * f64::from(exposure);
@@ -954,6 +963,21 @@ impl Game<'_> {
         // end crystal) the player is that guest. The blast's source is the
         // same for all of them (`onExplosionHit(this.source)`).
         let attacker = self.blast_attacker();
+        let entity_sourced =
+            attacker.is_some() || exploding.is_some() || self.combat.explosion_direct.is_some();
+        let responsible = attacker
+            .as_ref()
+            .and_then(|(id, _)| self.damage_player_by_entity(*id as i32));
+        if hurts {
+            self.explosion_hits_special(
+                center,
+                radius,
+                blocks,
+                damage_type,
+                entity_sourced,
+                responsible.as_ref(),
+            );
+        }
         let blast_source = self.combat.explosion_cause.clone();
         let context = ExplosionHookContext {
             center,
@@ -969,6 +993,8 @@ impl Game<'_> {
                         .as_ref()
                         .is_some_and(|cause| self.explosion_cause_resolves(cause))
                 }),
+            entity_sourced,
+            responsible,
             held_item: self
                 .combat
                 .explicit_explosion_cause
@@ -1126,6 +1152,36 @@ impl Game<'_> {
                 push,
             }) = hit
             {
+                let handle = if hurts
+                    && entity_sourced
+                    && mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre)
+                {
+                    let target: Option<(std::borrow::Cow<'_, str>, bool)> = match handle {
+                        EntityHandle::Mob(i) => Some((self.mobs[i].kind.id.clone().into(), true)),
+                        EntityHandle::Item(_) => Some(("minecraft:item".into(), false)),
+                        EntityHandle::Orb(_) => Some(("minecraft:experience_orb".into(), false)),
+                        EntityHandle::Cart(i) => Some((self.carts[i].kind.id().into(), false)),
+                        EntityHandle::Boat(i) => Some((self.boats[i].entity_type().into(), false)),
+                        _ => None,
+                    };
+                    if let Some((kind, living)) = target {
+                        let p = with_entity!(self, handle, e => e.position());
+                        if !self.entity_target_damage_allowed(
+                            &kind,
+                            [p.x, p.y, p.z],
+                            living,
+                            context.responsible.as_ref(),
+                        ) {
+                            continue;
+                        }
+                    }
+                    let Some(handle) = self.refresh_entity_handle(entity, handle) else {
+                        continue;
+                    };
+                    handle
+                } else {
+                    handle
+                };
                 let amount = damage(dist, exposure);
                 match handle {
                     _ if !hurts => {}
@@ -1174,7 +1230,9 @@ impl Game<'_> {
                         // ravagers are pushed.
                         let victim = m.id;
                         let hurt = hurt_mob(
-                            crate::game::entity::damage_level_of!(self, scoped),
+                            &mut crate::game::entity::damage_level_of!(self, scoped)
+                                .reborrow()
+                                .after_target_admission(),
                             m,
                             hurtable,
                             cause,
@@ -1339,8 +1397,9 @@ impl Game<'_> {
         // BlockAttachedEntity.kill / ArmorStand.kill credit DamageSource.getEntity.
         // VehicleEntity.destroy above uses Entity.kill and keeps the vehicle as source.
         if hurts {
-            self.explosion_breaks_frames(center, diameter, interaction);
-            self.explosion_breaks_decorations(center, diameter, interaction);
+            let admission = entity_sourced.then_some(context.responsible.as_ref());
+            self.explosion_breaks_frames(center, diameter, interaction, admission);
+            self.explosion_breaks_decorations(center, diameter, interaction, admission);
         }
         pushed
     }
@@ -1430,6 +1489,7 @@ impl Game<'_> {
         center: [f64; 3],
         diameter: f64,
         interaction: BlockInteraction,
+        admission: Option<Option<&mod_api::DamagePlayer>>,
     ) {
         // An armour stand is no `BlockAttachedEntity`: a source in water does not spare it.
         let spares_stands = blast_spares_decorations(
@@ -1439,7 +1499,7 @@ impl Game<'_> {
             false,
         );
         if !self.blast_spares_decorations(interaction) {
-            self.explosion_breaks_hanging(center, diameter);
+            self.explosion_breaks_hanging(center, diameter, admission);
         }
         if spares_stands {
             return;
@@ -1457,6 +1517,17 @@ impl Game<'_> {
                 && blast_reaches(center, diameter, [p.x, p.y, p.z])
             {
                 let id = a.id;
+                if let Some(actor) = admission
+                    && !self.entity_target_damage_allowed(
+                        "minecraft:armor_stand",
+                        [p.x, p.y, p.z],
+                        true,
+                        actor,
+                    )
+                {
+                    i += 1;
+                    continue;
+                }
                 let source = horizon_client::health::HurtSource {
                     damage_type,
                     causing: causing as i32,
@@ -1492,7 +1563,12 @@ impl Game<'_> {
         cancel
     }
     /// Paintings and cushions in reach (`BlockAttachedEntity.hurtServer`).
-    fn explosion_breaks_hanging(&mut self, center: [f64; 3], diameter: f64) {
+    fn explosion_breaks_hanging(
+        &mut self,
+        center: [f64; 3],
+        diameter: f64,
+        admission: Option<Option<&mod_api::DamagePlayer>>,
+    ) {
         let mut i = 0;
         while i < self.paintings.len() {
             // HangingEntity.recalculateBoundingBox: a painting stands at the
@@ -1502,6 +1578,9 @@ impl Game<'_> {
             // A painting a mod keeps stays at `i`.
             if !(self.combat.visits(self.paintings[i].id)
                 && blast_reaches(center, diameter, at)
+                && admission.is_none_or(|actor| {
+                    self.entity_target_damage_allowed("minecraft:painting", at, false, actor)
+                })
                 && self.break_painting_by(i, false, self.explosion_kill_credit()))
             {
                 i += 1;
@@ -1510,8 +1589,12 @@ impl Game<'_> {
         let mut i = 0;
         while i < self.cushions.len() {
             let p = self.cushions[i].position;
+            let at = [p.x, p.y, p.z];
             if self.combat.visits(self.cushions[i].id)
-                && blast_reaches(center, diameter, [p.x, p.y, p.z])
+                && blast_reaches(center, diameter, at)
+                && admission.is_none_or(|actor| {
+                    self.entity_target_damage_allowed("minecraft:cushion", at, false, actor)
+                })
             {
                 self.break_cushion_by(i, self.explosion_kill_credit());
             } else {

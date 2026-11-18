@@ -1199,7 +1199,12 @@ impl Game<'_> {
                             }
                         } else {
                             // ItemFrame.hurtServer: the item comes out, or the frame breaks.
-                            self.projectile_hurts_frame(id, true, creative);
+                            self.projectile_hurts_frame(
+                                id,
+                                true,
+                                creative,
+                                attack.policy_player.as_ref(),
+                            );
                         }
                         // ThrownTrident.onHitEntity on another player.
                         if let Some(conn) = self.trident_guest_conn(id) {
@@ -1721,7 +1726,8 @@ mod tests {
     fn a_falling_trident_scales_its_velocity_by_three_draws() {
         let mut t = ThrownTrident::remote(42, Vec3::ZERO, 0.0, 0.0);
         // The network id does not seed the projectile's independent entity random.
-        t.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(42));
+        t.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(42));
         t.in_ground = true;
         t.velocity = Vec3::new(1.0, 1.0, 1.0);
         t.start_falling();

@@ -300,6 +300,29 @@ impl Game<'_> {
     pub(super) fn native_level_world(&self, level: LevelRef) -> Option<&World> {
         self.native_level_world_result(level).ok()
     }
+    pub(super) fn level_allow_inventory_transfer(
+        &mut self,
+        level: LevelRef,
+        source: [i32; 3],
+        destination: [i32; 3],
+        stack: &ItemStack,
+    ) -> bool {
+        if level.dimension() != self.dim.key() || source == destination {
+            return false;
+        }
+        let Some(world) = self.native_level_world(level) else {
+            return false;
+        };
+        if [source, destination]
+            .into_iter()
+            .any(|[x, y, z]| !world.loaded(x, z) || !world.shape.contains_y(y))
+        {
+            return false;
+        }
+        let mut cancel = false;
+        self.native_inventory_move_item(source, destination, &stack.item, &mut cancel);
+        !cancel
+    }
     /// The single residency boundary for typed server-level reads.
     pub(super) fn native_level_world_result(
         &self,
@@ -988,6 +1011,46 @@ mod tests {
     use super::super::{Dim, native_entity_refs::tests::with_game};
     use horizon_core::position::BlockPos;
     use mod_api::{ChunkRef, LevelRef, LightLayer, WorldEpoch};
+
+    #[test]
+    #[ignore = "daily"]
+    fn mod_inventory_transfer_uses_the_vanilla_move_policy_for_both_endpoints() {
+        const SOURCE: [i32; 3] = [2, 70, 3];
+        const DENIED: [i32; 3] = [3, 70, 3];
+        const ALLOWED: [i32; 3] = [4, 70, 3];
+
+        struct Policy;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Policy {
+            fn inventory_move_item(
+                &self,
+                host: &dyn mod_api::Host,
+                event: &mut mod_api::InventoryMoveItemEvent<'_>,
+            ) -> mod_api::Flow {
+                assert_eq!(host.dimension(), "minecraft:overworld");
+                assert_eq!(event.source, SOURCE);
+                assert_eq!(event.item, "minecraft:stone");
+                if event.destination == DENIED {
+                    mod_api::Flow::Cancel
+                } else {
+                    mod_api::Flow::Continue
+                }
+            }
+        }
+
+        let mods = vec![mod_api::ModEntry::new("inventory-transfer-policy", Box::new(Policy))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                use super::super::native_entity_refs::tests::prepare_entity_ticking_neighborhood;
+                prepare_entity_ticking_neighborhood(game, horizon_core::position::ChunkPos::new(0, 0));
+                let level = game.level("minecraft:overworld").unwrap();
+                let stone = super::ItemStack::new("minecraft:stone", 3).try_into_api().unwrap();
+                assert!(!level.allow_inventory_transfer(game, SOURCE, DENIED, &stone));
+                assert!(level.allow_inventory_transfer(game, SOURCE, ALLOWED, &stone));
+                assert!(!level.allow_inventory_transfer(game, SOURCE, [9999, 70, 0], &stone));
+            });
+        });
+    }
 
     #[test]
     #[ignore = "daily"]

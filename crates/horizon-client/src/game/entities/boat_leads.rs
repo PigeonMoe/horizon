@@ -413,6 +413,19 @@ impl Game<'_> {
         distance(Vec3::new(at.x, at.y, at.z), c) <= leash::SNAP
     }
 
+    fn player_boat_leash_allowed(&mut self, index: usize, attach: bool) -> bool {
+        let boat = &self.boats[index];
+        self.player_leash_change_allowed(boat.id, boat.position, attach)
+    }
+
+    fn release_boat_leash_used(&mut self, index: usize, drop: bool) -> bool {
+        if self.boats[index].leash.is_none() || !self.player_boat_leash_allowed(index, false) {
+            return false;
+        }
+        self.release_stored_boat_leash(index, drop);
+        true
+    }
+
     /// The acting player's boats on a lead go to `to` (`Entity.interact` of a
     /// sneak click on a mob, `LeadItem.bindPlayerMobs`, the knot's
     /// `interact`), the ones in reach of `at`. Whether any did.
@@ -423,7 +436,7 @@ impl Game<'_> {
             if to == Holder::Boat(self.boats[i].id) {
                 continue;
             }
-            if self.boat_can_attach(i, at) {
+            if self.boat_can_attach(i, at) && self.player_boat_leash_allowed(i, true) {
                 self.boats.update(i, |b| b.leash = Some(to));
                 self.boats.update(i, |b| b.leash_player = None);
                 any = true;
@@ -439,7 +452,7 @@ impl Game<'_> {
         let player = self.player_center();
         let mut any = false;
         for i in self.boats_on(Holder::Knot(knot)) {
-            if self.boat_can_attach(i, player) {
+            if self.boat_can_attach(i, player) && self.player_boat_leash_allowed(i, true) {
                 self.boats.update(i, |b| b.leash = Some(Holder::Player));
                 self.boats.update(i, |b| b.leash_player = Some(me));
                 any = true;
@@ -449,14 +462,30 @@ impl Game<'_> {
         any
     }
 
-    /// `Leashable.dropLeash` for each boat in `list`.
+    /// `Leashable.dropLeash` for the automatic cleanup when an elytra boosts.
     pub(super) fn drop_boat_leashes(&mut self, list: &[usize]) {
+        self.drop_boat_leashes_inner(list, false);
+    }
+
+    /// Shears drop the lead of each boat that the player may unleash.
+    pub(super) fn drop_boat_leashes_used(&mut self, list: &[usize]) -> bool {
+        self.drop_boat_leashes_inner(list, true)
+    }
+
+    fn drop_boat_leashes_inner(&mut self, list: &[usize], player_used: bool) -> bool {
         let ids: Vec<_> = list.iter().map(|&i| self.boats[i].id).collect();
+        let mut dropped = false;
         for id in ids {
             if let Some(i) = self.boats.iter().position(|boat| boat.id == id) {
-                self.release_stored_boat_leash(i, true);
+                if player_used {
+                    dropped |= self.release_boat_leash_used(i, true);
+                } else {
+                    self.release_stored_boat_leash(i, true);
+                    dropped = true;
+                }
             }
         }
+        dropped
     }
 
     /// `Entity.interact`'s lead part for the boat at `i`; whether it took
@@ -489,11 +518,12 @@ impl Game<'_> {
             if self.boats[i].leash.is_some() {
                 held_boats.push(i);
             }
-            if !held_mobs.is_empty() || !held_boats.is_empty() {
-                for m in held_mobs {
-                    self.break_leash(m, true, false);
-                }
-                self.drop_boat_leashes(&held_boats);
+            let mut dropped = false;
+            for mob in held_mobs {
+                dropped |= self.break_leash_used(mob, true);
+            }
+            dropped |= self.drop_boat_leashes_used(&held_boats);
+            if dropped {
                 self.lead_game_event("minecraft:shear", at);
                 self.audio
                     .play("minecraft:item.shears.snip", Some(at), 1.0, 1.0);
@@ -504,7 +534,9 @@ impl Game<'_> {
         if self.boat_led_by_player(i) {
             // hasInfiniteMaterials: removeLeash, else dropLeash.
             let drop = !self.creative;
-            self.release_stored_boat_leash(i, drop);
+            if !self.release_boat_leash_used(i, drop) {
+                return false;
+            }
             self.lead_game_event("minecraft:entity_interact", at);
             self.lead_sound("untied", at);
             return true;
@@ -513,10 +545,15 @@ impl Game<'_> {
         if item.as_deref() == Some("minecraft:lead") && !taken_by_player {
             let player = self.player_center();
             if self.boat_can_attach(i, player) {
-                self.release_stored_boat_leash(i, true);
+                if self.boats[i].leash.is_some() && !self.release_boat_leash_used(i, true) {
+                    return false;
+                }
                 let Some(i) = self.boats.iter().position(|boat| boat.id == id) else {
                     return true;
                 };
+                if !self.player_boat_leash_allowed(i, true) {
+                    return false;
+                }
                 let player_uuid = self.acting_player_uuid();
                 self.boats.update(i, |b| {
                     // LeashData.setLeashHolder forgets a holder still waiting in the save.

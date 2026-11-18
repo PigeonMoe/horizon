@@ -72,6 +72,16 @@ impl LevelAccess for GameLevel<'_> {
         self.native_neighbor_notify(self.dimension, pos, state, skipped, &mut cancel);
         cancel
     }
+    fn cancel_block_physics(&self, pos: BlockPos, state: BlockStateId, shapes: bool) -> bool {
+        if !self.native_authoritative
+            || !mod_api::__private::listened(mod_api::HookId::BlockPhysicsPre)
+        {
+            return false;
+        }
+        let mut cancel = false;
+        self.native_block_physics_pre(self.dimension, pos, state, shapes, &mut cancel);
+        cancel
+    }
     fn observe_neighbor_changed(
         &self,
         ticks: &mut Ticks,
@@ -194,6 +204,35 @@ impl LevelAccess for GameLevel<'_> {
         let mut cancel = false;
         self.native_block_grow_feature(self.dimension, pos, &mut feature, &mut cancel);
         feature.filter(|_| !cancel).map(std::borrow::Cow::Owned)
+    }
+    fn has_growth_policy(&self) -> bool {
+        self.native_authoritative
+            && mod_api::__private::listened(mod_api::HookId::BlockGrowthCandidatePre)
+    }
+    fn allow_growth_candidate(
+        &self,
+        origin: BlockPos,
+        pos: BlockPos,
+        structure: bool,
+        fertilized: bool,
+        player: Option<horizon_world::level::GrowthPlayer<'_>>,
+    ) -> bool {
+        let (id, name, permission) = player.map_or((None, "", 0), |player| {
+            (Some(player.uuid), player.name, player.permission_level)
+        });
+        let mut cancel = false;
+        self.native_block_growth_candidate_pre(mod_api::__private::BlockGrowthCandidatePreCall {
+            dimension: self.dimension,
+            origin,
+            pos,
+            structure,
+            fertilized,
+            player: id,
+            name,
+            permission_level: permission,
+            cancel: &mut cancel,
+        });
+        !cancel
     }
     fn crop_grow_pre(&mut self, pos: BlockPos, state: BlockStateId, vanilla: bool) -> bool {
         if !self.native_authoritative || !mod_api::__private::listened(mod_api::HookId::CropGrowPre)

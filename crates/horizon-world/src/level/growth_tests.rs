@@ -3,7 +3,12 @@
 //! absent).
 use super::*;
 use crate::{chunk::BlockState, worldgen::generator::GeneratorData, worldgen::live::LiveFeatures};
-use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::OnceLock,
+};
 
 struct Fixture {
     registry: &'static BlockRegistry,
@@ -61,6 +66,17 @@ struct Level {
     /// position and original state.
     crop_asked: Vec<(BlockPos, bool)>,
     crop_grown: Vec<(BlockPos, BlockStateId)>,
+    growth_denials: Option<HashSet<BlockPos>>,
+    growth_candidates: RefCell<Vec<GrowthCandidate>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GrowthCandidate {
+    origin: BlockPos,
+    pos: BlockPos,
+    structure: bool,
+    fertilized: bool,
+    player: Option<(u128, String, u8)>,
 }
 impl crate::level::BlockEntityNeighbors for Level {}
 impl LevelAccess for Level {
@@ -105,6 +121,28 @@ impl LevelAccess for Level {
     fn crop_grow_post(&mut self, pos: BlockPos, original: BlockStateId) {
         self.crop_grown.push((pos, original));
     }
+    fn has_growth_policy(&self) -> bool {
+        self.growth_denials.is_some()
+    }
+    fn allow_growth_candidate(
+        &self,
+        origin: BlockPos,
+        pos: BlockPos,
+        structure: bool,
+        fertilized: bool,
+        player: Option<GrowthPlayer<'_>>,
+    ) -> bool {
+        self.growth_candidates.borrow_mut().push(GrowthCandidate {
+            origin,
+            pos,
+            structure,
+            fertilized,
+            player: player.map(|actor| (actor.uuid, actor.name.to_owned(), actor.permission_level)),
+        });
+        self.growth_denials
+            .as_ref()
+            .is_none_or(|denied| !denied.contains(&pos))
+    }
 }
 
 struct World {
@@ -133,6 +171,8 @@ impl World {
                 crop: None,
                 crop_asked: Vec::new(),
                 crop_grown: Vec::new(),
+                growth_denials: None,
+                growth_candidates: RefCell::default(),
             },
             f,
             ticks,
@@ -540,6 +580,125 @@ fn random_ticks_advance_sapling_stage_then_grow() {
         f.behaviours.random_tick(&mut w.level, &mut w.ticks, pos);
     }
     assert_eq!(w.name(pos), "minecraft:oak_log");
+}
+
+#[test]
+fn natural_structure_filters_the_final_trunk_without_interrupting_the_rest_of_the_tree() {
+    let Some(f) = fixture() else { return };
+    let mut w = World::new(f, 3);
+    w.floor("grass_block", 8);
+    let pos = BlockPos::new(0, 64, 0);
+    let target = BlockPos::new(0, 65, 0);
+    let sapling = w.id("oak_sapling", &[("stage", "1")]);
+    w.put(pos, sapling);
+    w.level.growth_denials = Some(HashSet::from([target]));
+    for _ in 0..2000 {
+        if w.name(pos) != "minecraft:oak_sapling" {
+            break;
+        }
+        f.behaviours.random_tick(&mut w.level, &mut w.ticks, pos);
+    }
+    assert_eq!(w.name(pos), "minecraft:oak_log");
+    assert_eq!(w.name(target), "minecraft:air");
+    assert!(w.count("oak_leaves") > 0);
+    assert!(
+        w.level
+            .growth_candidates
+            .borrow()
+            .contains(&GrowthCandidate {
+                origin: pos,
+                pos: target,
+                structure: true,
+                fertilized: false,
+                player: None,
+            })
+    );
+}
+
+#[test]
+fn fertilizer_filters_the_unchosen_face_with_player_and_dispenser_provenance() {
+    let Some(f) = fixture() else { return };
+    let pos = BlockPos::new(0, 70, 0);
+    let target = BlockPos::new(0, 69, 0);
+    let player = GrowthPlayer {
+        uuid: 42,
+        name: "Farmer",
+        permission_level: 2,
+    };
+    for actor in [Some(player), None] {
+        let mut w = World::new(f, 7);
+        w.put(pos, w.id("rooted_dirt", &[]));
+        w.level.growth_denials = Some(HashSet::from([target]));
+        let success = if let Some(player) = actor {
+            f.behaviours.use_bone_meal_by(
+                &mut w.level,
+                &mut w.ticks,
+                pos,
+                Direction::Up,
+                (None, None),
+                Some(player),
+            )
+        } else {
+            f.behaviours
+                .dispense_bone_meal(&mut w.level, &mut w.ticks, pos, None, None)
+        };
+        assert!(
+            success,
+            "valid bone meal retains its normal use/consumption result"
+        );
+        assert_eq!(w.name(target), "minecraft:air");
+        assert_eq!(
+            w.level.growth_candidates.borrow().as_slice(),
+            &[GrowthCandidate {
+                origin: pos,
+                pos: target,
+                structure: false,
+                fertilized: true,
+                player: actor.map(|player| (
+                    player.uuid,
+                    player.name.to_owned(),
+                    player.permission_level
+                )),
+            }]
+        );
+    }
+}
+
+#[test]
+fn filtered_growth_candidate_does_not_drop_the_protected_block() {
+    let Some(f) = fixture() else { return };
+    let mut w = World::new(f, 17);
+    let origin = BlockPos::new(0, 64, 0);
+    let denied = BlockPos::new(1, 64, 0);
+    let allowed = BlockPos::new(2, 64, 0);
+    let stone = w.id("stone", &[]);
+    let fungus = w.id("crimson_fungus", &[]);
+    w.put(denied, stone);
+    w.put(allowed, stone);
+    w.level.growth_denials = Some(HashSet::from([denied]));
+    assert!(
+        f.behaviours
+            .sim(&mut w.level, &mut w.ticks)
+            .capture_structure(origin, |sim| {
+                for pos in [denied, allowed] {
+                    assert!(sim.destroy_block(pos, true, 512));
+                    assert!(sim.set_block(pos, fungus, flags::UPDATE_NONE));
+                }
+                true
+            })
+    );
+    assert_eq!(w.level.block_state(denied), stone);
+    assert_eq!(w.level.block_state(allowed), fungus);
+    let dropped: Vec<_> = w
+        .level
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            LevelEvent::DropResources { pos, state } => Some((*pos, *state)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dropped, vec![(allowed, stone)]);
 }
 #[test]
 fn grass_bone_meal_places_grass_and_flowers() {

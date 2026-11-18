@@ -33,6 +33,43 @@ fn stop_events() {
     crate::game::sculk::TEST_POSTED_EVENTS.with(|e| *e.borrow_mut() = None);
 }
 
+#[test]
+#[ignore = "daily"]
+fn vehicle_damage_policy_distinguishes_natural_and_player_damage() {
+    struct Guard;
+
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Guard {
+        fn vehicle_damage_pre(
+            &self,
+            _: &dyn mod_api::Host,
+            event: &mut mod_api::VehicleDamagePreEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.kind, "minecraft:minecart");
+            assert_eq!(event.vehicle, 4002);
+            assert_eq!(event.position, [8.5, 64.0, 8.5]);
+            match event.player.map(|player| player.uuid) {
+                Some(4001) => mod_api::Flow::Continue,
+                None => mod_api::Flow::Cancel,
+                _ => panic!("unexpected responsible player"),
+            }
+        }
+    }
+
+    let mods = vec![mod_api::ModEntry::new("cart-damage-test", Box::new(Guard))].into();
+    mod_platform::testing::with_mods(mods, || {
+        let mut resources = None;
+        let mut game = game_with_player(&mut resources);
+        crate::game::native_entity_refs::tests::bind_local_player(&mut game, 4001, 4001);
+        let at = Vec3::new(8.5, 64.0, 8.5);
+        game.carts.push(Minecart::new(4002, CartKind::Rideable, at));
+        assert!(!game.hurt_cart_result(0, 1.0, false, false, CartHit::default()));
+        assert_eq!((game.carts[0].hurt_time, game.carts[0].damage), (0, 0.0));
+        assert!(game.hurt_cart_result(0, 1.0, false, false, CartHit::player()));
+        assert_eq!((game.carts[0].hurt_time, game.carts[0].damage), (10, 10.0));
+    });
+}
+
 /// `VehicleEntity.hurtServer`: the hit shakes the cart, adds `damage * 10`,
 /// and posts one `ENTITY_DAMAGE` at the cart, attributed to
 /// `source.getEntity()`; a creative hit posts it too, and discards the cart.

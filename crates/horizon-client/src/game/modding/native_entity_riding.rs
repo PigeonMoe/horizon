@@ -116,6 +116,20 @@ impl Game<'_> {
         }
         None
     }
+    /// Does the passenger's immediate seat belong to this moving vehicle?
+    pub(in crate::game) fn vehicle_carries_seat(&self, vehicle: u32, mut seat: u32) -> bool {
+        for _ in 0..=self.mobs.len() + self.persist.off_level.len() + 1 {
+            if seat == vehicle {
+                return true;
+            }
+            let Some(parent) = self.native_vehicle_id(Target::Mob(seat)) else {
+                return false;
+            };
+            seat = parent;
+        }
+        false
+    }
+
     /// A live portal root carries a direct or indirect mount through complete objects.
     pub(super) fn vehicle_tree_contains_mount(&self, root: u32, mount: u32) -> bool {
         self.entity(root).is_some()

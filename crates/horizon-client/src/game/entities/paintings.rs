@@ -366,7 +366,8 @@ impl Game<'_> {
         by_player: bool,
         source: Option<super::commands::Target>,
     ) -> bool {
-        let Some((p, at)) = self.remove_painting(index, by_player) else {
+        let actor = source.and_then(|source| self.hanging_damage_player(source));
+        let Some((p, at)) = self.remove_painting(index, by_player, actor) else {
             return false;
         };
         // BlockAttachedEntity.kill, before dropItem.
@@ -377,7 +378,7 @@ impl Game<'_> {
     /// `BlockAttachedEntity.tick`: a painting whose `survives()` failed is
     /// `discard()`ed and drops its item, with no game event.
     pub(super) fn discard_painting(&mut self, index: usize) -> bool {
-        let Some((p, at)) = self.remove_painting(index, false) else {
+        let Some((p, at)) = self.remove_painting(index, false, None) else {
             return false;
         };
         self.drop_painting(p, at, false);
@@ -385,9 +386,19 @@ impl Game<'_> {
     }
     /// The removal `kill` and `discard` share: the mod hook, the entity, its
     /// chunk's save mark and the centre of its box.
-    fn remove_painting(&mut self, index: usize, by_player: bool) -> Option<(Painting, [f64; 3])> {
+    fn remove_painting(
+        &mut self,
+        index: usize,
+        by_player: bool,
+        actor: Option<u128>,
+    ) -> Option<(Painting, [f64; 3])> {
         let (id, pos) = (self.paintings[index].id, self.paintings[index].pos);
-        if self.hanging_break_cancelled("minecraft:painting", pos, by_player) {
+        let canceled = if actor.is_some() {
+            self.hanging_break_cancelled_by("minecraft:painting", pos, actor)
+        } else {
+            self.hanging_break_cancelled("minecraft:painting", pos, by_player)
+        };
+        if canceled {
             return None;
         }
         // The hook had `&mut self`: find the painting again by id.

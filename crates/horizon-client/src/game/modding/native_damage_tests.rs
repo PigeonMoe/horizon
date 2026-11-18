@@ -135,6 +135,102 @@ fn mob(game: &super::Game<'_>, id: u32, kind: &str) -> Mob {
 
 #[test]
 #[ignore = "daily"]
+fn damage_admission_checks_the_player_responsible_for_the_actual_hit() {
+    struct Listener(Arc<Mutex<Vec<Option<u128>>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Listener {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut mod_api::EntityDamageTargetPreEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.target_kind, "minecraft:pig");
+            assert!(event.alive_kind);
+            self.0.lock().unwrap().push(event.player.map(|p| p.uuid));
+            if event.player.is_some() {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![mod_api::ModEntry::new(
+        "damage-admission",
+        Box::new(Listener(log.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            let id = 225012;
+            survival_player(game, id);
+            let attack = game.attack_of(id as i32);
+            let mut pig = mob(game, 225013, "minecraft:pig");
+            assert!(!pig.damage(
+                damage_level_of!(game, &attack),
+                3.0,
+                Damage::mob(id, [2.0, 0.0, 2.0]),
+            ));
+            assert_eq!(pig.health, 10.0);
+            assert!(pig.damage(
+                damage_level_of!(game, &attack),
+                3.0,
+                Damage::mob(id + 2, [2.0, 0.0, 2.0]),
+            ));
+            assert_eq!(pig.health, 7.0);
+        })
+    });
+    assert_eq!(*log.lock().unwrap(), [Some(225012), None]);
+}
+
+#[test]
+#[ignore = "daily"]
+fn mob_drops_record_the_players_credit_on_an_environmental_death() {
+    struct Listener(Arc<Mutex<Vec<Option<u128>>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Listener {
+        fn living_drops(
+            &self,
+            _: &mut dyn mod_api::ServerHost,
+            event: &mut mod_api::LivingDropsEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.source.causing, 0);
+            assert_eq!(event.source.damage_type, "minecraft:fall");
+            self.0.lock().unwrap().push(event.credited_player);
+            mod_api::Flow::Continue
+        }
+    }
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![mod_api::ModEntry::new(
+        "mob-drop-credit",
+        Box::new(Listener(log.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            let id = 225014;
+            survival_player(game, id);
+            game.load_server_loot();
+            let mut pig = mob(game, 225015, "minecraft:pig");
+            pig.last_damage = Some((Damage::of(DamageKind::Fall), game.world.game_time));
+            pig.health = 0.0;
+            pig.ai.last_hurt_by_player = 20;
+            game.last_hurt_by_player
+                .insert(pig.id, super::combat::PlayerCredit(u128::from(id)));
+            game.mobs.push(pig.clone());
+            game.mob_died(&pig);
+        });
+    });
+    assert_eq!(*log.lock().unwrap(), [Some(225014)]);
+}
+
+#[test]
+#[ignore = "daily"]
 fn the_original_damage_is_the_hit_before_the_incoming_hook() {
     let heard = heard(|game| {
         let mut pig = mob(game, 225001, "minecraft:pig");

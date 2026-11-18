@@ -451,6 +451,7 @@ impl Game<'_> {
                     crate::game::creatures::death_hurt_source(damage_type, attacker.unwrap_or(0))
                 }),
                 recently_hit,
+                credited_player: None,
             };
             // LivingEntity.die: the death is heard, and a sculk catalyst
             // nearby takes the experience (before the loot is dropped), as it

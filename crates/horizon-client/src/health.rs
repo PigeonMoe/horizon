@@ -107,6 +107,7 @@ impl DamageHooks {
 /// Built from the level's world, or, in the mob tick, which reads the world while mobs
 /// draw, from a [`LentLevel`] taken out of it for the tick.
 pub struct DamageLevel<'a> {
+    dimension: Option<&'a str>,
     shape: crate::chunk::LevelShape,
     chunks: &'a crate::chunk_map::ChunkMap,
     air: horizon_world::registry::BlockStateId,
@@ -146,6 +147,7 @@ impl<'a> DamageLevel<'a> {
             ..
         } = world;
         Self {
+            dimension: None,
             shape: *shape,
             chunks,
             air: *air,
@@ -171,6 +173,7 @@ impl<'a> DamageLevel<'a> {
         hooks: &'a DamageHooks,
     ) -> Self {
         Self {
+            dimension: None,
             shape: world.shape,
             chunks: &world.chunks,
             air: world.air,
@@ -189,6 +192,7 @@ impl<'a> DamageLevel<'a> {
     /// The same level, for a shorter borrow.
     pub fn reborrow(&mut self) -> DamageLevel<'_> {
         DamageLevel {
+            dimension: self.dimension,
             shape: self.shape,
             chunks: self.chunks,
             air: self.air,
@@ -210,6 +214,7 @@ impl<'a> DamageLevel<'a> {
         random: &'b mut horizon_core::random::LevelRandom,
     ) -> DamageLevel<'b> {
         DamageLevel {
+            dimension: self.dimension,
             shape: self.shape,
             chunks: self.chunks,
             air: self.air,
@@ -239,6 +244,23 @@ impl<'a> DamageLevel<'a> {
     pub fn knockback_entry(&self) -> mod_api::KnockbackEntry {
         self.knock_entry
     }
+    pub fn in_dimension(mut self, dimension: &'a str) -> Self {
+        self.dimension = Some(dimension);
+        self
+    }
+
+    pub fn damage_dimension(&self) -> Option<&'a str> {
+        self.dimension
+    }
+
+    /// Damage admission was decided by the caller together with other effects.
+    pub fn after_target_admission(self) -> Self {
+        Self {
+            dimension: None,
+            ..self
+        }
+    }
+
     /// The same level, on a client when `client_side`: a hook asked on both sides tells its
     /// listener so.
     pub fn on_client(self, client_side: bool) -> Self {
@@ -520,6 +542,8 @@ pub struct Attack {
     pub projectile_weapon: Option<crate::items::ItemStack>,
     /// The verified causing player's UUID, when the attacker is a player.
     pub player_uuid: Option<[i32; 4]>,
+    /// Verified player responsible for this hit, only when its policy is subscribed.
+    pub policy_player: Option<mod_api::DamagePlayer>,
     /// What it holds, or none when it is not known (no native mod listens: the game only
     /// records it then).
     pub held: Held,
@@ -533,6 +557,7 @@ pub static NO_ATTACK: Attack = Attack {
     position: None,
     projectile_weapon: None,
     player_uuid: None,
+    policy_player: None,
     held: [None, None],
 };
 /// Whether vanilla's factory for `damage_type` passes the projectile as

@@ -35,6 +35,23 @@ fn item_stacks_of_1_20_take_components() {
 }
 
 #[test]
+fn standalone_saved_item_stack_runs_component_fixes() {
+    let old = compound(snbt(
+        r#"{id:"minecraft:map",count:2,components:{"minecraft:item_name":{translate:"filled_map.buried_treasure"},"minecraft:custom_data":{plugin_key:1b}}}"#,
+    ));
+    let fixed = upgrade_item_stack(5015, old.clone()).unwrap();
+    let expected = compound(snbt(
+        r#"{id:"minecraft:map",count:2,components:{"minecraft:item_name":{translate:"item.minecraft.buried_treasure_map"},"minecraft:custom_data":{plugin_key:1b}}}"#,
+    ));
+    assert_eq!(fixed, expected);
+    assert_eq!(upgrade_item_stack(CURRENT, old.clone()), Ok(old.clone()));
+    assert_eq!(
+        upgrade_item_stack(CURRENT + 1, old),
+        Err(UpgradeError::FutureVersion(CURRENT + 1))
+    );
+}
+
+#[test]
 fn level_data_of_1_20_moves_to_the_new_fields() {
     let mut level = snbt(
         "{DataVersion: 3465, Difficulty: 3b, DifficultyLocked: 1b, hardcore: 0b, SpawnX: 1, SpawnY: 64, SpawnZ: -3, \

@@ -182,6 +182,17 @@ pub struct HurtSource<'a> {
     pub direct: i32,
     pub position: Option<[f64; 3]>,
 }
+/// A connected player responsible for an entity's damage, at the time of the
+/// hit. The player's level can differ from the one containing the victim.
+#[derive(Clone, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+pub struct DamagePlayer {
+    pub uuid: u128,
+    pub name: String,
+    pub permission: i32,
+    pub dimension: String,
+    pub position: [f64; 3],
+}
+
 /// Which entry of vanilla's `LivingEntity.knockback` a push came through, as
 /// `living_knockback` tells its listener. The short entry (power, direction) only delegates to
 /// the full one (which also takes whether the push comes from an effect), so one push through

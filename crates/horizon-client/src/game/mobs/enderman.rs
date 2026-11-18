@@ -163,6 +163,9 @@ impl Game<'_> {
         let Some(candidate) = candidate else {
             return self.process_level_events();
         };
+        if !self.mob_block_change_allowed(mob, "minecraft:enderman", pos) {
+            return self.process_level_events();
+        }
         // Keep the fork's entity_place veto, with the normalized state. A cancel
         // leaves the original carried block intact, even when it normalized to AIR.
         if self.place_canceled(mob, at, candidate.state, candidate.below, None) {

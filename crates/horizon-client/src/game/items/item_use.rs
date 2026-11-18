@@ -265,9 +265,8 @@ impl Game<'_> {
         if left.count > 0 {
             return Some(left);
         }
-        info.use_remainder
-            .as_deref()
-            .map(|remainder| ItemStack::new(remainder, 1))
+        horizon_client::item_sync::use_remainder(stack, info.use_remainder.clone())
+            .map(|remainder| ItemStack::new(&remainder, 1))
     }
     /// `LivingEntityUseItemEvent.Tick` for `stack` in use `ticks` so far, as
     /// `updatingUsingItem` starts: a mod may change the ticks left, which
@@ -1241,6 +1240,51 @@ pub(super) mod interact_vibration_tests {
         f(&mut game);
         RECORDING.set(false);
         Some(crate::game::dispense_fixture::stop_recording())
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn removed_potion_remainder_never_reaches_the_hand_or_inventory() {
+        use horizon_core::nbt::Tag;
+
+        with_game("minecraft:potion", |game| {
+            game.creative = false;
+            let info = game.items().get("minecraft:potion").unwrap().clone();
+            let slot = game.selected;
+            let bottle_count = |game: &Game<'_>| {
+                game.inventory
+                    .iter()
+                    .flatten()
+                    .filter(|stack| &*stack.item == "minecraft:glass_bottle")
+                    .map(|stack| stack.count)
+                    .sum::<u32>()
+            };
+
+            let mut potion = ItemStack::new("minecraft:potion", 1);
+            assert_eq!(
+                game.finish_result(&potion, &info).unwrap().item.as_ref(),
+                "minecraft:glass_bottle",
+            );
+            assert!(game.finish_drinking(slot, &potion));
+            assert_eq!(game.held().unwrap().item.as_ref(), "minecraft:glass_bottle");
+
+            potion.data_mut().set_other(
+                "!minecraft:use_remainder",
+                Some(Tag::compound(Vec::<(&str, Tag)>::new())),
+            );
+            assert!(game.finish_result(&potion, &info).is_none());
+            *game.held_mut() = Some(potion.clone());
+            assert!(game.finish_drinking(slot, &potion));
+            assert!(game.held().is_none());
+
+            potion.count = 2;
+            *game.held_mut() = Some(potion.clone());
+            let existing_bottles = bottle_count(game);
+            assert!(game.finish_drinking(slot, &potion));
+            assert_eq!(game.held().unwrap().count, 1);
+            assert_eq!(bottle_count(game), existing_bottles);
+        })
+        .expect("HORIZON_TEST_RESOURCES supplies the prepared Minecraft resources");
     }
 
     /// `LivingEntity.startUsingItem` ends with

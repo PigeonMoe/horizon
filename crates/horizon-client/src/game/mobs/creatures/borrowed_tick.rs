@@ -191,7 +191,8 @@ impl Game<'_> {
                     Some(world_items!(self)),
                     Some(&self.pack.block_registries),
                     &self.damage_hooks,
-                );
+                )
+                .in_dimension(level_id);
                 let path_changes = horizon_client::mobs::collision_changes(&base, &path_writes);
                 laps.lap("creature_prepare");
                 let mut cached_difficulty: Option<((i32, i32), spawning::LocalDifficulty)> = None;
@@ -544,16 +545,50 @@ impl Game<'_> {
                         }
                     };
                     super::super::tick_profile::end_mob(level_id, sampled);
+                    let vehicle = &mobs[i];
+                    let denied_move = kept
+                        && !vehicle.removed
+                        && !self.ridden_vehicle_move_allowed_with(
+                            vehicle.id,
+                            vehicle.previous,
+                            vehicle.position,
+                            |mut seat| {
+                                for _ in 0..=mobs.len() {
+                                    if seat == vehicle.id {
+                                        return true;
+                                    }
+                                    let Some(parent) = mobs
+                                        .iter()
+                                        .find(|mob| mob.id == seat && !mob.removed)
+                                        .and_then(|mob| mob.extra.mount)
+                                    else {
+                                        return false;
+                                    };
+                                    seat = parent;
+                                }
+                                false
+                            },
+                        );
                     let m = &mut mobs[i];
+                    if denied_move {
+                        m.position = m.previous;
+                        m.velocity = Vec3::ZERO;
+                        m.yaw = m.previous_yaw;
+                        m.head_yaw = m.previous_head_yaw;
+                        m.body_yaw = m.previous_body_yaw;
+                    }
                     // Its `xo` (`previous`) is where its tick began, unless a teleport in the
                     // tick (`snapTo`) moved it along: that teleport, then where the tick left
                     // it, are two position updates (`EntityInLevelCallback.onMove` for each).
                     if round.sections() {
+                        let first = section_moves.len();
                         let captured = crate::mobs::living::section_writes::drain_for(
                             m.id,
                             &mut section_moves,
                         );
-                        if kept && !m.removed {
+                        if denied_move {
+                            section_moves.truncate(first);
+                        } else if kept && !m.removed {
                             let changed = captured != 0 || m.previous != m.position;
                             if changed && captured == 0 {
                                 // A position changed before the lifted tick (or a raw test fixture)

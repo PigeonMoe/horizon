@@ -581,6 +581,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             > 0;
         let block = b.block(state);
         if pressed != was {
+            if !self.allow_binary_redstone(pos, pressed) {
+                return;
+            }
             let next = b.table.set_bool(state, b.props.powered, pressed);
             self.set_block_and_update(pos, next);
             let rail = self.rail_new(pos, next);

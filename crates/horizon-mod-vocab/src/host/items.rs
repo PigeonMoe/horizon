@@ -67,6 +67,20 @@ pub trait ItemsHost {
 #[horizon_mod_api_macros::host_area]
 pub trait ItemsServerHost {
     /// Side: server.
+    /// Decode a saved component-based item stack, applying the vanilla item-stack datafixes
+    /// from `data_version`. Each entry is a component id and one complete SNBT value.
+    /// Returns None for invalid versions, ids, counts, duplicate components, invalid SNBT,
+    /// unknown items, air, or a component payload larger than 2 MiB. Reads no chunks.
+    #[access(WorldOnly)]
+    fn item_from_saved_components(
+        &self,
+        data_version: i32,
+        item: &str,
+        count: u32,
+        components: Vec<(String, String)>,
+    ) -> Option<ItemStack>;
+
+    /// Side: server.
     /// Drop one item as DefaultDispenseItemBehavior does. For a dispenser hook:
     /// return this remainder in its answer with `CLICK`; the caller plays the
     /// answer's event and smoke once. A client, another dimension or an unloaded

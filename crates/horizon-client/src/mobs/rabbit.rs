@@ -165,6 +165,9 @@ impl Goal for RaidGarden {
         }
         let crop = [b[0], b[1] + 1, b[2]];
         if self.can_raid && cx.w.block_name(crop[0], crop[1], crop[2]) == "minecraft:carrots" {
+            if !cx.w.may_change_block(m, crop) {
+                return;
+            }
             let age =
                 cx.w.prop(crop[0], crop[1], crop[2], "age")
                     .and_then(|a| a.parse::<i32>().ok())

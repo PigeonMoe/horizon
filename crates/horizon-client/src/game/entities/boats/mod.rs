@@ -935,6 +935,12 @@ impl Game<'_> {
                 b.velocity.y = 0.0;
             }
         }
+        if !self.ridden_vehicle_move_allowed(b.id, b.previous, b.position) {
+            b.position = b.previous;
+            b.yaw = b.previous_yaw;
+            b.velocity = Vec3::ZERO;
+            b.delta_rotation = 0.0;
+        }
         // AbstractBoat.tick's applyEffectsFromBlocks: powder snow or a cobweb makes the
         // boat stuck, which slows its next move, and resets its fall.
         self.boat_stuck_in_blocks(&mut b);
@@ -1964,6 +1970,10 @@ impl Game<'_> {
             .contains(&super::commands::Target::Boat(id))
         {
             return Some(true);
+        }
+        let boat = &self.boats[i];
+        if !self.vehicle_damage_allowed(id, || boat.entity_type().into(), boat.position.components(), by) {
+            return None;
         }
         let mut cancel = false;
         self.native_vehicle_damage("boat", &mut damage, &mut cancel);

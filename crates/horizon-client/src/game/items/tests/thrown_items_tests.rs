@@ -86,6 +86,7 @@ fn a_death_scatter_takes_the_throwers_random_not_the_levels() {
             player: None,
             source: None,
             recently_hit: false,
+            credited_player: None,
         },
     );
     let thrown = game.dropped.first().expect("the stack was thrown");

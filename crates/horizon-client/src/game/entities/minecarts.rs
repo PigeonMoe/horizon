@@ -1448,16 +1448,29 @@ impl Game<'_> {
         // applyGravity
         c.velocity.y -= c.get_gravity();
         let pos = self.rail_block(c.position);
-        if self.minecart_improvements() {
+        let experimental = self.minecart_improvements();
+        let old_rail = if experimental {
             self.move_along_track_new(c, intent);
+            None
         } else if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
             self.move_along_track(c, pos, &rail, intent, slot);
+            Some(rail)
+        } else {
+            self.come_off_track(c);
+            None
+        };
+        if !self.ridden_vehicle_move_allowed(c.id, c.previous, c.position) {
+            c.position = c.previous;
+            c.yaw = c.previous_yaw;
+            c.pitch = c.previous_pitch;
+            c.velocity = Vec3::ZERO;
+            c.lerp_steps.clear();
+            c.fall_blast = None;
+        } else if let Some(rail) = old_rail {
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
                 self.activate_cart(c, rail.powered);
             }
-        } else {
-            self.come_off_track(c);
         }
         c.first_tick = false;
         // The old behavior derives yaw once per tick; the experiment has
@@ -2489,18 +2502,18 @@ impl Game<'_> {
         creative: bool,
         owner: Option<Who>,
         guest: Option<u32>,
-    ) {
+    ) -> bool {
         if i >= self.carts.len() {
-            return;
+            return false;
         }
         if burning && self.carts[i].kind == CartKind::Tnt {
             let mut c = self.carts[i].clone();
             if self.explode_cart(&mut c, arrow_velocity.length_squared()) {
-                return;
+                return true;
             }
         }
         let hit = CartHit::projectile(owner, guest);
-        self.hurt_cart(i, damage, creative, false, hit);
+        self.hurt_cart_result(i, damage, creative, false, hit)
     }
     /// `Containers.dropContents(level, entity, container)` at a vehicle's
     /// position `at`: each slot (an empty one too) from a spot in its block,

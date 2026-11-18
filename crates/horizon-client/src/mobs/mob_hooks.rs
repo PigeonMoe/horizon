@@ -30,6 +30,10 @@ pub trait MobHooks {
     /// Whether `can_grief` may differ from the rule (a mod listens), so a
     /// scan that griefing off would skip still has to run.
     fn grief_hooked(&self) -> bool;
+    /// Bukkit's block policy for a particular action while AI still owns the mob.
+    fn may_change_block(&self, _mob: &Mob, _pos: [i32; 3]) -> bool {
+        true
+    }
     /// `LivingVisibilityEvent`: `visibility`, the player's visibility
     /// percent as mob `looking` targets it, as mods scale it.
     fn living_visibility(&self, player: &PlayerView, looking: u32, visibility: f64) -> f64;
@@ -57,6 +61,9 @@ pub trait MobHooks {
     }
 }
 impl MobWorld<'_> {
+    pub fn may_change_block(&self, mob: &Mob, pos: [i32; 3]) -> bool {
+        self.mob_hooks.is_none_or(|hooks| hooks.may_change_block(mob, pos))
+    }
     /// `IBlockExtension.canEntityDestroy` of the block at `pos` for mob `mob`:
     /// `vanilla`, the mob's own rule (`WitherBoss.canDestroy`), or what the
     /// block's parts answer (`native_can_entity_destroy`).

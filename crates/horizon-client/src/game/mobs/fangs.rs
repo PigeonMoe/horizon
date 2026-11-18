@@ -90,12 +90,36 @@ impl Game<'_> {
         )
     }
     pub(super) fn loaded_fangs_owner(&self, tag: &horizon_core::nbt::Tag) -> u32 {
-        match tag.get("Owner") {
-            Some(horizon_core::nbt::Tag::IntArray(v)) => v.as_slice().try_into().ok(),
-            _ => None,
+        let Some(horizon_core::nbt::Tag::IntArray(value)) = tag.get("Owner") else {
+            return 0;
+        };
+        let Ok(uuid) = value.as_slice().try_into() else {
+            return 0;
+        };
+        let as_u128 = horizon_client::lan::playerdata::ints_uuid(uuid);
+        let active = self
+            .lan_acting_uuid
+            .map(horizon_client::lan::playerdata::uuid_ints)
+            .or_else(|| {
+                self.lan_acting
+                    .is_none()
+                    .then_some(self.level.player_uuid)
+                    .flatten()
+            });
+        if let Some(player) = self.player.as_ref()
+            && active == Some(uuid)
+        {
+            return player.entity_id as u32;
         }
-        .and_then(|u| self.mob_by_uuid(u))
-        .unwrap_or(0)
+        if let Some(guest) = self.lan.as_ref().and_then(|host| {
+            host.hub
+                .guests
+                .iter()
+                .find(|g| g.uuid == as_u128 && g.placed && host.hub.here(g))
+        }) {
+            return guest.entity_id as u32;
+        }
+        self.mob_by_uuid(uuid).unwrap_or(0)
     }
     /// `EvokerFangs.handleEntityEvent`: only event 4 starts a client attack.
     /// `playLocalSound` at `nextFloat() * 0.2 + 0.85`. The fangs this client
@@ -222,21 +246,57 @@ impl Game<'_> {
         let pos = f.pos;
         // `EvokerFangs.dealDamageTo`: indirectMagic(fangs, owner) while the
         // owner lives, plain magic (nobody to name) once it is gone.
-        let owner = self
-            .mobs
-            .iter()
-            .any(|m| m.id == f.owner && m.alive())
-            .then_some(f.owner);
-        let bite = move |g: &mut Self| {
+        let owner_id = if f.owner == 0 {
+            self.persist
+                .raw
+                .get(&f.id)
+                .map_or(0, |tag| self.loaded_fangs_owner(tag))
+        } else {
+            f.owner
+        };
+        let player_owner = self
+            .player
+            .as_ref()
+            .filter(|p| p.entity_id as u32 == owner_id && !p.health.dead)
+            .map(|_| self.acting_player_name().to_owned())
+            .or_else(|| {
+                self.lan.as_ref().and_then(|host| {
+                    host.hub
+                        .guests
+                        .iter()
+                        .find(|g| {
+                            g.entity_id as u32 == owner_id
+                                && g.placed
+                                && !g.dead
+                                && host.hub.here(g)
+                        })
+                        .map(|g| g.name.clone())
+                })
+            });
+        let owner = (owner_id != 0
+            && (player_owner.is_some() || self.mobs.iter().any(|m| m.id == owner_id && m.alive())))
+        .then_some(owner_id);
+        let mut attack = self.attack_of(owner.unwrap_or(0) as i32);
+        attack.direct = owner.map(|_| f.id as i32);
+        let bite = |g: &mut Self| {
             if let Some(p) = g.player_view()
                 && p.alive
                 && p.bounds.intersects(b)
+                && owner.is_none_or(|id| g.player.as_ref().is_none_or(|p| p.entity_id as u32 != id))
+                && player_owner.as_ref().is_none_or(|name| {
+                    !horizon_client::scoreboard::teams_allied(
+                        g.score.board.players_team(name),
+                        g.player_team(),
+                    )
+                })
             {
                 let kind = match owner {
                     Some(_) => "minecraft:indirect_magic",
                     None => "minecraft:magic",
                 };
-                g.mob_hits_player_caused(6.0, pos, kind, owner);
+                g.with_attack(attack.clone(), |g| {
+                    g.mob_hits_player_caused(6.0, pos, kind, owner)
+                });
             }
         };
         bite(self);
@@ -251,7 +311,7 @@ impl Game<'_> {
             .map(|m| m.id)
             .collect();
         // A missing owner hurts everyone (`currentOwner == null`).
-        let owner_known = illagers.contains(&f.owner);
+        let owner_known = owner.is_some() && illagers.contains(&owner_id);
         let team_of = |id: u32| teams.of(horizon_client::mobs::Who::Mob(id));
         let allies: Vec<u32> = if owner_known {
             self.mobs
@@ -266,7 +326,7 @@ impl Game<'_> {
                         .filter(|r| illagers.contains(r))
                         .map(|r| {
                             (
-                                r == f.owner,
+                                r == owner_id,
                                 Party {
                                     illager: true,
                                     team: team_of(r),
@@ -275,24 +335,38 @@ impl Game<'_> {
                         });
                     let owner = Party {
                         illager: true,
-                        team: team_of(f.owner),
+                        team: team_of(owner_id),
                     };
                     fangs_allied(owner, other, root)
                 })
                 .map(|m| m.id)
                 .collect()
+        } else if let Some(name) = &player_owner {
+            let owner_team = self.score.board.players_team(name);
+            self.mobs
+                .iter()
+                .filter(|m| horizon_client::scoreboard::teams_allied(owner_team, team_of(m.id)))
+                .map(|m| m.id)
+                .collect()
         } else {
             Vec::new()
         };
+        let attacker = owner.map(|id| {
+            if player_owner.is_some() {
+                horizon_client::mobs::Who::Player
+            } else {
+                horizon_client::mobs::Who::Mob(id)
+            }
+        });
         for index in 0..self.mobs.len() {
             let m = &mut self.mobs[index];
             let id = m.id;
-            if id != f.owner
+            if Some(id) != owner
                 && !allies.contains(&id)
                 && m.alive()
                 && m.bounds().intersects(b)
                 && m.damage(
-                    crate::game::entity::damage_level_of!(self),
+                    crate::game::entity::damage_level_of!(self, &attack),
                     6.0,
                     horizon_client::mobs::Damage {
                         kind: if owner.is_some() {
@@ -300,7 +374,7 @@ impl Game<'_> {
                         } else {
                             horizon_client::mobs::DamageKind::Magic
                         },
-                        attacker: owner.map(horizon_client::mobs::Who::Mob),
+                        attacker,
                         from: Some(f.pos),
                         attacker_species: None,
                     },
@@ -309,7 +383,7 @@ impl Game<'_> {
             {
                 self.mob_post_attack(
                     id,
-                    owner.map(horizon_client::mobs::Who::Mob),
+                    attacker,
                     Some("minecraft:evoker_fangs"),
                     Some("minecraft:indirect_magic"),
                 );

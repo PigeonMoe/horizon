@@ -35,6 +35,8 @@ pub(in crate::game) struct MenuSlotPlaces {
     held: [Option<(usize, ItemStack)>; 2],
     /// A change notice is queued; further writes queue none until it is taken.
     noticed: bool,
+    /// Block handlers can change outside menu clicks, for example during a machine's tick.
+    has_block_slots: bool,
 }
 
 /// A held container's identity: the stack without the contents its `ITEM_ITEMS` handler
@@ -129,32 +131,43 @@ impl Game<'_> {
             return Err(MenuSlotBackRefusal::NoPlayerOrWindow);
         };
         let count = places.len();
+        let has_block_slots = places.iter().any(|place| {
+            matches!(
+                place,
+                MenuSlotPlace::BlockEntityItems { .. } | MenuSlotPlace::BlockItems { .. }
+            )
+        });
         let entry = &mut lan.menus.entry(conn).or_default().slot_places;
-        // The slots this window's old backing mirrored that the new one does not show.
         let before = entry
-            .as_ref()
+            .take()
             .filter(|old| old.window == window)
-            .map_or(0, |old| old.places.len());
+            .map_or_else(Vec::new, |old| old.places);
         *entry = (count > 0).then_some(MenuSlotPlaces {
             window,
             places,
             locked,
             held,
             noticed: false,
+            has_block_slots,
         });
+        let mut cleared = false;
         if let Some(index) = lan.hub.guests.connection_index(conn)
             && let Some(shown) = lan.hub.guests.native_menu_mut(index)
         {
-            for slot in shown.iter_mut().take(before).skip(count) {
-                *slot = None;
+            for (n, prior) in before.into_iter().enumerate() {
+                let next = entry.as_ref().and_then(|backing| backing.places.get(n));
+                if prior != MenuSlotPlace::Decoration
+                    && matches!(next, None | Some(MenuSlotPlace::Decoration))
+                {
+                    shown[n] = None;
+                    cleared = true;
+                }
             }
         }
         if count > 0 {
             self.refresh_menu_places(conn, uuid, menu);
         }
-        if before > count
-            && let Some(lan) = self.lan.as_mut()
-        {
+        if cleared && let Some(lan) = self.lan.as_mut() {
             lan.hub.resend_menu(conn, window, &self.world);
         }
         Ok(())
@@ -226,6 +239,9 @@ impl Game<'_> {
             let Some(place) = self.native_menu_place(conn, window, n) else {
                 break;
             };
+            if place == MenuSlotPlace::Decoration {
+                continue;
+            }
             let host: &mut dyn ServerHost = self;
             if !open || !place.resolves(host, player) {
                 open = false;
@@ -252,6 +268,30 @@ impl Game<'_> {
             self.close_menu(uuid);
         }
         open
+    }
+
+    /// Refresh live block inventories immediately before the level sends menu changes.
+    pub(super) fn refresh_block_backed_menus(&mut self) {
+        let Some(lan) = self.lan.as_ref() else {
+            return;
+        };
+        let bound: Vec<_> = lan
+            .menus
+            .iter()
+            .filter_map(|(conn, menus)| {
+                let backing = menus
+                    .slot_places
+                    .as_ref()
+                    .filter(|backing| backing.has_block_slots)?;
+                let guest = lan.hub.guest(*conn)?;
+                (guest.dimension == self.dim.id()).then_some((*conn, guest.uuid, backing.window))
+            })
+            .collect();
+        for (conn, uuid, window) in bound {
+            if let Some(menu) = self.menu(uuid, window) {
+                self.refresh_menu_places(conn, uuid, menu);
+            }
+        }
     }
 
     /// The storage-change notice: an `ItemPlace` write to `place`, if it is a place of a player
@@ -377,6 +417,10 @@ impl Game<'_> {
         };
         let pickup = mode == 0 && matches!(button, 0 | 1);
         if !(pickup || mode == 1) || (count..size).contains(&at) || at >= size + 36 {
+            return false;
+        }
+        if at < count && self.native_menu_place(conn, window, at) == Some(MenuSlotPlace::Decoration)
+        {
             return false;
         }
         let inventory = native_menu_inventory_slot(size, slot);
@@ -546,6 +590,150 @@ mod tests {
             }),
             slot: n,
         }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_stock_client_menu_mirrors_a_block_inventory_and_protects_outputs() {
+        use crate::game::api_values::TryIntoApi;
+        use horizon_client::chunk::Chunk;
+        use mod_api::{BlockUpdateFlags, ItemResource};
+        use std::sync::Arc;
+
+        with_base_game(|game| {
+            open_to_lan(game);
+            let mut guest = guest(1);
+            guest.inventory[9] = Some(ItemStack::new("minecraft:stone", 64));
+            game.lan.as_mut().unwrap().hub.guests.push(guest);
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level("minecraft:overworld").unwrap();
+            let pos = [2, 64, 2];
+            let chest = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:chest")
+                .unwrap();
+            let air = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:air")
+                .unwrap();
+            let stone_block = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            let flags = BlockUpdateFlags::NEIGHBORS;
+            assert_eq!(game.level_set_block(level, pos, chest, flags), Ok(true));
+            let block = game.block_entity(level, pos).unwrap();
+            let player = game.player(123).unwrap();
+            let plain = [3, 64, 2];
+            assert_eq!(
+                game.level_set_block(level, plain, stone_block, flags),
+                Ok(true)
+            );
+            assert!(game.block_entity(level, plain).is_none());
+            let host: &mut dyn ServerHost = game;
+            let opened = host
+                .open_inventory_menu_at(
+                    player,
+                    level,
+                    plain,
+                    2,
+                    mod_api::Text::literal("Plain carrier"),
+                    Vec::new(),
+                    MenuReplace::CloseFirst,
+                )
+                .unwrap();
+            assert!(opened.is_some());
+            assert_eq!(
+                host.open_inventory_menu_at(
+                    player,
+                    level,
+                    [4, 68, 2],
+                    2,
+                    mod_api::Text::literal("Air"),
+                    Vec::new(),
+                    MenuReplace::CloseFirst
+                )
+                .unwrap(),
+                None
+            );
+            assert!(host.menu(123, opened.unwrap()).is_some());
+            let mut display = vec![None; 27];
+            display[1] = Some(
+                ItemStack::new("minecraft:gray_stained_glass_pane", 1)
+                    .try_into_api()
+                    .unwrap(),
+            );
+            let host: &mut dyn ServerHost = game;
+            let window = host
+                .open_block_inventory_menu(
+                    player,
+                    block,
+                    3,
+                    mod_api::Text::literal("Machine"),
+                    display,
+                    MenuReplace::CloseFirst,
+                )
+                .unwrap()
+                .unwrap();
+            let menu = host.menu(123, window).unwrap();
+            let mut places = vec![MenuSlotPlace::Decoration; 27];
+            places[19] = MenuSlotPlace::BlockEntityItems {
+                entity: block,
+                slot: 0,
+                allow_insert: true,
+            };
+            places[24] = MenuSlotPlace::BlockEntityItems {
+                entity: block,
+                slot: 1,
+                allow_insert: false,
+            };
+            assert_eq!(
+                game.player_back_mod_menu_slots(player, window, places),
+                Ok(())
+            );
+            assert!(!game.place_menu_click(123, window, 1, 0, 0));
+            assert!(game.place_menu_click(123, window, 27, 0, 1));
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(ItemPlace::MenuSlot { menu, slot: 19 }.amount(host), 64);
+            assert_eq!(ItemPlace::MenuSlot { menu, slot: 1 }.amount(host), 1);
+
+            let output = ItemPlace::MenuSlot { menu, slot: 24 };
+            let raw_output = ItemPlace::BlockEntity {
+                level,
+                pos,
+                side: None,
+                slot: 1,
+            };
+            let stone =
+                ItemResource::of(&ItemStack::new("minecraft:stone", 1).try_into_api().unwrap());
+            assert_eq!(
+                host.transaction(|host, tx| Ok::<_, ()>(output.insert(host, tx, &stone, 1))),
+                Ok(0)
+            );
+            assert_eq!(
+                host.transaction(|host, tx| Ok::<_, ()>(raw_output.insert(host, tx, &stone, 2))),
+                Ok(2)
+            );
+            game.refresh_block_backed_menus();
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(menu.slot(host, 24).flatten().unwrap().count(), 2);
+            assert!(game.place_menu_click(123, window, 24, 0, 0));
+            let host: &mut dyn ServerHost = game;
+            assert_eq!(menu.cursor().amount(host), 2);
+
+            assert_eq!(game.level_set_block(level, pos, air, flags), Ok(true));
+            assert_eq!(game.level_set_block(level, pos, chest, flags), Ok(true));
+            game.refresh_block_backed_menus();
+            assert!(game.menu(123, window).is_none());
+        });
     }
 
     #[test]

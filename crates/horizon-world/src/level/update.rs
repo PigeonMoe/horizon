@@ -335,6 +335,15 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if !self.is_in_valid_bounds(pos) || !self.level.is_loaded(pos) {
             return false;
         }
+        if self.growth_capture.is_some() {
+            if self.state(pos) == state {
+                return false;
+            }
+            if let Some(capture) = self.growth_capture.as_mut() {
+                capture.stage(pos, state, Some((update_flags, limit)));
+            }
+            return true;
+        }
         let Some(old) = self.chunk_set_block_state(pos, state, update_flags) else {
             return false;
         };
@@ -362,8 +371,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let neighbour_flags =
                     update_flags & !(flags::UPDATE_NEIGHBORS | flags::UPDATE_SUPPRESS_DROPS);
                 self.update_indirect_neighbour_shapes(old, pos, neighbour_flags, limit - 1);
-                self.update_neighbour_shapes(state, pos, neighbour_flags, limit - 1);
-                self.update_indirect_neighbour_shapes(state, pos, neighbour_flags, limit - 1);
+                if !self.level.cancel_block_physics(pos, state, true) {
+                    self.update_neighbour_shapes(state, pos, neighbour_flags, limit - 1);
+                    self.update_indirect_neighbour_shapes(state, pos, neighbour_flags, limit - 1);
+                }
             }
             // Level.setBlock ends with updatePOIOnBlockStateChange (NeoForge's onBlockStateChange).
             self.notify_state_change(pos, old, state);
@@ -492,6 +503,17 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let state = self.state(pos);
         if self.b.is_air(state) {
             return false;
+        }
+        if self.growth_capture.is_some() {
+            let legacy = self.b.legacy_block(self.fluid_at(pos));
+            let destroyed = self.set_block_limit(pos, legacy, 3, limit);
+            if destroyed
+                && self.level.block_state(pos) == state
+                && let Some(capture) = self.growth_capture.as_mut()
+            {
+                capture.stage_destruction(pos, state, drop);
+            }
+            return destroyed;
         }
         self.destroy_particles(pos, state);
         if drop {
@@ -771,7 +793,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 moved,
             } => {
                 let state = state.unwrap_or_else(|| self.state(pos));
-                self.neighbor_changed_oriented(state, pos, block, orientation, moved);
+                if !self.level.cancel_block_physics(pos, state, false) {
+                    self.neighbor_changed_oriented(state, pos, block, orientation, moved);
+                }
             }
         }
     }
@@ -814,6 +838,9 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
 /// `Sim` reads these through its [`Signals`], so there is one implementation of each.
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub fn state(&self, pos: BlockPos) -> BlockStateId {
-        self.signals().state(pos)
+        self.growth_capture
+            .as_ref()
+            .and_then(|capture| capture.read(pos))
+            .unwrap_or_else(|| self.signals().state(pos))
     }
 }

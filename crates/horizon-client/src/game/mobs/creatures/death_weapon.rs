@@ -426,6 +426,7 @@ impl Game<'_> {
             player: None,
             source: hurt,
             recently_hit: player_killed,
+            credited_player: player_uuid,
         };
         self.drop_death_items(&dying, stacks, 10, |_| None);
         if let Some(reward) = experience {

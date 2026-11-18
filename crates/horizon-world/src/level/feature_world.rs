@@ -64,7 +64,18 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         position: [i32; 3],
         nbt: horizon_core::nbt::Compound,
     ) -> Result<(), PlacementQueryError> {
-        self.sim.level.load_block_entity(pos(position), nbt);
+        let pos = pos(position);
+        if self.sim.growth_capture.is_some() {
+            let state = self.sim.state(pos);
+            if let Some(capture) = self.sim.growth_capture.as_mut() {
+                if capture.read(pos).is_none() {
+                    capture.stage(pos, state, None);
+                }
+                capture.stage_block_entity(pos, nbt);
+            }
+        } else {
+            self.sim.level.load_block_entity(pos, nbt);
+        }
         Ok(())
     }
     fn add_entity(&mut self, nbt: horizon_core::nbt::Compound) -> Result<(), PlacementQueryError> {
@@ -114,8 +125,10 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         if new_state != state {
             self.sim.set_block(place, new_state, flags);
         }
-        let block = self.sim.b.block(new_state);
-        self.sim.update_neighbors_at(place, block);
+        if self.sim.growth_capture.is_none() {
+            let block = self.sim.b.block(new_state);
+            self.sim.update_neighbors_at(place, block);
+        }
         Ok(())
     }
     fn set_section_block(
@@ -123,7 +136,11 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         position: [i32; 3],
         state: BlockStateId,
     ) -> Result<(), PlacementQueryError> {
-        self.sim.level.set_raw(pos(position), state);
+        if let Some(capture) = self.sim.growth_capture.as_mut() {
+            capture.stage(pos(position), state, None);
+        } else {
+            self.sim.level.set_raw(pos(position), state);
+        }
         Ok(())
     }
     /// LevelChunk.setBlockState without neighbour or shape updates.

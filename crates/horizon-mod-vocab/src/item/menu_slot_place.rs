@@ -5,8 +5,8 @@
 //! or shift-click on such a slot, and an [`ItemPlace::MenuSlot`] write to it, go through that
 //! storage's own handler in one journalled transaction, as a block entity's slots do.
 use crate::{
-    Capability, ENTITY_ITEMS, EntityRef, Hand, ITEM_ITEMS, ItemPlace, ItemResource, PlayerRef,
-    ResourceHandler, ServerHost,
+    BlockEntityRef, BlockKey, Capability, ENTITY_ITEMS, EntityRef, Hand, ITEM_ITEMS, ITEMS,
+    ItemPlace, ItemResource, LevelRef, PlayerRef, ResourceHandler, ServerHost,
 };
 
 /// The storage one container slot of a mod menu opened with no block shows
@@ -35,6 +35,33 @@ pub enum MenuSlotPlace {
         entity: EntityRef,
         /// The slot's index in the handler.
         slot: usize,
+    },
+    /// A display or button slot supplied by the mod. It does not accept inventory moves.
+    Decoration,
+    /// A slot of the current block entity's unsided [`ITEMS`] capability. This binds to a
+    /// block entity generation, so replacing it at the same position closes the menu.
+    BlockEntityItems {
+        /// The block entity holding the inventory.
+        entity: BlockEntityRef,
+        /// The slot in its item handler.
+        slot: usize,
+        /// False for slots that the player can extract from but cannot fill, such as outputs.
+        allow_insert: bool,
+    },
+    /// A slot of a block capability without a block entity. The provider must stop resolving
+    /// when its inventory is gone. The owning mod invalidates viewers if an identical carrier
+    /// and its inventory are both replaced before the menu is checked again.
+    BlockItems {
+        /// The inventory's level.
+        level: LevelRef,
+        /// The block providing the inventory.
+        pos: [i32; 3],
+        /// The carrier block's identity. Properties may change while the menu is open.
+        expected_block: BlockKey,
+        /// The slot in its item handler.
+        slot: usize,
+        /// Whether players can place items in the slot through this menu.
+        allow_insert: bool,
     },
 }
 
@@ -85,12 +112,56 @@ impl MenuSlotPlace {
             Self::EntityItems { entity, slot } => {
                 Some((entity.capability(host, &ENTITY_ITEMS, ())?, slot))
             }
+            Self::Decoration => None,
+            Self::BlockEntityItems { entity, slot, .. } => {
+                let level = entity.level;
+                let pos = entity.position;
+                if host.block_entity(level, pos) != Some(entity)
+                    || player.entity().level(host) != Some(level)
+                {
+                    return None;
+                }
+                Some((level.capability(host, &ITEMS, pos, None)?, slot))
+            }
+            Self::BlockItems {
+                level,
+                pos,
+                expected_block,
+                slot,
+                ..
+            } => {
+                if player.entity().level(host) != Some(level)
+                    || level.block_state(host, pos)?.block() != expected_block
+                {
+                    return None;
+                }
+                Some((level.capability(host, &ITEMS, pos, None)?, slot))
+            }
         }
+    }
+
+    /// Whether the menu permits insertion through this backing. The inventory may apply
+    /// additional item or capacity filters.
+    pub fn allows_insertion(self) -> bool {
+        !matches!(
+            self,
+            Self::Decoration
+                | Self::BlockEntityItems {
+                    allow_insert: false,
+                    ..
+                }
+                | Self::BlockItems {
+                    allow_insert: false,
+                    ..
+                }
+        )
     }
 
     /// Whether this place still names storage, for the menu of `player`: false closes the menu.
     pub fn resolves(self, host: &mut dyn ServerHost, player: PlayerRef) -> bool {
-        self.handler(host, player)
-            .is_some_and(|(handler, slot)| slot < handler.size(host))
+        self == Self::Decoration
+            || self
+                .handler(host, player)
+                .is_some_and(|(handler, slot)| slot < handler.size(host))
     }
 }

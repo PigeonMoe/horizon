@@ -676,12 +676,12 @@ pub trait PlayersBackendMut {
         replace: MenuReplace,
     ) -> Result<Option<i32>, OpenMenuError>;
     /// Side: server.
-    /// Backs the container slots of the mod menu `window` that `player_open_mod_menu` opened
-    /// for the player with storage that is not a block entity (arismoko/horizon#3385; NeoForge's
-    /// `StackCopySlot` and `ResourceHandlerSlot`): `places[n]` is what slot `n` shows. From then
+    /// Backs the container slots of a menu opened by a mod. `places[n]` is what slot `n` shows.
+    /// Use `Decoration` for labels and buttons between storage slots. From then
     /// on a click or shift-click on those slots, and an `ItemPlace::MenuSlot` write, go through
     /// that storage's own handler, journalled; the client sees ordinary synced slots, mirrored
-    /// after each click and each write through an `ItemPlace` of that storage, never each tick.
+    /// after each click and each write through an `ItemPlace` of that storage. Slots backed by
+    /// a block entity's handler also refresh before the level sends container changes.
     /// A slot past `places` stays the mods' own (`native_menu_clicked`). The menu closes once a
     /// place stops resolving (the backpack left the hand, the entity is gone) or a held stack is
     /// no longer the one bound when the slots were backed, checked before each click and at
@@ -689,8 +689,8 @@ pub trait PlayersBackendMut {
     /// stack while the menu is open, so it can't go into itself. Backing again replaces the
     /// places; a slot no longer backed (an empty list, a shorter one) is emptied, never left
     /// holding the copy it showed. A [`MenuSlotBackRefusal`], and nothing changes, for a player
-    /// not online or a window that is not their open menu, a menu that is not a blockless mod
-    /// menu, more places than its container slots, or a place that doesn't resolve now.
+    /// not online, a window that is not an open mod menu, more places than its container slots,
+    /// or a place that doesn't resolve now.
     #[access(WorldOnly)]
     fn player_back_mod_menu_slots(
         &mut self,

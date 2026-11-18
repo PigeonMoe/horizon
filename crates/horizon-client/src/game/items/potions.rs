@@ -990,11 +990,14 @@ impl Game<'_> {
                     *self.stack_in_mut(slot) = None;
                 }
             }
-            let bottle = ItemStack::new("minecraft:glass_bottle", 1);
-            if self.stack_in(slot).is_none() {
-                *self.stack_in_mut(slot) = Some(bottle);
-            } else if let Some(rest) = self.add_stack_to_inventory(bottle) {
-                self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+            let default = Some("minecraft:glass_bottle".to_owned());
+            if let Some(item) = horizon_client::item_sync::use_remainder(stack, default) {
+                let remainder = ItemStack::new(&item, 1);
+                if self.stack_in(slot).is_none() {
+                    *self.stack_in_mut(slot) = Some(remainder);
+                } else if let Some(rest) = self.add_stack_to_inventory(remainder) {
+                    self.spawn_item(rest, eye, [0.0, 0.1, 0.0], 40);
+                }
             }
         }
         true

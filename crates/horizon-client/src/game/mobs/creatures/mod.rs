@@ -122,6 +122,7 @@ pub(super) struct DyingDrops<'a> {
     pub(super) source: Option<HurtSource<'a>>,
     /// Whether a player hurt it within 100 ticks.
     pub(super) recently_hit: bool,
+    pub(super) credited_player: Option<u128>,
 }
 
 /// A sound a native mod queued, sent when the host is free.
@@ -1871,6 +1872,7 @@ impl Game<'_> {
                 player: dying.player,
                 source,
                 recently_hit: dying.recently_hit,
+                credited_player: dying.credited_player,
                 drops: &mut snapshots,
                 cancel: &mut cancel,
             });
@@ -3065,8 +3067,9 @@ impl Game<'_> {
                     if self.world.block(pos[0], pos[1], pos[2]) == state
                         && self.mob_may_destroy(mob, pos)
                     {
-                        let air = self.world.air;
-                        self.level_set(pos, air)?;
+                        let b = self.res.behaviours();
+                        self.level_set(pos, b.legacy_block(b.fluid(state)))?;
+                        self.post_block_game_event("minecraft:block_destroy", pos, Some(Who::Mob(mob)), Some(state));
                     } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
                         m.extra.carried = None;
                     }
@@ -4157,7 +4160,12 @@ impl Game<'_> {
         }
         // DamageSource.scalesWithDifficulty: a mob (or its projectile's
         // owner) caused the hit, not a player.
-        let living_cause = attacker.or(owner).is_some();
+        let living_cause = attacker.or(owner).is_some_and(|id| {
+            !self.player.as_ref().is_some_and(|p| p.entity_id as u32 == id)
+                && !self.lan.as_ref().is_some_and(|host| {
+                    host.hub.guests.iter().any(|guest| guest.entity_id as u32 == id)
+                })
+        });
         // The native damage hook's causing entity: the one given, or the
         // owner of the projectile that hit (`projectile_owner` outlives a
         // projectile's other hits), not the guessed melee attacker.
@@ -4865,7 +4873,7 @@ impl Game<'_> {
         if let Some(i) = self.boats.iter().position(|b| b.id == id) {
             let kind = self.boats[i].entity_type();
             if !self.vehicle_refuses_projectile(p, id, &kind, damage_type) {
-                self.hurt_boat(i, amount, creative);
+                self.hurt_boat_by(i, amount, creative, super::nonliving_hurt::projectile_by(p));
             }
         } else if let Some(i) = self.carts.iter().position(|c| c.id == id) {
             let kind = self.carts[i].kind.id();
@@ -5406,7 +5414,19 @@ impl Game<'_> {
             // AbstractArrow.onHitEntity on an item frame: spent when the
             // frame took the hit, turned back when a fixed one refused it.
             let by_player = p.owner == Some(Who::Player);
-            let hurt = self.projectile_hurts_frame(id, by_player, by_player && self.creative);
+            let player = if mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre) {
+                p.owner_uuid
+                    .map(horizon_client::lan::playerdata::ints_uuid)
+                    .and_then(|uuid| self.damage_player_by_uuid(uuid))
+            } else {
+                None
+            };
+            let hurt = self.projectile_hurts_frame(
+                id,
+                by_player,
+                by_player && self.creative,
+                player.as_ref(),
+            );
             let outcome = if hurt {
                 EntityHit::Hurt
             } else {
@@ -5432,16 +5452,14 @@ impl Game<'_> {
                 self.projectile_damage_kind(p),
                 p.owner.is_some(),
             );
-            let refused = self.vehicle_refuses_projectile(p, id, kind, damage_type);
-            if !refused {
-                self.arrow_hits_cart(i, amount, p.velocity, burning, creative, p.owner, p.guest);
-            }
+            let hurt = !self.vehicle_refuses_projectile(p, id, kind, damage_type)
+                && self.arrow_hits_cart(i, amount, p.velocity, burning, creative, p.owner, p.guest);
             self.finish_arrow_hit(
                 arrow,
-                if refused {
-                    EntityHit::Refused
-                } else {
+                if hurt {
                     EntityHit::Hurt
+                } else {
+                    EntityHit::Refused
                 },
             );
             return Ok(());
@@ -5463,16 +5481,14 @@ impl Game<'_> {
                 self.projectile_damage_kind(p),
                 p.owner.is_some(),
             );
-            let refused = self.vehicle_refuses_projectile(p, id, &kind, damage_type);
-            if !refused {
-                self.hurt_boat_by(i, amount, creative, super::nonliving_hurt::projectile_by(p));
-            }
+            let hurt = !self.vehicle_refuses_projectile(p, id, &kind, damage_type)
+                && self.hurt_boat_result(i, amount, creative, super::nonliving_hurt::projectile_by(p)).is_some();
             self.finish_arrow_hit(
                 arrow,
-                if refused {
-                    EntityHit::Refused
-                } else {
+                if hurt {
                     EntityHit::Hurt
+                } else {
+                    EntityHit::Refused
                 },
             );
             return Ok(());

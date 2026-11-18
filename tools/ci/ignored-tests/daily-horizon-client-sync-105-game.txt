@@ -49,6 +49,7 @@ horizon-client game::machines::hopper_cart_rider_tests::a_ridden_hopper_cart_tak
 horizon-client game::minecarts::hit::hit_tests::a_broken_cart_drops_its_item_under_its_name lib daily resources
 horizon-client game::minecarts::hit::hit_tests::a_chest_cart_broken_by_a_player_angers_the_piglins_that_see_them lib daily resources
 horizon-client game::minecarts::hit::hit_tests::a_hit_posts_one_entity_damage_from_its_causing_entity lib daily resources
+horizon-client game::minecarts::hit::hit_tests::vehicle_damage_policy_distinguishes_natural_and_player_damage lib daily resources
 horizon-client game::mounts::strider_lava_boarding_tests::a_strider_with_its_eyes_in_lava_refuses_a_rider lib daily resources
 horizon-client game::player_kill_credit_tests::a_guest_killing_another_guest_credits_the_kill lib daily resources
 horizon-client game::player_kill_credit_tests::a_player_killing_another_player_credits_the_kill lib daily resources

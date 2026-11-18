@@ -220,18 +220,48 @@ impl Behaviours {
         crop: Option<bool>,
         check: Option<BonemealCheck>,
     ) -> bool {
+        self.use_bone_meal_by(level, ticks, pos, face, (crop, check), None)
+    }
+
+    /// As `use_bone_meal`, with the acting player's identity for growth policy.
+    pub fn use_bone_meal_by<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        face: Direction,
+        (crop, check): (Option<bool>, Option<BonemealCheck>),
+        player: Option<super::GrowthPlayer<'_>>,
+    ) -> bool {
         let mut sim = self.sim(level, ticks);
-        if crop.unwrap_or_else(|| sim.grow_crop(pos, check)) {
-            sim.level_event(1505, pos, 15);
-            return true;
-        }
-        let clicked = sim.state(pos);
         let relative = rel(pos, face);
-        if self.is_face_sturdy(clicked, face) && sim.grow_water_plant(relative, Some(face)) {
-            sim.level_event(1505, relative, 15);
-            return true;
+        let mut grown_at = pos;
+        let used = sim.capture_fertilizer(pos, player, |sim| {
+            if crop.unwrap_or_else(|| sim.grow_crop(pos, check)) {
+                return true;
+            }
+            let clicked = sim.state(pos);
+            grown_at = relative;
+            self.is_face_sturdy(clicked, face) && sim.grow_water_plant(relative, Some(face))
+        });
+        if used {
+            sim.level_event(1505, grown_at, 15);
         }
-        false
+        used
+    }
+
+    /// The dispenser's application uses a single capture for crop and water growth.
+    pub fn dispense_bone_meal<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        crop: Option<bool>,
+        check: Option<BonemealCheck>,
+    ) -> bool {
+        self.sim(level, ticks).capture_fertilizer(pos, None, |sim| {
+            crop.unwrap_or_else(|| sim.grow_crop(pos, check)) || sim.grow_water_plant(pos, None)
+        })
     }
     /// `BoneMealItem.useOn` on a client's level, where nothing grows: whether
     /// it succeeds there (the server's packet does the growing). A sapling,
@@ -554,7 +584,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             Kind::Fungus => {
                 let feature = b.data(state).feature.clone();
                 if let Some(feature) = self.grow_feature_event(pos, feature.as_deref()) {
-                    self.place_configured_feature(&feature, pos);
+                    self.capture_structure(pos, |sim| sim.place_configured_feature(&feature, pos));
                 }
             }
             Kind::Azalea => {

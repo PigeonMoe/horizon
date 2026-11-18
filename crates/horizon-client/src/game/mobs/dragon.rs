@@ -2504,9 +2504,8 @@ impl Game<'_> {
                             f64::from(-trig::cos(r)),
                         ));
                         let dot = dir.dot(aim) as f32;
-                        let angle = (f64::from(dot).acos() * f64::from(trig::RAD_TO_DEG))
-                            as f32
-                            + 0.5;
+                        let angle =
+                            (f64::from(dot).acos() * f64::from(trig::RAD_TO_DEG)) as f32 + 0.5;
                         if angle < 0.0 || angle > 10.0 {
                             let head = d.parts[0].0;
                             let (xd, zd) = (pp.x - head.x, pp.z - head.z);
@@ -3959,6 +3958,8 @@ impl Game<'_> {
         radius: f32,
         blocks: &[[i32; 3]],
         damage_type: &str,
+        entity_sourced: bool,
+        responsible: Option<&mod_api::DamagePlayer>,
     ) {
         let diameter = f64::from(radius * 2.0);
         let in_reach = |p: Vec3| {
@@ -3976,6 +3977,16 @@ impl Game<'_> {
         // The blast's source carries the player who set it off, if any.
         let by = self.fight.blast_by;
         for at in crystals {
+            if entity_sourced
+                && !self.entity_target_damage_allowed(
+                    "minecraft:end_crystal",
+                    [at.x, at.y, at.z],
+                    false,
+                    responsible,
+                )
+            {
+                continue;
+            }
             // Look up the current index after each removal.
             if let Some(i) = self.crystals.iter().position(|c| c.position == at) {
                 let id = self.crystals[i].id;
@@ -4010,6 +4021,18 @@ impl Game<'_> {
         let whole = d.whole_box();
         let (lo, hi) = (whole.min_position(), whole.max_position());
         let exposure = self.seen_percent(center, [lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
+        let p = d.position;
+        if !hits.is_empty()
+            && entity_sourced
+            && !self.entity_target_damage_allowed(
+                "minecraft:ender_dragon",
+                [p.x, p.y, p.z],
+                true,
+                responsible,
+            )
+        {
+            return;
+        }
         for (part, amount) in hits {
             self.hurt_dragon(part, amount, true, by, DamageKind::Explosion);
         }

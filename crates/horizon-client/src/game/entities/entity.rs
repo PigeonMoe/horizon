@@ -1295,6 +1295,7 @@ macro_rules! damage_level_of {
             Some(&$game.pack.block_registries),
             &$game.damage_hooks,
         )
+        .in_dimension($game.dim.id())
         .attacked_by($game.combat.attack())
     };
     ($game:ident, $attack:expr) => {
@@ -1305,6 +1306,7 @@ macro_rules! damage_level_of {
             Some(&$game.pack.block_registries),
             &$game.damage_hooks,
         )
+        .in_dimension($game.dim.id())
         .attacked_by($attack)
     };
     ($game:ident) => {
@@ -1315,6 +1317,7 @@ macro_rules! damage_level_of {
             Some(&$game.pack.block_registries),
             &$game.damage_hooks,
         )
+        .in_dimension($game.dim.id())
     };
 }
 pub(super) use damage_level_of;

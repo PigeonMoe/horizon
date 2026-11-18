@@ -57,6 +57,7 @@ fn wire_loopback_living_drops_carries_the_item_entity_state_both_ways() {
             player: None,
             source: &source,
             recently_hit: false,
+            credited_player: None,
             drops: &mut drops,
             cancelled: false,
         },

@@ -580,6 +580,15 @@ impl Game<'_> {
                 return;
             }
         }
+        if !self.ridden_vehicle_move_allowed(id, old, target) {
+            if let Some(i) = mount {
+                self.mobs[i].velocity = Vec3::ZERO;
+            } else if let Some(i) = boat {
+                self.boats.update(i, |b| b.velocity = Vec3::ZERO);
+            }
+            back(self.lan.as_mut().unwrap(), old, yaw);
+            return;
+        }
         // clientVehicleIsFloating: the move didn't go down a step, the vehicle hadn't come down onto
         // something on its last move (`verticalCollisionBelow` before this one), and nothing but air is
         // around its box grown by 0.0625 and stretched 0.55 down (water holds a boat up). A flying or

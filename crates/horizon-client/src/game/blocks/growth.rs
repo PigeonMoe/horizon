@@ -4,7 +4,10 @@
 use super::{Game, native_hooks::BonemealAsk};
 use horizon_client::{Result, items::ItemStack, vanillagen};
 use horizon_core::{geometry::Direction, position::BlockPos};
-use horizon_world::{level::classes::Class, worldgen::live::LiveFeatures};
+use horizon_world::{
+    level::{GrowthPlayer, classes::Class},
+    worldgen::live::LiveFeatures,
+};
 use std::sync::Arc;
 
 impl Game<'_> {
@@ -53,8 +56,17 @@ impl Game<'_> {
         };
         let pos = BlockPos::new(hit.pos[0], hit.pos[1], hit.pos[2]);
         let (ask, held) = self.held_bonemeal(pos, stack);
+        let player_name = self.lan_acting_name.clone();
+        let player = self
+            .lan_acting_uuid
+            .zip(player_name.as_deref())
+            .map(|(uuid, name)| GrowthPlayer {
+                uuid,
+                name,
+                permission_level: self.lan_acting_permission.unwrap_or(0),
+            });
         let used = self.with_level(|b, level, ticks| {
-            b.use_bone_meal(level, ticks, pos, face, ask.crop, ask.check)
+            b.use_bone_meal_by(level, ticks, pos, face, (ask.crop, ask.check), player)
         });
         // A canceled `BonemealEvent` that succeeded uses none of the meal.
         let consumed = used && ask.crop != Some(true);

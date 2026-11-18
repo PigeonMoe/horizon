@@ -11,8 +11,8 @@
 use crate::HostTransaction;
 use crate::{
     BundleItems, Capability, Direction, ENTITY_ITEMS, EquipmentSlot, Hand, ITEMS, ItemResource,
-    ItemStack, LevelRef, MenuRef, MenuSlotBacking, ResourceHandler, ServerHost, Transaction,
-    backend_mut_of, backend_of,
+    ItemStack, LevelRef, MenuRef, MenuSlotBacking, MenuSlotPlace, ResourceHandler, ServerHost,
+    Transaction, backend_mut_of, backend_of,
 };
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -494,6 +494,9 @@ impl ItemPlace {
             // A slot backed by a mod's storage reads it through its handler; every other slot
             // reads as before.
             ItemPlace::MenuSlot { menu, slot } => match menu.slot_backing(host, *slot) {
+                Some(MenuSlotBacking::Place(MenuSlotPlace::Decoration)) => {
+                    menu.slot(host, *slot)?
+                }
                 Some(MenuSlotBacking::Place(place)) => {
                     let (handler, index) = place.handler(host, menu.player)?;
                     let resource = handler.resource(host, index)?;
@@ -728,6 +731,9 @@ impl ItemPlace {
                         (entity.capability(host, &ENTITY_ITEMS, ()), slot)
                     }
                     MenuSlotBacking::Place(place) => {
+                        if insert && !place.allows_insertion() {
+                            return Ok(0);
+                        }
                         let (handler, index) = place.handler(host, menu.player).ok_or(())?;
                         (Some(handler), index)
                     }

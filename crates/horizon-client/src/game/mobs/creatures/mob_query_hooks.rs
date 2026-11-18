@@ -90,6 +90,9 @@ impl horizon_client::mobs::MobHooks for Game<'_> {
     fn grief_hooked(&self) -> bool {
         Game::grief_hooked(self)
     }
+    fn may_change_block(&self, mob: &Mob, pos: [i32; 3]) -> bool {
+        self.mob_block_change_allowed(mob.id, &mob.kind.id, pos)
+    }
     fn can_entity_destroy(&self, mob: u32, pos: [i32; 3], vanilla: bool) -> bool {
         self.entity_may_destroy(mob, pos, vanilla)
     }

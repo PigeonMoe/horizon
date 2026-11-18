@@ -101,6 +101,70 @@ impl Game<'_> {
         self.player_menu_opening(conn);
         Some(window)
     }
+
+    pub(super) fn open_block_inventory_menu(
+        &mut self,
+        player: mod_api::PlayerRef,
+        block: mod_api::BlockEntityRef,
+        rows: u8,
+        title: Text,
+        items: Vec<Option<ItemStack>>,
+        replace: MenuReplace,
+    ) -> Option<i32> {
+        let fields = block.fields();
+        if self.block_entity(fields.level, fields.position) != Some(block)
+            || !self.allow_inventory_menu_at(player, fields.level, fields.position, rows)
+            || self.block_entity(fields.level, fields.position) != Some(block)
+        {
+            return None;
+        }
+        self.open_menu(player.uuid(), rows, title, items, replace)
+    }
+
+    pub(super) fn open_inventory_menu_at(
+        &mut self,
+        player: mod_api::PlayerRef,
+        level: mod_api::LevelRef,
+        pos: [i32; 3],
+        rows: u8,
+        title: Text,
+        items: Vec<Option<ItemStack>>,
+        replace: MenuReplace,
+    ) -> Option<i32> {
+        if !self.allow_inventory_menu_at(player, level, pos, rows) {
+            return None;
+        }
+        self.open_menu(player.uuid(), rows, title, items, replace)
+    }
+
+    fn allow_inventory_menu_at(
+        &mut self,
+        player: mod_api::PlayerRef,
+        level: mod_api::LevelRef,
+        pos: [i32; 3],
+        rows: u8,
+    ) -> bool {
+        let dimension = level.dimension_id();
+        let guest_here = |game: &Self| {
+            game.online_player_record(player)
+                .filter(|guest| guest.dimension == dimension)
+                .map(|guest| guest.conn)
+        };
+        let Some(conn) = guest_here(self) else {
+            return false;
+        };
+        let Some(state) = self.level_block_state(level, pos) else {
+            return false;
+        };
+        if self.res.facts().is_air(state) {
+            return false;
+        }
+        let rows = rows.clamp(1, 6);
+        let kind = format!("minecraft:generic_9x{rows}");
+        self.guest_may_open(conn, &kind, Some(pos))
+            && guest_here(self) == Some(conn)
+            && self.level_block_state(level, pos) == Some(state)
+    }
     /// `ServerPlayer.openMenu`'s close of the menu that was open: `closeContainer`, which then
     /// tells the client, or `doCloseContainer` for a provider that skips the client's close.
     /// Either way the old menu's `removed` runs and the mods hear it close.
