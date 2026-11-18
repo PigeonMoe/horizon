@@ -464,6 +464,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
                         if name != "minecraft:air"
                             && !name.ends_with("_air")
                             && w.can_entity_destroy(m.id, [x, y, z], !immune)
+                            && w.may_change_block(m, [x, y, z])
                         {
                             events.push(MobEvent::BreakBlock {
                                 pos: [x, y, z],
@@ -569,6 +570,60 @@ pub fn scale(m: &Mob, alpha: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_wither_breaks_only_unprotected_obstacles_and_only_then_plays_its_sound() {
+        use crate::mobs::mob_hooks::BlockChangeGuard;
+        use std::sync::Arc;
+
+        let pos = [[0, 64, 0], [1, 64, 0]];
+        assert!(super::super::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                world
+                    .chunks
+                    .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                let stone = registry.default_state("minecraft:stone").unwrap();
+                for [x, y, z] in pos {
+                    world.set(x, y, z, stone).unwrap();
+                }
+            },
+            |world, types| {
+                let kind = Arc::new(types.types["minecraft:wither"].clone());
+                for count in [1, 2] {
+                    let mut world = world.clone();
+                    let guard = BlockChangeGuard(&pos[..count]);
+                    world.mob_hooks = Some(&guard);
+                    let mut mob = Mob::new(1, kind.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0);
+                    mob.extra.counter = 0;
+                    mob.extra.counter2 = 1;
+                    let mut events = Vec::new();
+                    custom_server_ai_step(&mut mob, &world, &mut events);
+                    let broken: Vec<_> = events
+                        .iter()
+                        .filter_map(|e| match e {
+                            MobEvent::BreakBlock {
+                                pos, by: Some(1), ..
+                            } => Some(*pos),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(broken.as_slice(), &pos[count..]);
+                    assert_eq!(
+                        events.iter().any(|e| matches!(
+                            e,
+                            MobEvent::LevelEventSound {
+                                sound: "entity.wither.break_block",
+                                ..
+                            }
+                        )),
+                        count == 1
+                    );
+                }
+            },
+        ));
+    }
     /// The break sound waits for the game's verdict only when a listener can
     /// cancel the break: an installed mod that does not listen leaves it plain.
     #[test]

@@ -221,6 +221,10 @@ impl Goal for BreakDoor {
             self.last_break_progress = progress;
         }
         if self.break_time == DOOR_BREAK_TIME && self.valid_difficulty(cx.w) {
+            if !cx.w.may_change_block(m, door) {
+                self.start(m, cx);
+                return;
+            }
             cx.events.push(MobEvent::BreakDoor {
                 mob: m.id,
                 pos: door,
@@ -356,6 +360,84 @@ mod tests {
     use super::*;
     use crate::mobs::path::{Path, PathNode, PathType};
     use std::sync::Arc;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_guarded_zombie_door_restarts_its_break_progress() {
+        use crate::mobs::mob_hooks::BlockChangeGuard;
+
+        let pos = [0, 65, 0];
+        assert!(crate::mobs::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                world
+                    .chunks
+                    .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                world
+                    .set(
+                        0,
+                        65,
+                        0,
+                        registry.default_state("minecraft:oak_door").unwrap(),
+                    )
+                    .unwrap();
+            },
+            |world, types| {
+                let mut world = world.clone();
+                world.difficulty.hard = true;
+                let guard = BlockChangeGuard(&[pos]);
+                world.mob_hooks = Some(&guard);
+                let mut mob = Mob::new(
+                    1,
+                    Arc::new(types.types["minecraft:zombie"].clone()),
+                    Vec3::new(0.5, 64.0, 0.5),
+                    0.0,
+                );
+                let mut goal = BreakDoor::zombie();
+                goal.interact.door = pos;
+                goal.break_time = DOOR_BREAK_TIME - 1;
+                let mut level = crate::health::TestLevel::new(15);
+                let level = &mut level.level();
+                let mut events = Vec::new();
+                goal.tick(
+                    &mut mob,
+                    &mut Cx {
+                        w: &world,
+                        level,
+                        events: &mut events,
+                    },
+                );
+                assert_eq!(goal.break_time, 0);
+                assert!(
+                    !events
+                        .iter()
+                        .any(|e| matches!(e, MobEvent::BreakDoor { .. }))
+                );
+
+                world.mob_hooks = None;
+                events.clear();
+                for _ in 0..DOOR_BREAK_TIME {
+                    goal.tick(
+                        &mut mob,
+                        &mut Cx {
+                            w: &world,
+                            level,
+                            events: &mut events,
+                        },
+                    );
+                }
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(
+                            |e| matches!(e, MobEvent::BreakDoor { mob: 1, pos: p } if *p == pos)
+                        )
+                        .count(),
+                    1
+                );
+            },
+        ));
+    }
 
     /// A mod's `EntityMobGriefingEvent` answer for every mob.
     struct Answer(bool);

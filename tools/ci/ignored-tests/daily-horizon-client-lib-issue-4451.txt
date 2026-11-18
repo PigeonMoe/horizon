@@ -77,6 +77,7 @@ horizon-client-lib mobs::creaking::gaze_disguise_tests::gaze_disguise_replaced_t
 horizon-client-lib mobs::creaking::gaze_disguise_tests::gaze_disguise_shipped_tag lib daily resources
 horizon-client-lib mobs::creaking::tests::activation_target_hook_cancels_and_redirects_without_suppressing_side_effects lib daily resources
 horizon-client-lib mobs::doors::tests::a_hard_zombie_breaks_a_wooden_door_unless_a_mod_denies_it lib daily resources
+horizon-client-lib mobs::doors::tests::a_guarded_zombie_door_restarts_its_break_progress lib daily resources
 horizon-client-lib mobs::effect_refusal_tests::glow_squid_damage_result_keeps_parent_health_side_effect lib daily resources
 horizon-client-lib mobs::effect_refusal_tests::squid_damage_result_keeps_parent_health_side_effect lib daily resources
 horizon-client-lib mobs::equine::tests::tame_listener_defers_the_successful_tame lib daily resources
@@ -127,6 +128,7 @@ horizon-client-lib mobs::villager_hats::profession_tests::engineer_hat_full_and_
 horizon-client-lib mobs::villager_hats::tests::metadata_head_visibility_matches_exported_no_hat_models lib daily resources
 horizon-client-lib mobs::warden_brain::warden_owned_memory_tests::actual_mob_ticks_expire_owned_memories_and_noai_retains_them lib daily resources
 horizon-client-lib mobs::wither::tests::break_sound_defers_only_for_a_destroy_listener lib daily resources
+horizon-client-lib mobs::wither::tests::a_wither_breaks_only_unprotected_obstacles_and_only_then_plays_its_sound lib daily resources
 horizon-client-lib mobs::wither::tests::the_wither_breaks_what_block_parts_allow lib daily resources
 horizon-client-lib mod_content::tests::a_block_yields_the_item_it_names_or_its_own_or_none lib daily resources
 horizon-client-lib mod_content::tests::a_content_fence_gate_plays_its_own_sounds_or_its_woods lib daily resources
