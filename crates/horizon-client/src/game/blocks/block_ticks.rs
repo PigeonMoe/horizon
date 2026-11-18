@@ -148,20 +148,38 @@ impl Game<'_> {
                 standing_feet(&mut scratch.standing, [at.x, at.y, at.z], c.on_ground, 0.49);
             }
         }
-        let first_contact_drop = self.next_entity + 1;
-        self.with_level(|b, level, ticks| {
-            // LilyPadBlock.entityInside: a boat inside a lily pad breaks it.
-            scratch.boat_cells.clear();
-            for bounds in level.boat_trigger_boxes() {
-                let (lo, hi) = (bounds.min_position(), bounds.max_position());
-                for x in (lo.x + 1e-7).floor() as i32..=(hi.x - 1e-7).floor() as i32 {
-                    for y in (lo.y + 1e-7).floor() as i32..=(hi.y - 1e-7).floor() as i32 {
-                        for z in (lo.z + 1e-7).floor() as i32..=(hi.z - 1e-7).floor() as i32 {
-                            scratch.boat_cells.push(BlockPos::new(x, y, z));
+        // LilyPadBlock.entityInside: a boat inside a lily pad breaks it.
+        let check_lily_pads = self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::MobBlockChangePre);
+        scratch.boat_cells.clear();
+        for boat in &self.boats {
+            let bounds = boat.bounds();
+            let (lo, hi) = (bounds.min_position(), bounds.max_position());
+            let mut kind = None;
+            for x in (lo.x + 1e-7).floor() as i32..=(hi.x - 1e-7).floor() as i32 {
+                for y in (lo.y + 1e-7).floor() as i32..=(hi.y - 1e-7).floor() as i32 {
+                    for z in (lo.z + 1e-7).floor() as i32..=(hi.z - 1e-7).floor() as i32 {
+                        if check_lily_pads
+                            && self
+                                .res
+                                .behaviours()
+                                .data(self.world.block(x, y, z))
+                                .is(horizon_world::level::classes::Class::LilyPad)
+                            && !self.mob_block_change_allowed(
+                                boat.id,
+                                kind.get_or_insert_with(|| boat.entity_type()),
+                                [x, y, z],
+                            )
+                        {
+                            continue;
                         }
+                        scratch.boat_cells.push(BlockPos::new(x, y, z));
                     }
                 }
             }
+        }
+        let first_contact_drop = self.next_entity + 1;
+        self.with_level(|b, level, ticks| {
             for pos in scratch.boat_cells.drain(..) {
                 b.boat_inside(level, ticks, pos);
             }

@@ -553,10 +553,6 @@ fn server_only_block_use(
         .any(|class| block.has_class(class))
 }
 impl GameLevel<'_> {
-    /// `LilyPadBlock.entityInside`: the boxes of the boats that can break a pad.
-    fn boat_trigger_boxes(&self) -> impl Iterator<Item = Aabb> + '_ {
-        self.entities().boats.iter().map(boats::Boat::bounds)
-    }
     /// How many entities in `area` press plates and tripwires, or with
     /// `LIVING` only the living ones; a constant so a list of other kinds
     /// compiles to no loop at all.

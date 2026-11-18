@@ -11,6 +11,75 @@ use std::sync::Arc;
 
 #[test]
 #[ignore = "daily"]
+fn a_boat_breaks_a_lily_pad_only_when_its_block_change_is_allowed() {
+    use mod_api::{Flow, Hooks, Host, MobBlockChangePreEvent, ModEntry, Mods};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct Guard {
+        deny: Arc<AtomicBool>,
+        heard: Arc<Mutex<Vec<u32>>>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for Guard {
+        fn mob_block_change_pre(
+            &self,
+            _: &dyn Host,
+            event: &mut MobBlockChangePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.kind, "minecraft:oak_boat");
+            assert_eq!(event.pos, [8, 64, 8]);
+            self.heard.lock().unwrap().push(event.entity);
+            if self.deny.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let deny = Arc::new(AtomicBool::new(true));
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let mods: Mods = vec![ModEntry::new(
+        "lily-guard",
+        Box::new(Guard {
+            deny: deny.clone(),
+            heard: heard.clone(),
+        }),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.load_ticking_neighbourhood(0, 0);
+            let registry = game.pack.assets.registry;
+            let water = registry.default_state("minecraft:water").unwrap();
+            let lily = registry.default_state("minecraft:lily_pad").unwrap();
+            game.world.set(8, 63, 8, water).unwrap();
+            game.world.set(8, 64, 8, lily).unwrap();
+            game.boats.push(super::boats::Boat::new(
+                20,
+                "oak".into(),
+                Vec3::new(8.5, 64.0, 8.5),
+                0.0,
+            ));
+            game.tick_blocks().unwrap();
+            assert_eq!(game.world.block(8, 64, 8), lily);
+            assert_eq!(*heard.lock().unwrap(), [20]);
+            deny.store(false, Ordering::Relaxed);
+            game.tick_blocks().unwrap();
+            assert_ne!(game.world.block(8, 64, 8), lily);
+            assert_eq!(*heard.lock().unwrap(), [20, 20]);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_mob_presses_a_plate_only_inside_the_simulation_distance() {
     with_game(|game| {
         game.world
