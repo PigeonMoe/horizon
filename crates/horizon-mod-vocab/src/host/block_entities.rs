@@ -16,6 +16,16 @@ pub trait BlockEntitiesHost {
     /// Its data reads still find nothing during that tick.
     #[access(WorldOnly)]
     fn block_entity_identity(&self, level: LevelRef, pos: [i32; 3]) -> Option<BlockEntityRef>;
+    /// Side: both. Read a resident block entity's persisted attachment payload
+    /// without decoding, creating it or mutating live state. Stale handles,
+    /// unloaded chunks and attachments without a codec return None.
+    #[access(WorldOnly)]
+    fn block_entity_saved_attachment(
+        &self,
+        entity: BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Option<Compound>;
 }
 /// The server host's methods of the `block_entities` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]

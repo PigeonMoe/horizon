@@ -8,6 +8,22 @@ use crate::{
 };
 use horizon_world::native_load_context::LoopContext;
 
+pub enum FurnaceAdjustment<'a> {
+    Fuel {
+        fuel: &'a ItemStack,
+        duration: &'a mut i32,
+    },
+    Result {
+        input: &'a ItemStack,
+        previous: Option<&'a ItemStack>,
+        result: &'a mut Option<ItemStack>,
+    },
+    Progress {
+        elapsed: &'a mut i32,
+        total: i32,
+    },
+}
+
 /// The furnace methods that read the recipes.
 pub trait FurnaceCooking {
     /// `AbstractFurnaceBlockEntity.setItem` on the input slot: anything but
@@ -37,6 +53,18 @@ pub trait FurnaceCooking {
         providers: &Providers,
         drops: &mut Vec<ItemStack>,
         remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
+    ) -> Option<bool> {
+        self.tick_adjusted(context, recipes, items, providers, drops, remainder, None)
+    }
+    fn tick_adjusted(
+        &mut self,
+        context: &LoopContext,
+        recipes: &Recipes,
+        items: &Items,
+        providers: &Providers,
+        drops: &mut Vec<ItemStack>,
+        remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
+        adjust: Option<&mut dyn FnMut(FurnaceAdjustment<'_>)>,
     ) -> Option<bool>;
     fn idle(&self) -> bool;
 }
@@ -72,7 +100,7 @@ impl FurnaceCooking for Furnace {
             self.set_input(context, recipes, after);
         }
     }
-    fn tick(
+    fn tick_adjusted(
         &mut self,
         context: &LoopContext,
         recipes: &Recipes,
@@ -80,6 +108,7 @@ impl FurnaceCooking for Furnace {
         providers: &Providers,
         drops: &mut Vec<ItemStack>,
         remainder: &dyn Fn(&ItemStack) -> Option<ItemStack>,
+        mut adjust: Option<&mut dyn FnMut(FurnaceAdjustment<'_>)>,
     ) -> Option<bool> {
         let was_lit = self.lit_remaining > 0;
         let mut lit = false;
@@ -104,9 +133,21 @@ impl FurnaceCooking for Furnace {
                     if can_burn {
                         if !lit {
                             let fuel = self.items[1].clone();
-                            let time = fuel
+                            let mut time = fuel
                                 .as_ref()
                                 .map_or(0, |f| providers.burn_time(items, f, fast));
+                            if let Some((fuel, adjust)) = fuel.as_ref().zip(adjust.as_mut())
+                                && time > 0
+                            {
+                                let mut duration = time;
+                                adjust(FurnaceAdjustment::Fuel {
+                                    fuel,
+                                    duration: &mut duration,
+                                });
+                                if duration > 0 {
+                                    time = duration;
+                                }
+                            }
                             let speed = fuel
                                 .as_ref()
                                 .map_or(1.0, |f| providers.speed(items, f, fast));
@@ -140,30 +181,44 @@ impl FurnaceCooking for Furnace {
                             if self.cooking_timer >= self.cooking_total {
                                 self.cooking_timer = 0;
                                 self.cooking_total = total_time(recipe.time, self.speed);
-                                match &mut self.items[2] {
-                                    Some(out) => out.count += recipe.result.count,
-                                    None => self.items[2] = Some(recipe.result.clone()),
+                                let mut result = Some(recipe.result.clone());
+                                if let Some(adjust) = adjust.as_mut() {
+                                    let previous = self.items[2].as_ref();
+                                    adjust(FurnaceAdjustment::Result {
+                                        input: &ingredient,
+                                        previous,
+                                        result: &mut result,
+                                    });
+                                    if result.as_ref() != Some(&recipe.result) {
+                                        result = result.filter(|result| {
+                                            accepts_result(items, previous, result)
+                                        });
+                                    }
                                 }
-                                *self
-                                    .recipes_used
-                                    .entry(recipe_used_key(&recipe.id))
-                                    .or_insert(0) += 1;
-                                // AbstractFurnaceBlockEntity.burn: drying a wet sponge fills
-                                // the bucket in the fuel slot.
-                                if self.items[0]
-                                    .as_ref()
-                                    .is_some_and(|i| &*i.item == "minecraft:wet_sponge")
-                                    && self.items[1]
-                                        .as_ref()
-                                        .is_some_and(|f| &*f.item == "minecraft:bucket")
-                                {
-                                    self.items[1] =
-                                        Some(ItemStack::new("minecraft:water_bucket", 1));
-                                }
-                                if let Some(i) = self.items[0].as_mut() {
-                                    i.count -= 1;
-                                    if i.count == 0 {
-                                        self.items[0] = None;
+                                if let Some(result) = result {
+                                    match &mut self.items[2] {
+                                        Some(out) => out.count += result.count,
+                                        None => self.items[2] = Some(result),
+                                    }
+                                    *self
+                                        .recipes_used
+                                        .entry(recipe_used_key(&recipe.id))
+                                        .or_insert(0) += 1;
+                                    // AbstractFurnaceBlockEntity.burn fills the bucket while
+                                    // drying a wet sponge.
+                                    if &*ingredient.item == "minecraft:wet_sponge"
+                                        && self.items[1]
+                                            .as_ref()
+                                            .is_some_and(|f| &*f.item == "minecraft:bucket")
+                                    {
+                                        self.items[1] =
+                                            Some(ItemStack::new("minecraft:water_bucket", 1));
+                                    }
+                                    if let Some(i) = self.items[0].as_mut() {
+                                        i.count -= 1;
+                                        if i.count == 0 {
+                                            self.items[0] = None;
+                                        }
                                     }
                                 }
                             }
@@ -181,6 +236,18 @@ impl FurnaceCooking for Furnace {
             // Vanilla Mth.clamp is min(max(v, 0), max): saturates at a negative total instead of panicking.
             self.cooking_timer = (self.cooking_timer - 2).max(0).min(self.cooking_total);
         }
+        if let Some(adjust) = adjust
+            && (1..self.cooking_total).contains(&self.cooking_timer)
+        {
+            let mut elapsed = self.cooking_timer;
+            adjust(FurnaceAdjustment::Progress {
+                elapsed: &mut elapsed,
+                total: self.cooking_total,
+            });
+            if (0..self.cooking_total).contains(&elapsed) {
+                self.cooking_timer = elapsed;
+            }
+        }
         (was_lit != lit).then_some(lit)
     }
     fn idle(&self) -> bool {
@@ -188,6 +255,25 @@ impl FurnaceCooking for Furnace {
             && self.cooking_timer <= 0
             && !(self.items[0].is_some() && self.items[1].is_some())
     }
+}
+
+fn accepts_result(items: &Items, previous: Option<&ItemStack>, result: &ItemStack) -> bool {
+    let info = items.get(&result.item);
+    let max = if result.carries_component(info, "minecraft:max_stack_size") {
+        result
+            .data()
+            .and_then(|data| data.other("minecraft:max_stack_size"))
+            .and_then(horizon_items::properties::component_int)
+            .unwrap_or_else(|| info.map_or(1, |item| item.max_stack as i32))
+            .clamp(1, 99) as u32
+    } else {
+        1
+    };
+    result.count > 0
+        && result.count <= max
+        && previous.is_none_or(|out| {
+            out.same_item_same_components(result) && result.count <= max.saturating_sub(out.count)
+        })
 }
 fn total_time(time: u32, speed: f32) -> i32 {
     if speed > 0.0 {

@@ -2645,6 +2645,14 @@ impl Game<'_> {
     pub(in crate::game) fn native_furnace_burn(&mut self, pos: [i32; 3], fuel: &str) {
         self.fire_furnace_burn(pos, fuel);
     }
+    pub(in crate::game) fn native_furnace_process(
+        &self,
+        entity: mod_api::BlockEntityRef,
+        game_time: i64,
+        stage: &mut mod_api::FurnaceProcessStage,
+    ) {
+        self.fire_furnace_process(entity, game_time, stage);
+    }
     /// A furnace finished smelting `item` into `result` at `pos`. Server-side.
     pub(in crate::game) fn native_furnace_smelt(
         &mut self,

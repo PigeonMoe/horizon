@@ -11,7 +11,7 @@ use horizon_client::{
     block_entities::{Pos, Ticking},
     block_entity_anim::Ticker,
     containers::{BlockEntity, FurnaceKind, HOPPER_SLOTS},
-    furnace::FurnaceCooking,
+    furnace::{FurnaceAdjustment, FurnaceCooking},
 };
 use horizon_core::position::BlockPos;
 use horizon_world::registry::BlockStateId;
@@ -627,6 +627,68 @@ impl Game<'_> {
         self.with_level(|b, level, ticks| b.tick_daylight_detector(level, ticks, at));
         let _ = self.process_level_events();
     }
+
+    fn adjust_furnace(&self, entity: mod_api::BlockEntityRef, adjustment: FurnaceAdjustment<'_>) {
+        use crate::game::api_values::{TryIntoApi, TryIntoEngine};
+        use mod_api::FurnaceProcessStage as Stage;
+        let time = self.world.game_time;
+        match adjustment {
+            FurnaceAdjustment::Fuel { fuel, duration } => {
+                let Ok(fuel) = fuel.try_into_api() else {
+                    return;
+                };
+                let mut stage = Stage::Fuel {
+                    fuel,
+                    duration: *duration,
+                };
+                self.native_furnace_process(entity, time, &mut stage);
+                if let Stage::Fuel {
+                    duration: answer, ..
+                } = stage
+                {
+                    *duration = answer;
+                }
+            }
+            FurnaceAdjustment::Result {
+                input,
+                previous,
+                result,
+            } => {
+                let (Ok(input), Ok(previous), Ok(proposed)) = (
+                    input.try_into_api(),
+                    previous.map(TryIntoApi::try_into_api).transpose(),
+                    result.as_ref().map(TryIntoApi::try_into_api).transpose(),
+                ) else {
+                    return;
+                };
+                let mut stage = Stage::Result {
+                    input,
+                    previous,
+                    result: proposed.clone(),
+                };
+                self.native_furnace_process(entity, time, &mut stage);
+                if let Stage::Result { result: answer, .. } = stage
+                    && proposed != answer
+                {
+                    *result = answer.and_then(|answer| answer.try_into_engine(self.items()).ok());
+                }
+            }
+            FurnaceAdjustment::Progress { elapsed, total } => {
+                let mut stage = Stage::Progress {
+                    elapsed: *elapsed,
+                    total,
+                };
+                self.native_furnace_process(entity, time, &mut stage);
+                if let Stage::Progress {
+                    elapsed: answer, ..
+                } = stage
+                {
+                    *elapsed = answer;
+                }
+            }
+        }
+    }
+
     /// `AbstractFurnaceBlockEntity.serverTick` of the furnace at `pos`, and
     /// its block's `lit` following it.
     pub(super) fn tick_furnace(&mut self, pos: Pos) -> Result<()> {
@@ -651,23 +713,46 @@ impl Game<'_> {
                 && matches!(self.world.block_entities.get(&pos), Some(BlockEntity::Furnace(f))
                     if f.lit_remaining <= 1 && f.items[1].as_ref().is_some_and(|s|
                         mod_api::__private::item_listens(mod_api::HookId::CraftingRemainder, &s.item)));
-            let lit = if needs_part {
+            let process = if self.native_authoritative()
+                && mod_api::__private::listened(mod_api::HookId::FurnaceProcess)
+            {
+                self.level(self.dim.id())
+                    .and_then(|level| self.block_entity(level, [pos.0, pos.1, pos.2]))
+            } else {
+                None
+            };
+            let lit = if needs_part || process.is_some() {
                 let Some(BlockEntity::Furnace(original)) = self.world.block_entities.get(&pos)
                 else {
                     return Ok(());
                 };
                 let mut furnace = original.clone();
-                let lit = furnace.tick(
+                let items = world_items!(self);
+                let mut adjust = |operation: FurnaceAdjustment<'_>| {
+                    if let Some(entity) = process {
+                        self.adjust_furnace(entity, operation);
+                    }
+                };
+                let lit = furnace.tick_adjusted(
                     &self.loop_context,
                     world_recipes!(self),
-                    world_items!(self),
+                    items,
                     self.res.providers(),
                     &mut drops,
-                    &|s| self.crafting_remainder(s),
+                    &|s| {
+                        if needs_part {
+                            self.crafting_remainder(s)
+                        } else {
+                            crate::crafting::CraftingRemainder::crafting_remainder(items, s)
+                        }
+                    },
+                    process.map(|_| &mut adjust as &mut dyn FnMut(FurnaceAdjustment<'_>)),
                 );
-                self.world
-                    .block_entities
-                    .insert(pos, BlockEntity::Furnace(furnace));
+                if let Some(BlockEntity::Furnace(original)) =
+                    self.world.block_entities.get_mut(&pos)
+                {
+                    *original = furnace;
+                }
                 lit
             } else {
                 let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get_mut(&pos)
@@ -1891,6 +1976,220 @@ mod own_block_entity_tests {
             assert_eq!(swap.after, [a, c]);
             assert_eq!(ticks_of(game, a), [2]);
             assert_eq!(ticks_of(game, c), [1, 1]);
+        });
+    }
+}
+
+#[cfg(test)]
+mod furnace_process_tests {
+    use super::*;
+    use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+    use horizon_client::{chunk::Chunk, items::ItemStack};
+    use mod_api::{
+        AttachmentCodec, AttachmentType, Compound, FurnaceProcessEvent, FurnaceProcessStage,
+        Holder, Host, ModEntry, Tag, wire::Writer,
+    };
+    use std::sync::Arc;
+
+    const POSITION: [i32; 3] = [1, 64, 1];
+
+    static MARKER: AttachmentType<Compound> = AttachmentType {
+        namespace: "furnace-test",
+        name: "enhanced",
+        default: Compound::new,
+        codec: Some(AttachmentCodec {
+            encode: |data| Ok(data.clone()),
+            decode: |data| Ok(data.clone()),
+        }),
+        copy_on_death: false,
+        sync: false,
+    };
+
+    struct Process {
+        wasm: bool,
+    }
+
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Process {
+        fn furnace_process(&self, host: &dyn Host, event: &mut FurnaceProcessEvent<'_>) {
+            if host
+                .block_entity_saved_attachment(event.entity, MARKER.namespace, MARKER.name)
+                .is_none()
+            {
+                return;
+            }
+            let mut stage = event.stage.clone();
+            match &mut stage {
+                FurnaceProcessStage::Fuel { duration, .. } => *duration *= 2,
+                FurnaceProcessStage::Progress { elapsed, total } if event.game_time == 10 => {
+                    *elapsed = *total - 1;
+                }
+                FurnaceProcessStage::Result {
+                    result, previous, ..
+                } => {
+                    let spare = 64 - previous.as_ref().unwrap().count();
+                    result.as_mut().unwrap().set_count(spare).unwrap();
+                }
+                _ => {}
+            }
+            if self.wasm {
+                wasm_answer(host, event, stage);
+            } else {
+                *event.stage = stage;
+            }
+        }
+    }
+
+    fn wasm_answer(
+        host: &dyn Host,
+        event: &mut FurnaceProcessEvent<'_>,
+        stage: FurnaceProcessStage,
+    ) {
+        let mut reply = Writer::new();
+        reply.put(&event.entity);
+        reply.put(&event.game_time);
+        reply.put(&stage);
+        let mut input = Writer::new();
+        input.put(&event.entity);
+        input.put(&MARKER.namespace.to_owned());
+        input.put(&MARKER.name.to_owned());
+        let mut marker = Writer::new();
+        marker.put(&Some(Compound::from([("present".into(), Tag::Byte(1))])));
+        let escape = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("\\{byte:02x}"))
+                .collect::<String>()
+        };
+        let check_marker = marker
+            .bytes()
+            .iter()
+            .enumerate()
+            .map(|(offset, byte)| {
+                format!(
+                    "i32.const {} i32.load8_u i32.const {byte} i32.ne if unreachable end ",
+                    16_384 + offset
+                )
+            })
+            .collect::<String>();
+        let marker_call =
+            horizon_mod_wasm::fixture::import_id("Host", "block_entity_saved_attachment").unwrap();
+        let module = wat::parse_str(format!(
+            r#"(module
+              (@custom "dylink.0" "\01\04\00\00\00\00")
+              (import "env" "memory" (memory 1))
+              (import "env" "__indirect_function_table" (table 1 funcref))
+              (import "horizon" "host" (func $host (param i32 i32 i32 i32 i32) (result i32)))
+              (import "horizon" "host_reply" (func (param i32)))
+              (func (export "horizon_layout") (result i64) i64.const {layout})
+              (data (i32.const 4096) "{input}")
+              (data (i32.const 8192) "{reply}")
+              (func (export "horizon_in") (param i32) (result i32) i32.const 512)
+              (func (export "horizon_hook") (param i32) (result i64)
+                i32.const {marker_call} i32.const 4096 i32.const {input_len}
+                i32.const 16384 i32.const 8192 call $host drop
+                {check_marker}
+                i64.const {reply_address}))"#,
+            layout = *mod_api::wire::LAYOUT,
+            input = escape(input.bytes()),
+            input_len = input.bytes().len(),
+            reply = escape(reply.bytes()),
+            reply_address = (8192u64 << 32) | reply.bytes().len() as u64,
+        ))
+        .unwrap();
+        let module = horizon_mod_wasm::fixture::module(&module).unwrap();
+        mod_api::Hooks::furnace_process(&module, host, event);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn stock_furnace_process_preserves_its_generation_and_native_inventory() {
+        run_on_guest_stack(|| {
+            for wasm in [false, true] {
+                let mods = vec![ModEntry::new("furnace-test", Box::new(Process { wasm }))];
+                mod_platform::testing::with_mods(mods.into(), || {
+                    with_game(|game| {
+                        game.options.dedicated = Some(Vec::new());
+                        game.world
+                            .chunks
+                            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                        game.build_registries();
+                        let level = game.level("minecraft:overworld").unwrap();
+                        let state = game
+                            .pack
+                            .assets
+                            .registry
+                            .default_state("minecraft:furnace")
+                            .unwrap();
+                        let [x, y, z] = POSITION;
+                        let key = (x, y, z);
+                        game.world.set(x, y, z, state).unwrap();
+                        let BlockEntity::Furnace(mut furnace) =
+                            BlockEntity::for_block("minecraft:furnace").unwrap()
+                        else {
+                            panic!("fixture must use a stock furnace");
+                        };
+                        furnace.set_input(
+                            &game.loop_context,
+                            game.recipes(),
+                            Some(ItemStack::new("minecraft:raw_iron", 2)),
+                        );
+                        furnace.items[1] = Some(ItemStack::new("minecraft:coal", 2));
+                        furnace.items[2] = Some(ItemStack::new("minecraft:iron_ingot", 61));
+                        game.world
+                            .block_entities
+                            .insert(key, BlockEntity::Furnace(furnace));
+                        let entity = game.block_entity(level, POSITION).unwrap();
+                        MARKER
+                            .set(
+                                game as &mut dyn mod_api::ServerHost,
+                                Holder::BlockEntity(POSITION),
+                                Compound::from([("present".into(), Tag::Byte(1))]),
+                            )
+                            .unwrap();
+                        game.world.game_time = 10;
+                        game.tick_furnace(key).unwrap();
+                        let Some(BlockEntity::Furnace(furnace)) =
+                            game.world.block_entities.get(&key)
+                        else {
+                            panic!("stock furnace has to survive its tick");
+                        };
+                        assert_eq!((furnace.lit_total, furnace.lit_remaining), (3200, 3200));
+                        assert_eq!(furnace.cooking_timer, 199);
+                        assert_eq!(furnace.items[1].as_ref().unwrap().count, 1);
+
+                        game.world.game_time = 11;
+                        game.tick_furnace(key).unwrap();
+                        let Some(BlockEntity::Furnace(furnace)) =
+                            game.world.block_entities.get(&key)
+                        else {
+                            panic!("stock furnace has to survive its tick");
+                        };
+                        assert_eq!(furnace.items[0].as_ref().unwrap().count, 1);
+                        assert_eq!(furnace.items[2].as_ref().unwrap().count, 64);
+                        assert_eq!(furnace.recipes_used.values().copied().sum::<u32>(), 1);
+                        assert_eq!(game.block_entity(level, POSITION), Some(entity));
+                        assert!(
+                            game.block_entity_saved_attachment(
+                                entity,
+                                MARKER.namespace,
+                                MARKER.name
+                            )
+                            .is_some()
+                        );
+
+                        game.tick_furnace(key).unwrap();
+                        let Some(BlockEntity::Furnace(furnace)) =
+                            game.world.block_entities.get(&key)
+                        else {
+                            panic!("full output does not replace the furnace");
+                        };
+                        assert_eq!(furnace.items[0].as_ref().unwrap().count, 1);
+                        assert_eq!(furnace.items[2].as_ref().unwrap().count, 64);
+                        assert_eq!(furnace.recipes_used.values().copied().sum::<u32>(), 1);
+                    })
+                });
+            }
         });
     }
 }

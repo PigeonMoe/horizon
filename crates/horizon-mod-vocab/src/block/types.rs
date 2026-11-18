@@ -36,6 +36,35 @@ pub enum BlockEntityTickReply {
     Unchanged,
 }
 
+/// The adjustment available at this point of a stock furnace tick.
+#[non_exhaustive]
+#[derive(Clone, Debug, horizon_mod_api_macros::Wire)]
+pub enum FurnaceProcessStage {
+    /// Vanilla has selected a usable fuel to consume.
+    Fuel {
+        /// The current fuel stack.
+        fuel: ItemStack,
+        /// The proposed time a single unit will burn, in game ticks.
+        duration: i32,
+    },
+    /// Vanilla has finished a recipe and is about to write its output.
+    Result {
+        /// The input stack before consuming one item.
+        input: ItemStack,
+        /// The actual item stack already in the output slot.
+        previous: Option<ItemStack>,
+        /// The proposed addition to the output slot. None cancels this completion.
+        result: Option<ItemStack>,
+    },
+    /// A cooking operation remains in progress after the native step.
+    Progress {
+        /// The proposed timer value in `0..total`.
+        elapsed: i32,
+        /// The recipe's current duration.
+        total: i32,
+    },
+}
+
 // no wire: borrowed host or registrar backend; access stays scoped to the owning call.
 /// A hook's mutable block entity payload, with a read-only type identity.
 /// The private handle cannot be constructed or taken out by a mod.

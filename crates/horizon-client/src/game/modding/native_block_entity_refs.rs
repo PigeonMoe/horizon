@@ -32,6 +32,21 @@ impl Game<'_> {
         Some((world, loaded_block_entity(world, fields.position)?))
     }
 
+    pub(super) fn block_entity_saved_attachment(
+        &self,
+        entity: BlockEntityRef,
+        namespace: &str,
+        name: &str,
+    ) -> Option<Compound> {
+        let (world, _) = self.native_block_entity_target(entity)?;
+        let [x, y, z] = entity.fields().position;
+        super::mod_api_host::saved_attachment(
+            world.block_entities.attachments((x, y, z))?,
+            namespace,
+            name,
+        )
+    }
+
     /// Find a block entity in a loaded chunk of an open level, or on a client in
     /// the level it shows. An entity taken out for its tick cannot be read in that tick.
     pub(super) fn block_entity(&self, level: LevelRef, pos: [i32; 3]) -> Option<BlockEntityRef> {

@@ -6,7 +6,7 @@ use {
     horizon_world::level::Ticks,
 };
 
-fn saved_attachment(
+pub(super) fn saved_attachment(
     attachments: &mod_api::Attachments,
     namespace: &str,
     name: &str,

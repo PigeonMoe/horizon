@@ -256,3 +256,4 @@ horizon-client game::wind::wind_charged_tests::a_wind_charged_mob_bursts_with_th
 horizon-client game::wither_star_tests::a_withers_nether_star_lives_12000_ticks lib daily game-boot
 horizon-client game::native_player_break::tests::scripted_removal_obeys_break_protection_and_never_drops_vanilla_loot lib daily resources
 horizon-client game::server_travel::changed_dimension_tests::the_end_portal_resolves_before_moving_a_player_and_can_be_vetoed lib daily resources
+horizon-client game::block_entity_ticks::furnace_process_tests::stock_furnace_process_preserves_its_generation_and_native_inventory lib daily resources
