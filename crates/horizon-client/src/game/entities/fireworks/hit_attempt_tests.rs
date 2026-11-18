@@ -1,16 +1,17 @@
 //! Real skull, rocket, command and zero-damage projectile entries.
 use super::*;
-use crate::game::native_entity_refs::tests::{bind_local_player, with_game};
+use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player, with_game};
 use horizon_client::{
     command::args::GameMode,
     motion::PlayerMotion,
     projectiles::{Hit, Projectile, ProjectileKind, ThrownType},
 };
 use mod_api::{
-    EnderPearlTeleportEvent, EntityInvulnerabilityCheckEvent, Flow, Hooks, LevelSide, ServerHost,
+    EnderPearlTeleportEvent, EntityDamageTargetPreEvent, EntityInvulnerabilityCheckEvent, Flow,
+    Hooks, LevelRandomHost, LevelSide, ServerHost,
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -42,6 +43,64 @@ fn fresh_player(game: &mut Game<'_>, mode: GameMode) {
     game.set_game_mode(GameMode::Survival);
     game.set_game_mode(mode);
     game.remove_player_effects(None);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_firework_checks_its_launcher_when_it_hurts_a_player() {
+    struct CheckLauncher(Arc<Mutex<Vec<Option<u128>>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for CheckLauncher {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.target_kind, "minecraft:player");
+            let owner = event.player.map(|player| player.uuid);
+            self.0.lock().unwrap().push(owner);
+            if owner.is_some() {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let owners = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![mod_api::ModEntry::new(
+        "firework-launcher",
+        Box::new(CheckLauncher(owners.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            fresh_player(game, GameMode::Survival);
+            bind_local_player(game, 13, 23);
+            game.lan_acting = Some(101);
+            bind_acting_guest(game);
+            game.lan_acting = None;
+            fresh_player(game, GameMode::Survival);
+            game.player.as_mut().unwrap().client_loaded = true;
+
+            let mut rocket = Rocket::remote(902, Vec3::ZERO, Vec3::ZERO);
+            rocket.explosions.push(FireworkExplosion::default());
+            rocket.owner = Some(Who::Player);
+            rocket.guest = Some(101);
+            game.explode_rocket(&rocket);
+            let health = |game: &Game<'_>| game.player.as_ref().unwrap().health.health();
+            assert_eq!(health(game), 20.0);
+            assert_eq!(owners.lock().unwrap().first(), Some(&Some(23)));
+
+            // A launcher who disconnected cannot be replaced by the active player.
+            owners.lock().unwrap().clear();
+            rocket.guest = Some(102);
+            game.explode_rocket(&rocket);
+            assert_eq!(health(game), 13.0);
+            assert_eq!(owners.lock().unwrap().first(), Some(&None));
+        });
+    });
 }
 
 #[test]

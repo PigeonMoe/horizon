@@ -3930,6 +3930,7 @@ impl Game<'_> {
         damage: f32,
         reach: Aabb,
         by: Option<FightWho>,
+        rocket: u32,
     ) {
         let Some(d) = self.dragon.as_ref() else {
             return;
@@ -3948,7 +3949,19 @@ impl Game<'_> {
             return;
         }
         let amount = super::fireworks::blast_damage(damage, from, p);
-        self.hurt_dragon(2, amount, true, by, DamageKind::Fireworks);
+        self.hurt_dragon_part_at(
+            2,
+            amount,
+            true,
+            by,
+            DamageKind::Fireworks,
+            DragonHitOrigin {
+                direct: None,
+                entity_id: Some(rocket as i32),
+                from: Some(from),
+                invulnerability_checked: false,
+            },
+        );
     }
     /// `ServerExplosion.hurtEntities`: crystals in reach are removed without another
     /// blast; explosions always hurt dragons, except one `explosion_detonate` spared.

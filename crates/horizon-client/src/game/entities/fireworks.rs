@@ -8,6 +8,7 @@ use horizon_client::{
     block_entity_render::vertex_light,
     collisions::SceneCollisions,
     entity_nbt::RocketNbt,
+    health::Attack,
     items::ItemStack,
     mesher::Vertex,
     mobs::{Damage, Species, Who},
@@ -791,16 +792,24 @@ impl Game<'_> {
         if !r.explosions.is_empty() {
             let damage = 5.0 + r.explosions.len() as f32 * 2.0;
             let from = r.position;
+            let owner = self.rocket_owner(r);
+            let owner_id = match owner {
+                Some(Who::Player) => self.own_entity_id(),
+                Some(Who::Mob(id)) => id as i32,
+                None => 0,
+            };
+            let mut attack = self.attack_of(owner_id);
+            attack.projectile = Some(r.id as i32);
             // `attachedToEntity` takes the full damage, a guest as well; every
             // other player in range and in sight takes the blast.
             let boosted = r.guest.filter(|_| r.attached);
             if r.attached && boosted.is_none() {
-                self.rocket_hurt_player(from, damage);
+                self.rocket_hurt_player(from, damage, &attack);
             } else {
-                self.rocket_blast_player(from, damage);
+                self.rocket_blast_player(from, damage, &attack);
             }
             if let Some(conn) = boosted {
-                self.as_guest(conn, |g| g.rocket_hurt_player(from, damage));
+                self.as_guest(conn, |g| g.rocket_hurt_player(from, damage, &attack));
             }
             // Every other player in the level (LAN guests, the players of a
             // server thread), each swapped in as the player.
@@ -813,7 +822,7 @@ impl Game<'_> {
                     .collect()
             });
             for conn in guests {
-                self.as_guest(conn, |g| g.rocket_blast_player(from, damage));
+                self.as_guest(conn, |g| g.rocket_blast_player(from, damage, &attack));
             }
             let hits: Vec<(u32, f32)> = {
                 let world = self.mob_world_base(&[]);
@@ -839,37 +848,26 @@ impl Game<'_> {
             };
             // damageSources().fireworks(this, getOwner()): a guest's rocket
             // hurts as theirs, and the mobs it hit answer to them.
-            let owner = r.owner;
-            if let Some(conn) = r.guest.filter(|_| owner.is_some()) {
-                let ran = self
-                    .as_guest(conn, |g| g.rocket_hurt_mobs(&hits, owner, at))
-                    .is_some();
-                if ran
-                    && let Some(host) = self.lan.as_mut()
-                    && host
-                        .hub
-                        .guest(conn)
-                        .is_some_and(|guest| guest.participates_online())
-                {
-                    for (id, _) in &hits {
-                        if self.mobs.iter().any(|m| m.id == *id) {
-                            host.mob_players.insert(*id, conn);
-                        }
-                    }
-                }
-                if !ran {
-                    self.rocket_hurt_mobs(&hits, owner, at);
-                }
-            } else {
-                self.rocket_hurt_mobs(&hits, owner, at);
+            let guest_owner = r
+                .guest
+                .filter(|_| r.owner == Some(Who::Player) && owner.is_some());
+            let ran_in_owner_turn = guest_owner.is_some_and(|conn| {
+                self.as_guest(conn, |g| {
+                    g.rocket_hurt_mobs(&hits, Some(Who::Player), at, &attack);
+                })
+                .is_some()
+            });
+            if !ran_in_owner_turn {
+                self.rocket_hurt_mobs(&hits, owner, at, &attack);
             }
             // The dragon is a living entity of its own, not one of `mobs`.
             let reach = r.bounds().inflate(Vec3::new(5.0, 5.0, 5.0));
-            let by = (owner == Some(Who::Player)).then(|| {
-                r.guest
-                    .map_or_else(|| self.acting_player(), FightWho::Guest)
+            let by = guest_owner
+                .map(FightWho::Guest)
+                .or_else(|| (owner == Some(Who::Player)).then(|| self.acting_player()));
+            self.with_attack(attack, |game| {
+                game.rocket_blast_dragon(from, damage, reach, by, r.id);
             });
-            self.rocket_blast_dragon(from, damage, reach, by);
         }
         let camera = self.eye_position().unwrap_or(at);
         let v = [r.velocity.x, r.velocity.y, r.velocity.z];
@@ -896,16 +894,17 @@ impl Game<'_> {
         let ctx = self.who_context(owner, None);
         self.post_game_event("minecraft:explode", at, ctx);
     }
-    fn rocket_hurt_mobs(&mut self, hits: &[(u32, f32)], attacker: Option<Who>, at: [f64; 3]) {
-        let attack = self.attack_of(if attacker == Some(Who::Player) {
-            self.player.as_ref().map_or(0, |p| p.entity_id)
-        } else {
-            0
-        });
+    fn rocket_hurt_mobs(
+        &mut self,
+        hits: &[(u32, f32)],
+        attacker: Option<Who>,
+        at: [f64; 3],
+        attack: &Attack,
+    ) {
         for &(id, amount) in hits {
             if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                 let hurt = m.damage(
-                    crate::game::entity::damage_level_of!(self, &attack),
+                    crate::game::entity::damage_level_of!(self, attack),
                     amount,
                     Damage::fireworks(attacker, at),
                 );
@@ -914,6 +913,15 @@ impl Game<'_> {
                 // message names them and their item.
                 if hurt && attacker == Some(Who::Player) {
                     self.remember_mob_player_credit(id);
+                    if let Some(conn) = self.lan_acting
+                        && let Some(host) = self.lan.as_mut()
+                        && host
+                            .hub
+                            .guest(conn)
+                            .is_some_and(|g| g.participates_online())
+                    {
+                        host.mob_players.insert(id, conn);
+                    }
                 }
             }
         }
@@ -1007,7 +1015,7 @@ impl Game<'_> {
     /// `FireworkRocketEntity.dealExplosionDamage` on a player that is not the rocket's
     /// `attachedToEntity`: within 5 blocks, when the rocket sees its feet or
     /// its middle (`ClipContext.Block.COLLIDER`, no fluids).
-    fn rocket_blast_player(&mut self, from: Vec3, damage: f32) {
+    fn rocket_blast_player(&mut self, from: Vec3, damage: f32, attack: &Attack) {
         // The splash query uses EntitySelector.NO_SPECTATORS. The attached
         // target is hurt directly, without that query's exclusion.
         if self.spectator() {
@@ -1030,14 +1038,14 @@ impl Game<'_> {
             })
         };
         if sees {
-            self.rocket_hurt_player(from, blast_damage(damage, from, feet));
+            self.rocket_hurt_player(from, blast_damage(damage, from, feet), attack);
         }
     }
     /// `hurtServer` with `damageSources().fireworks` from the rocket at
     /// `from`: the rocket is the direct entity, so the player is knocked away
     /// from it and the death message names it; creative and spectator
     /// players are immune.
-    fn rocket_hurt_player(&mut self, from: Vec3, amount: f32) {
+    fn rocket_hurt_player(&mut self, from: Vec3, amount: f32, attack: &Attack) {
         // Ability, spectator and death refusals belong to hurtServer, after
         // its invulnerability observation (also for an attached target).
         // No mob ever owns a rocket.
@@ -1046,7 +1054,10 @@ impl Game<'_> {
         self.combat.projectile_direct =
             Some(Text::translate("entity.minecraft.firework_rocket", &[]));
         let at = [from.x, from.y, from.z];
-        self.hurt_player_from(amount, Some(at), "minecraft:fireworks", Some(None), false);
+        let owner = (attack.attacker != 0).then_some(attack.attacker as u32);
+        self.with_attack(attack.clone(), |game| {
+            game.hurt_player_from(amount, Some(at), "minecraft:fireworks", Some(owner), false);
+        });
     }
     /// `FireworkEntityRenderer.submit`: the item (GROUND) facing the camera,
     /// lit at the rocket's light probe.
