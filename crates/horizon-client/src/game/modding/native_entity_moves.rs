@@ -7,10 +7,11 @@ use super::entity::{Entity as _, EntityHandle, with_entity_mut};
 use super::{
     Dim, Game,
     commands::{Target, entity_pitch},
+    server_travel::{LevelTeleport, TravelCause},
     vehicle_teleport::TeleportMotion,
 };
 use horizon_core::geometry::Vec3;
-use mod_api::EntityRef;
+use mod_api::{EntityRef, LivingRef, PlayerRef, PlayerTeleportError, PlayerTeleportStatus};
 
 /// `Level.isInSpawnableBounds` and `/tp`'s limits: 30,000,000 blocks out,
 /// 20,000,000 up or down.
@@ -27,6 +28,96 @@ pub(super) fn facing(yaw: f32) -> &'static str {
 }
 
 impl Game<'_> {
+    pub(super) fn player_teleport_checked(
+        &mut self,
+        player: PlayerRef,
+        dimension: &str,
+        pos: [f64; 3],
+        rotation: Option<[f32; 2]>,
+    ) -> Result<PlayerTeleportStatus, PlayerTeleportError> {
+        use PlayerTeleportError::{Denied, InTransit, InvalidDestination, Unavailable};
+
+        if !Dim::exists(dimension)
+            || !in_bounds(pos)
+            || rotation.is_some_and(|angles| angles.iter().any(|angle| !angle.is_finite()))
+        {
+            return Err(InvalidDestination);
+        }
+        let destination = Dim::from_id(dimension);
+        let origin = self.checked_teleport_origin(player).ok_or(Unavailable)?;
+        let (target, source, from, conn) = origin;
+        let in_transit = |game: &Self| {
+            conn.is_some_and(|conn| {
+                game.on_server_trip(conn)
+                    || game.level_teleports.iter().any(|entry| entry.conn == conn)
+            })
+        };
+        if in_transit(self) {
+            return Err(InTransit);
+        }
+        if !self.player_teleport_allowed(player.uuid(), (source, from), (destination, pos), "mod") {
+            return Err(Denied);
+        }
+        if self.checked_teleport_origin(player) != Some(origin) {
+            return Err(Unavailable);
+        }
+        if in_transit(self) {
+            return Err(InTransit);
+        }
+        if source == destination {
+            self.teleport_to(target, pos, rotation, true);
+            self.teleport_stops(target);
+            return (self.target_position(target) == Some(pos))
+                .then_some(PlayerTeleportStatus::Moved)
+                .ok_or(Unavailable);
+        }
+
+        let conn = conn.ok_or(Unavailable)?;
+        if !self.server_player_travel_allowed(conn, destination, TravelCause::Teleport) {
+            return Err(Denied);
+        }
+        if self.checked_teleport_origin(player) != Some(origin) {
+            return Err(Unavailable);
+        }
+        if in_transit(self) {
+            return Err(InTransit);
+        }
+        self.level_teleports.push(LevelTeleport {
+            conn,
+            dim: destination,
+            at: pos,
+            rotation,
+            vehicle: None,
+        });
+        Ok(PlayerTeleportStatus::Queued)
+    }
+
+    fn checked_teleport_origin(
+        &self,
+        player: PlayerRef,
+    ) -> Option<(Target, Dim, [f64; 3], Option<u32>)> {
+        if !self.native_authoritative()
+            || self.player(player.uuid()) != Some(player)
+            || self
+                .living_health(LivingRef::new(player.entity()))
+                .is_none_or(|health| health <= 0.0)
+        {
+            return None;
+        }
+        let target = self.native_entity_target(player.entity())?;
+        let conn = match target {
+            Target::Player => self.lan_acting,
+            Target::Guest(conn) => Some(conn),
+            _ => return None,
+        };
+        Some((
+            target,
+            self.target_level(target),
+            self.target_position(target)?,
+            conn,
+        ))
+    }
+
     /// Moves the entity to `pos` in its level (`Entity.teleportTo`), as
     /// `/tp` does: a player is placed there and told, a rider gets off. With
     /// `rotation` (yaw, pitch in degrees) it also turns. False for a position

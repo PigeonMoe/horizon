@@ -61,3 +61,33 @@ impl From<crate::BlockStateError> for PlayerWorldRefusal {
         }
     }
 }
+
+/// Whether an authorized player teleport has taken effect or is waiting for a level switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum PlayerTeleportStatus {
+    /// The player's position was updated in their current dimension.
+    Moved,
+    /// The level switch was accepted. `player_teleported` will report a successful move.
+    Queued,
+}
+
+/// Why `PlayerRef::teleport_checked` did not move or queue a player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum PlayerTeleportError {
+    /// The player is unavailable, dead, or moved while the teleport was being checked.
+    Unavailable,
+    /// The destination level, coordinates or rotation are invalid.
+    InvalidDestination,
+    /// The player is already switching levels or has a cross-level teleport queued.
+    InTransit,
+    /// A listener canceled the teleport or dimension change.
+    Denied,
+}
+
+impl crate::NoBackend for PlayerTeleportError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}

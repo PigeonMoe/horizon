@@ -216,6 +216,78 @@ struct InspectPortal {
     seen: Arc<Mutex<Vec<PortalEndpoints>>>,
 }
 
+#[test]
+#[ignore = "daily"]
+fn mod_teleport_respects_destination_veto_and_reports_after_arriving() {
+    use mod_api::{PlayerTeleportError, PlayerTeleportStatus};
+    for cancel in [true, false] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let changes: Heard = Arc::default();
+        let mods: mod_api::Mods = vec![
+            ModEntry::new(
+                "inspect-mod-teleport",
+                Box::new(InspectPortal {
+                    cancel,
+                    seen: Arc::clone(&seen),
+                }),
+            ),
+            ModEntry::new(
+                "changed-dimension",
+                Box::new(Recorder(Arc::clone(&changes))),
+            ),
+        ]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_server(ExecutionRole::DedicatedServer, |game| {
+                let from = [3.5, 64.0, 5.5];
+                let same_level = [7.5, 64.0, 5.5];
+                let other_level = [11.5, 64.0, 5.5];
+                let player = game.player(120).unwrap();
+                let teleport =
+                    |g: &mut Game<'_>, dim: Dim, to| player.teleport_checked(g, dim.id(), to, None);
+                let guest_pos = |g: &Game<'_>| g.command_guest(CONN).unwrap().position;
+
+                let expected_same = if cancel {
+                    Err(PlayerTeleportError::Denied)
+                } else {
+                    Ok(PlayerTeleportStatus::Moved)
+                };
+                assert_eq!(teleport(game, Dim::Overworld, same_level), expected_same);
+                assert_eq!(guest_pos(game), if cancel { from } else { same_level });
+                let expected_other = if cancel {
+                    Err(PlayerTeleportError::Denied)
+                } else {
+                    Ok(PlayerTeleportStatus::Queued)
+                };
+                assert_eq!(teleport(game, Dim::Nether, other_level), expected_other);
+                assert_eq!(guest_pos(game), if cancel { from } else { same_level });
+                assert!(changes.lock().unwrap().is_empty());
+                if cancel {
+                    assert!(game.level_teleports.is_empty());
+                } else {
+                    assert_eq!(
+                        teleport(game, Dim::Nether, other_level),
+                        Err(PlayerTeleportError::InTransit)
+                    );
+                    game.run_level_teleports();
+                    finish_trip(game, Dim::Nether);
+                    assert_eq!(guest_pos(game), other_level);
+                    assert_eq!(
+                        *changes.lock().unwrap(),
+                        [(Dim::Overworld.id().into(), Dim::Nether.id().into())]
+                    );
+                }
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 2);
+                assert_eq!(seen[0].0, from);
+                assert_eq!(seen[0].1, same_level);
+                assert_eq!(seen[1].1, other_level);
+                assert!(seen.iter().all(|call| call.4 == "mod"));
+            });
+        });
+    }
+}
+
 #[mod_api::__subscriptions]
 impl Hooks for InspectPortal {
     fn player_teleport_pre(

@@ -1098,6 +1098,19 @@ pub trait PlayersBackendMut {
         state: BlockState,
     ) -> Result<(), PlayerWorldRefusal>;
     /// Side: server.
+    /// Teleports a real player to the given coordinates after `player_teleport_pre` (cause
+    /// `mod`) agrees. A cross-level request also checks `entity_travel_to_dimension` and
+    /// queues the regular player level switch. Observe its `player_teleported` event before
+    /// treating an accepted queue entry as an arrival. `rotation` is yaw and pitch in degrees.
+    #[access(WorldOnly)]
+    fn player_teleport_checked(
+        &mut self,
+        player: PlayerRef,
+        dimension: &str,
+        pos: [f64; 3],
+        rotation: Option<[f32; 2]>,
+    ) -> Result<PlayerTeleportStatus, PlayerTeleportError>;
+    /// Side: server.
     /// Writes `state` at `pos` in `level` for the player, for a state the mod already chose
     /// (an editor's or a schematic's). It is `level_set_block` with a placement's flags
     /// (`NEIGHBORS | CLIENTS`, plus `KNOWN_SHAPE` when `update_neighbour_shapes` is false; without
