@@ -554,6 +554,11 @@ fn block_drops_reads_the_chest_a_players_break_removed_and_the_handle_goes_stale
             );
             let chest = [7, 64, 4];
             put_chest(game, chest);
+            game.with_level(|_, level, _| {
+                let live = mod_api::LevelHost::block_entity_at(level, chest).unwrap();
+                assert!(mod_api::LevelHost::block_entity_data(level, live).is_some());
+                assert!(mod_api::LevelHost::block_entity_at(level, [8192, 64, 4]).is_none());
+            });
             game.world.block_names.insert(
                 (chest[0], chest[1], chest[2]),
                 mod_api::Tag::String("Loot Chest".into()),
@@ -604,6 +609,7 @@ fn block_drops_reads_the_chest_a_players_break_removed_and_the_handle_goes_stale
             // After the break completes the handle is stale and nothing stays held.
             let stale = handle.lock().unwrap().expect("the event's handle");
             game.with_level(|_, level, _| {
+                assert!(mod_api::LevelHost::block_entity_at(level, chest).is_none());
                 assert!(mod_api::LevelHost::block_entity_data(level, stale).is_none());
                 assert!(
                     mod_api::LevelHost::block_entity_saved_attachment(

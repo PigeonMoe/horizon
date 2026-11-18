@@ -6,7 +6,8 @@ pub trait Hooks {
     /// the blocks at `push` one step `direction` (`[0, 1, 0]` is up; pulling
     /// when it retracts, `extending` false) and destroy those at `destroy`
     /// (NeoForge's `PistonEvent.Pre`, in `PistonBaseBlock.moveBlocks`, once its
-    /// structure resolved). Set
+    /// structure resolved). Ordinary retractions and sticky retractions
+    /// into air also dispatch with empty block lists. Set
     /// `canceled` and nothing moves, as when the structure can't; a sticky
     /// piston then retracts without its block, and clients are sent the
     /// blocks rather than the retraction to replay. Diverges from upstream: `piston_move` is renamed to

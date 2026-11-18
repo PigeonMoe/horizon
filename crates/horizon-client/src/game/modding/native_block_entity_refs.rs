@@ -36,11 +36,7 @@ impl Game<'_> {
     /// the level it shows. An entity taken out for its tick cannot be read in that tick.
     pub(super) fn block_entity(&self, level: LevelRef, pos: [i32; 3]) -> Option<BlockEntityRef> {
         let world = self.native_level_read_world(level)?;
-        loaded_block_entity(world, pos)?;
-        let generation = world.block_entities.generation(&(pos[0], pos[1], pos[2]))?;
-        Some(mod_api::__private::game::block_entity_ref(
-            level, pos, generation,
-        ))
+        block_entity_at(world, level, pos)
     }
 
     /// `block_entity`, also for a block entity taken out for its own tick: its generation
@@ -645,6 +641,19 @@ fn mod_item_slots(
         });
     }
     Ok(slots)
+}
+
+pub(super) fn block_entity_at(
+    world: &World,
+    level: LevelRef,
+    pos: [i32; 3],
+) -> Option<BlockEntityRef> {
+    loaded_block_entity(world, pos)?;
+    let [x, y, z] = pos;
+    let generation = world.block_entities.generation(&(x, y, z))?;
+    Some(mod_api::__private::game::block_entity_ref(
+        level, pos, generation,
+    ))
 }
 
 fn loaded_block_entity(world: &World, [x, y, z]: [i32; 3]) -> Option<&BlockEntity> {

@@ -380,6 +380,10 @@ impl mod_api::LevelHost for super::GameLevel<'_> {
         mod_api::__private::item_key_by_identifier(&id)
     }
 
+    fn block_entity_at(&self, pos: [i32; 3]) -> Option<mod_api::BlockEntityRef> {
+        super::native_block_entity_refs::block_entity_at(self.world, self.api_level?, pos)
+    }
+
     fn block_entity_data(&self, entity: mod_api::BlockEntityRef) -> Option<mod_api::Compound> {
         use mod_api::__private::game::Fields;
         let fields = entity.fields();

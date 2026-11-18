@@ -1333,6 +1333,12 @@ pub trait LevelHost {
         None
     }
 
+    /// Resolve a resident block entity in a loaded chunk of this level. A
+    /// removed entity's drop snapshot is only available through its event handle.
+    fn block_entity_at(&self, _pos: [i32; 3]) -> Option<crate::BlockEntityRef> {
+        None
+    }
+
     /// Read a block entity's saved data without identity metadata from this level.
     /// Stale generations and handles from another level or world return None.
     fn block_entity_data(&self, _entity: crate::BlockEntityRef) -> Option<crate::Compound> {

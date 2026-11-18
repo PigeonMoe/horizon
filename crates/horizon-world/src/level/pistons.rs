@@ -851,6 +851,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.game_event(pos, "minecraft:block_activate");
         } else if a == 1 || a == 2 {
             self.moving_piston_final_tick(rel(pos, direction));
+            if !sticky
+                && !self.level.is_client_side()
+                && !self
+                    .level
+                    .allow_piston_move(pos, direction.opposite(), false, &[], &[])
+            {
+                return false;
+            }
             let moving = self.moving_piston_state(direction, sticky);
             self.set_block(pos, moving, 276);
             let piston_default = b.table.set_dir(
@@ -900,6 +908,19 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         )
                         || (b.piston_reaction(moving_state) != PushReaction::PushPull && !is_piston)
                     {
+                        if a == 1
+                            && b.is_air(moving_state)
+                            && !self.level.is_client_side()
+                            && !self.level.allow_piston_move(
+                                pos,
+                                direction.opposite(),
+                                false,
+                                &[],
+                                &[],
+                            )
+                        {
+                            return false;
+                        }
                         self.remove_block(rel(pos, direction), false);
                     } else {
                         refused = self

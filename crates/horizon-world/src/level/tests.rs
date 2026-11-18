@@ -322,17 +322,18 @@ impl LevelAccess for TestLevel {
     }
     fn allow_piston_move(
         &self,
-        _piston: BlockPos,
+        piston: BlockPos,
         direction: Direction,
         _extending: bool,
         push: &[BlockPos],
         destroy: &[BlockPos],
     ) -> bool {
-        !push
-            .iter()
-            .flat_map(|&p| [p, update::rel(p, direction)])
-            .chain(destroy.iter().copied())
-            .any(|p| self.guarded.contains(&p))
+        !self.guarded.contains(&piston)
+            && !push
+                .iter()
+                .flat_map(|&p| [p, update::rel(p, direction)])
+                .chain(destroy.iter().copied())
+                .any(|p| self.guarded.contains(&p))
     }
     fn before_fire_odds(
         &self,
@@ -2497,6 +2498,48 @@ fn refused_piston_move_leaves_the_piston_retracted() {
     assert_eq!(w.get(BlockPos::new(1, 1, 0)), dirt);
     assert_eq!(w.get(BlockPos::new(2, 1, 0)), w.b().air());
     assert!(w.ticks.moving_pistons.is_empty());
+}
+
+#[test]
+fn a_guarded_ordinary_piston_refuses_its_empty_retraction() {
+    let mut w = world!();
+    w.floor(0, 10, "stone");
+    let base = BlockPos::new(0, 1, 0);
+    let head = BlockPos::new(1, 1, 0);
+    let power = BlockPos::new(-1, 1, 0);
+    let piston = w.id("piston", &[("facing", "east")]);
+    let block = w.id("redstone_block", &[]);
+    let air = w.b().air();
+    w.set(base, piston);
+    w.set(power, block);
+    for _ in 0..4 {
+        w.full_tick();
+    }
+    let extended = w.get(head);
+    assert_eq!(w.prop(base, "extended"), "true");
+    assert_ne!(extended, air);
+    w.level.guarded.insert(base);
+    w.level.events.clear();
+    w.set(power, air);
+    for _ in 0..4 {
+        w.full_tick();
+    }
+    assert_eq!(w.prop(base, "extended"), "true");
+    assert_eq!(w.get(head), extended);
+    assert!(
+        !w.level
+            .events
+            .iter()
+            .any(|event| matches!(event, LevelEvent::BlockEntityEvent { pos, .. } if *pos == base))
+    );
+    w.level.guarded.clear();
+    w.set(power, block);
+    w.set(power, air);
+    for _ in 0..4 {
+        w.full_tick();
+    }
+    assert_eq!(w.prop(base, "extended"), "false");
+    assert_eq!(w.get(head), air);
 }
 
 #[test]
