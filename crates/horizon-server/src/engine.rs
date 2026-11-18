@@ -20,6 +20,7 @@ pub fn check_starts(program: &Path) -> Result<(), String> {
     let output = command
         .arg("--help")
         .env_remove(horizon_server_launch::config::PANEL_ACCESS_KEY_ENV)
+        .env_remove("HORIZON_PIGEONAUTH_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

@@ -49,7 +49,11 @@ impl Game<'_> {
             self.note_stopping(state.lists.lock().unwrap().stop);
             let reply = match request.line.trim().split_once(' ') {
                 _ if request.line.trim() == "server-status" => self.server_status(state),
-                _ if request.line.trim() == "server-mods" => server_mods(),
+                _ if request.line.trim() == "server-mods" => server_mods(
+                    self.lan
+                        .as_ref()
+                        .is_some_and(|host| host.hub.lan.shared.config.pigeon_auth.is_some()),
+                ),
                 // A proxy reading whether it may send players here (transfer.rs).
                 _ if request.line.trim() == "transfer-status" => self.transfer_status(),
                 Some(("server-events", since)) => {
@@ -177,11 +181,15 @@ impl Game<'_> {
 }
 
 /// Reads the same package inventory as registration and the runtime Host.
-fn server_mods() -> Value {
-    let mods: Vec<_> = mod_api::__private::loaded_mods()
+fn server_mods(pigeon_auth: bool) -> Value {
+    use horizon_client::lan::pigeon_auth::{MOD_ID, VERSION};
+    let mut mods: Vec<_> = mod_api::__private::loaded_mods()
         .iter()
         .map(|package| json!({ "id": package.id(), "version": package.version() }))
         .collect();
+    if pigeon_auth && !mods.iter().any(|row| row["id"] == MOD_ID) {
+        mods.push(json!({ "id": MOD_ID, "version": VERSION }));
+    }
     json!({ "mods": mods })
 }
 
@@ -212,7 +220,7 @@ mod tests {
     fn server_mods_uses_canonical_inventory_order() {
         mod_platform::__private::with_test_packages(&["second", "first"], || {
             assert_eq!(
-                server_mods(),
+                server_mods(false),
                 json!({"mods": [
                     {"id": "second", "version": "1"},
                     {"id": "first", "version": "1"},
@@ -220,7 +228,7 @@ mod tests {
             );
         });
         mod_platform::__private::with_test_packages(&[], || {
-            assert_eq!(server_mods(), json!({"mods": []}));
+            assert_eq!(server_mods(false), json!({"mods": []}));
         });
     }
 

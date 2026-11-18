@@ -13,6 +13,7 @@ use super::{
     data::{CORE_PACK, SyncData},
     forwarding,
     io_pool::{self, Session as _},
+    pigeon_auth,
 };
 use crate::raw_payloads::{Side, Transport};
 use horizon_protocol::{
@@ -295,6 +296,7 @@ pub struct PlayerSender {
     /// The `horizon:menu_extra` payload layout the client reads: its revision answer,
     /// 0 for one that did not answer (the legacy layout, a menu of a block only).
     pub menu_extra_rev: u8,
+    pub(super) pigeon_auth_prompt: bool,
 }
 #[derive(Clone)]
 enum To {
@@ -367,6 +369,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            pigeon_auth_prompt: false,
         }
     }
     #[cfg(test)]
@@ -405,6 +408,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            pigeon_auth_prompt: false,
         };
         (sender, move || inspect.queued_contents())
     }
@@ -422,6 +426,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            pigeon_auth_prompt: false,
         }
     }
     /// The bytes received from and sent to the client on the wire so far.
@@ -809,7 +814,12 @@ fn serve_connection(
                 );
                 return Ok(());
             }
-            serve_login(c, address, &shared, counted)
+            let offline = shared
+                .config
+                .pigeon_auth
+                .as_ref()
+                .filter(|auth| !c.is_memory() && auth.offline_host(&intention.host));
+            serve_login(c, address, &shared, counted, offline.map(Arc::as_ref))
         }
         other => Err(format!("unknown intent {other}")),
     }
@@ -946,37 +956,7 @@ fn authenticate(
     address: std::net::SocketAddr,
     user: &str,
 ) -> Result<Result<(u128, Vec<login::Property>), String>, String> {
-    let e = |e: horizon_protocol::Error| e.to_string();
-    let mut challenge = [0u8; 4];
-    horizon_protocol::crypto::random_bytes(&mut challenge).map_err(e)?;
-    c.send(
-        &login::Clientbound::Hello(login::Hello {
-            server_id: String::new(),
-            public_key: online.public_der.clone(),
-            challenge: challenge.to_vec(),
-            should_authenticate: true,
-        })
-        .encode(),
-    )
-    .map_err(e)?;
-    let (id, payload) = c.recv().map_err(e)?;
-    let key = match login::Serverbound::decode(id, &payload).map_err(e)? {
-        login::Serverbound::Key(k) => k,
-        _ => return Err("Unexpected packet during login".into()),
-    };
-    // ServerboundKeyPacket.isChallengeValid and getSecretKey.
-    let protocol_error = || "Protocol error".to_owned();
-    if online.key.decrypt(&key.challenge).ok().as_deref() != Some(&challenge[..]) {
-        return Err(protocol_error());
-    }
-    let secret: [u8; 16] = online
-        .key
-        .decrypt(&key.key)
-        .ok()
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(protocol_error)?;
-    let digest = server_hash("", &secret, &online.public_der);
-    c.enable_encryption(&secret);
+    let digest = encrypt(c, online, true)?;
     let thread = format!(
         "User Authenticator #{}",
         AUTHENTICATORS.fetch_add(1, Ordering::Relaxed) + 1
@@ -1026,11 +1006,51 @@ fn authenticate(
     }
 }
 
+/// Both the verified and password routes use the encrypted Minecraft transport.
+fn encrypt(
+    c: &mut Connection,
+    online: &super::OnlineMode,
+    should_authenticate: bool,
+) -> Result<String, String> {
+    let e = |e: horizon_protocol::Error| e.to_string();
+    let mut challenge = [0u8; 4];
+    horizon_protocol::crypto::random_bytes(&mut challenge).map_err(e)?;
+    c.send(
+        &login::Clientbound::Hello(login::Hello {
+            server_id: String::new(),
+            public_key: online.public_der.clone(),
+            challenge: challenge.to_vec(),
+            should_authenticate,
+        })
+        .encode(),
+    )
+    .map_err(e)?;
+    let (id, payload) = c.recv().map_err(e)?;
+    let key = match login::Serverbound::decode(id, &payload).map_err(e)? {
+        login::Serverbound::Key(k) => k,
+        _ => return Err("Unexpected packet during login".into()),
+    };
+    // ServerboundKeyPacket.isChallengeValid and getSecretKey.
+    let protocol_error = || "Protocol error".to_owned();
+    if online.key.decrypt(&key.challenge).ok().as_deref() != Some(&challenge[..]) {
+        return Err(protocol_error());
+    }
+    let secret: [u8; 16] = online
+        .key
+        .decrypt(&key.key)
+        .ok()
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(protocol_error)?;
+    c.enable_encryption(&secret);
+    Ok(server_hash("", &secret, &online.public_der))
+}
+
 fn serve_login(
     mut c: Connection,
     address: std::net::SocketAddr,
     shared: &Arc<Shared>,
     counted: Option<super::Counted>,
+    offline: Option<&pigeon_auth::Config>,
 ) -> Result<(), String> {
     let e = |e: horizon_protocol::Error| e.to_string();
     let (id, payload) = c.recv().map_err(e)?;
@@ -1083,7 +1103,25 @@ fn serve_login(
         .as_ref()
         .filter(|(owner_name, _)| c.is_memory() && hello.name.eq_ignore_ascii_case(owner_name))
         .map(|(owner_name, uuid)| (owner_name.clone(), *uuid));
+    let mut pending = None;
     let (uuid, properties) = match (online, forwarding) {
+        (Some(online), _) if let Some(config) = offline => {
+            let (uuid, form) = match pigeon_auth::begin(config, &name, address) {
+                Ok(identity) => identity,
+                Err(message) => {
+                    login_disconnect(&mut c, &message.tag());
+                    return Ok(());
+                }
+            };
+            encrypt(&mut c, online, false)?;
+            pending = Some(pigeon_auth::Pending {
+                config,
+                address,
+                form,
+                admitted: false,
+            });
+            (uuid, Vec::new())
+        }
         (Some(online), _) => {
             match authenticate(&mut c, shared, online, &hello.name, address, &user) {
                 Ok(Ok(profile)) => profile,
@@ -1144,7 +1182,9 @@ fn serve_login(
     };
     // verifyLoginAndFinishConnectionSetup: PlayerList.canPlayerLogin, then
     // duplicates and a full server.
-    if let Some(reason) = shared.try_admit(address, uuid, &name) {
+    if pending.is_none()
+        && let Some(reason) = shared.try_admit(address, uuid, &name)
+    {
         let text = refuse(&mut c, shared, "Server thread", &user, &reason);
         lost(shared, &user, &text);
         return Ok(());
@@ -1170,20 +1210,49 @@ fn serve_login(
             );
         }
     };
-    let result = login_and_configure(&mut c, shared, uuid, &name, &user, properties);
+    let premium = pending.is_none() && online.is_some();
+    let pigeon_auth_prompt = premium
+        && shared.config.pigeon_auth.as_ref().is_some_and(|config| {
+            matches!(
+                config.request("observe", &name, uuid, address.ip(), None),
+                Ok(pigeon_auth::Decision::Prompt)
+            )
+        });
+    let result = login_and_configure(
+        &mut c,
+        shared,
+        uuid,
+        &name,
+        &user,
+        properties,
+        pending.as_mut(),
+    );
+    let admitted = pending.as_ref().is_none_or(|pending| pending.admitted);
     match result {
         Ok(Some(parts)) => {
-            play(c, shared, parts, address, counted, expected.is_some());
+            play(
+                c,
+                shared,
+                parts,
+                address,
+                counted,
+                expected.is_some(),
+                pigeon_auth_prompt,
+            );
             Ok(())
         }
         Ok(None) => {
             put_back();
-            shared.release(uuid);
+            if admitted {
+                shared.release(uuid);
+            }
             Ok(())
         }
         Err(err) => {
             put_back();
-            shared.release(uuid);
+            if admitted {
+                shared.release(uuid);
+            }
             // ServerConfigurationPacketListenerImpl.onDisconnect.
             let profile = format!("{name} ({})", uuid_string(uuid));
             lost(shared, &profile, "Disconnected");
@@ -1240,6 +1309,7 @@ fn login_and_configure(
     name: &str,
     user: &str,
     properties: Vec<login::Property>,
+    pending: Option<&mut pigeon_auth::Pending<'_>>,
 ) -> Result<Option<Parts>, String> {
     let e = |e: horizon_protocol::Error| e.to_string();
     // ServerLoginPacketListenerImpl: memory connections are not compressed.
@@ -1273,6 +1343,32 @@ fn login_and_configure(
             return Ok(None);
         }
         _ => return Err("unexpected packet during login".into()),
+    }
+    let mut buffered = std::collections::VecDeque::new();
+    if let Some(pending) = pending {
+        if c.older_client().is_some() {
+            let reason = horizon_core::nbt::Tag::String(super::OLDER_CLIENTS_UNFINISHED.into());
+            c.send(&cfg::Clientbound::Disconnect(cfg::Disconnect { reason }).encode())
+                .map_err(e)?;
+            return Ok(None);
+        }
+        match pending.authenticate(c, name, uuid) {
+            Ok(packets) => buffered = packets,
+            Err(message) => {
+                let reason = message.tag();
+                c.send(&cfg::Clientbound::Disconnect(cfg::Disconnect { reason }).encode())
+                    .map_err(e)?;
+                return Ok(None);
+            }
+        }
+        // Only someone who supplied the correct password may acquire the UUID,
+        // evict a duplicate, or trigger any mod or world callbacks.
+        if let Some(reason) = shared.try_admit(pending.address, uuid, name) {
+            c.send(&cfg::Clientbound::Disconnect(cfg::Disconnect { reason }).encode())
+                .map_err(e)?;
+            return Ok(None);
+        }
+        pending.admitted = true;
     }
     c.reader.set_read_timeout(Some(READ_TIMEOUT)).map_err(e)?;
     // Configuration.
@@ -1343,7 +1439,10 @@ fn login_and_configure(
     let mut info = ClientInformation::new(10);
     let mut brand = String::from("vanilla");
     let known_pack = loop {
-        let (id, payload) = c.recv().map_err(e)?;
+        let (id, payload) = match buffered.pop_front() {
+            Some(packet) => packet,
+            None => c.recv().map_err(e)?,
+        };
         let Some(packet) = receive_configuration(
             c,
             id,
@@ -1995,6 +2094,7 @@ fn play(
     address: std::net::SocketAddr,
     counted: Option<super::Counted>,
     expected: bool,
+    pigeon_auth_prompt: bool,
 ) {
     let Some(conn) = shared.next_id() else {
         shared.release(parts.uuid);
@@ -2028,6 +2128,7 @@ fn play(
         announced: parts.channels.announced.clone().unwrap_or_default(),
         viewed_levels: parts.channels.viewed_levels.answer(),
         menu_extra_rev: parts.channels.menu_extra_rev.revision(),
+        pigeon_auth_prompt,
     };
     let required_pack = shared
         .config
@@ -2036,6 +2137,8 @@ fn play(
         .is_some_and(|p| p.required);
     let session = PlayConn {
         payload_sender: sender.clone(),
+        pigeon_auth_ip: address.ip(),
+        pigeon_auth_last_attempt: None,
         payload_transport: parts.payload_transport,
         conn,
         shared: shared.clone(),
@@ -2081,6 +2184,8 @@ fn play(
 /// A player's play state on its network thread.
 struct PlayConn {
     payload_sender: PlayerSender,
+    pigeon_auth_ip: std::net::IpAddr,
+    pigeon_auth_last_attempt: Option<Instant>,
     payload_transport: Arc<Transport>,
     conn: u32,
     shared: Arc<Shared>,
@@ -2100,6 +2205,41 @@ struct PlayConn {
     undrained: Arc<Undrained>,
 }
 impl PlayConn {
+    fn set_offline_password(&mut self, click: &cfg::CustomClickAction, now: Instant) {
+        if !self.payload_sender.pigeon_auth_prompt
+            || self
+                .pigeon_auth_last_attempt
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(8))
+        {
+            return;
+        }
+        let (Some(config), Some(password)) = (
+            self.shared.config.pigeon_auth.clone(),
+            pigeon_auth::password(click),
+        ) else {
+            return;
+        };
+        self.pigeon_auth_last_attempt = Some(now);
+        let (name, uuid, ip, sender) = (
+            self.name.clone(),
+            self.uuid,
+            self.pigeon_auth_ip,
+            self.payload_sender.clone(),
+        );
+        // Keep password hashing and the local HTTP wait off the shared network loops.
+        let result = std::thread::Builder::new()
+            .name("pigeonauth-set".into())
+            .spawn(move || {
+                pigeon_auth::send_set_result(
+                    &sender,
+                    config.request("set", &name, uuid, ip, Some(&password)),
+                );
+            });
+        if result.is_err() {
+            pigeon_auth::send_set_result(&self.payload_sender, Err(pigeon_auth::UNAVAILABLE));
+        }
+    }
+
     /// `IntegratedServer.isSingleplayerOwner`: the integrated server's own player,
     /// by name (ignoring case).
     fn is_owner(&self) -> bool {
@@ -2172,6 +2312,10 @@ impl io_pool::Session for PlayConn {
                 translatable("multiplayer.disconnect.unexpected_query_response", &[]),
                 "Unexpected custom data from client".to_owned(),
             )),
+            Ok(play::Serverbound::CustomClickAction(click)) if click.id == pigeon_auth::SET => {
+                self.set_offline_password(&click, now);
+                Verdict::Go
+            }
             Ok(p) => {
                 let p = match p {
                     play::Serverbound::CustomPayload(payload) => {
@@ -3562,6 +3706,8 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let mut c = PlayConn {
+            pigeon_auth_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+            pigeon_auth_last_attempt: None,
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3700,6 +3846,8 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let conn = |uuid: u128, pending: Option<i64>| PlayConn {
+            pigeon_auth_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+            pigeon_auth_last_attempt: None,
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3753,6 +3901,8 @@ mod tests {
         };
         let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
         let conn = |uuid: u128| PlayConn {
+            pigeon_auth_ip: std::net::Ipv4Addr::LOCALHOST.into(),
+            pigeon_auth_last_attempt: None,
             payload_sender: PlayerSender::disabled(),
             payload_transport: Transport::empty(),
             conn: 1,
@@ -3825,6 +3975,7 @@ mod outgoing_budget_tests {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            pigeon_auth_prompt: false,
         }
     }
     #[test]

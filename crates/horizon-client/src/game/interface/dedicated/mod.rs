@@ -1059,8 +1059,10 @@ impl Game<'_> {
         *USER_CACHE.lock().unwrap() = Some(cache);
         // Services.create: the services' public keys, fetched in the
         // background (they check players' chat keys).
+        let pigeon_auth =
+            horizon_client::lan::pigeon_auth::Config::from_env(props.online_mode)?.map(Arc::new);
         let secure_chat = Arc::new(horizon_client::lan::SecureChat::new(
-            props.enforce_secure_profile && props.online_mode,
+            props.enforce_secure_profile && props.online_mode && pigeon_auth.is_none(),
             || {
                 let discovery = profiles::discovery_url();
                 profiles::fetch_profile_key_keys(&discovery).unwrap_or_else(|e| {
@@ -1249,6 +1251,7 @@ impl Game<'_> {
             })),
             gate: Some(gate),
             online,
+            pigeon_auth,
             forwarding_secret,
             arrivals: transfers.as_ref().map(|t| t.expected.clone()),
             log: Some(NetLog {

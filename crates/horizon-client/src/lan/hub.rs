@@ -1562,6 +1562,9 @@ impl Hub {
             motd: literal(&self.lan.shared.motd()),
             icon: self.lan.shared.config.favicon.clone(),
         }));
+        if g.sender.pigeon_auth_prompt {
+            super::pigeon_auth::send_prompt(&g.sender);
+        }
         // The player list: everyone already here, then the newcomer to all.
         let mut entries = Vec::new();
         // Players a native mod hid from the newcomer stay out of its list,

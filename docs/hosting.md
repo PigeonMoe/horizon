@@ -21,6 +21,7 @@ plan are in [server.md](server.md).
 - **An offline server** (`online_mode = false`) never checks accounts: anyone who reaches it can join under
   any name. Keep it on your LAN or a tailnet (Tailscale, ZeroTier), or share it only with friends you trust.
   A Horizon game started without a session (no network at Play) can join only such a server.
+- **PigeonAuth** on the PigeonMoe `Horizon` branch offers verified and password-protected login on two DNS names. [PigeonAuth setup](pigeonauth.md).
 - **Secure chat** works as on vanilla's server: in online mode, vanilla clients and Horizon's (Nightly
   2026-11-01 and newer) sign their chat, and with `enforce-secure-profile=true` (the default) unsigned chat is
   refused. On an offline server, or for a player without a chat session, chat stays unsigned and shows as not

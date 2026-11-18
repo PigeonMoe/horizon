@@ -41,6 +41,7 @@ pub mod menu;
 pub mod menu_extra_rev;
 #[cfg(test)]
 mod payload_bounds_tests;
+pub mod pigeon_auth;
 pub mod player_shown;
 pub mod playerdata;
 pub mod prediction;
@@ -273,6 +274,8 @@ pub struct NetConfig {
     pub gate: Option<LoginGate>,
     /// Online mode: players are authenticated (a LAN world's when its host is signed in).
     pub online: Option<Arc<OnlineMode>>,
+    /// The explicitly configured dedicated PigeonAuth service.
+    pub pigeon_auth: Option<Arc<pigeon_auth::Config>>,
     /// Behind a Velocity proxy: the secret its forwarded player information is signed with. Only an offline
     /// server (the proxy authenticates) uses it; without it a login is the plain offline one.
     pub forwarding_secret: Option<Vec<u8>>,
@@ -353,6 +356,7 @@ impl NetConfig {
             bypasses_limit: None,
             gate: None,
             online: None,
+            pigeon_auth: None,
             forwarding_secret: None,
             arrivals: None,
             log: None,
