@@ -1852,6 +1852,17 @@ impl Game<'_> {
             self.spawn_explosion_drops(drops);
         }
         if fire {
+            // BlockIgniteEvent uses the direct entity, so a projectile or primed TNT
+            // must not inherit its owner's player permissions.
+            let player = start
+                .source
+                .and_then(|id| self.entity(id))
+                .and_then(|entity| match self.native_entity_target(entity) {
+                    Some(super::commands::Target::Player) => self.player_uuid_of(self.lan_acting),
+                    Some(super::commands::Target::Guest(conn)) => self.player_uuid_of(Some(conn)),
+                    _ => None,
+                })
+                .map(horizon_client::lan::playerdata::ints_uuid);
             for &pos in targets.iter() {
                 if self.world.random.next_int_bound(3).unwrap_or(1) == 0
                     && self
@@ -1864,12 +1875,8 @@ impl Game<'_> {
                         .get(self.world.block(pos[0], pos[1] - 1, pos[2]))
                         .solid_render
                 {
-                    // BaseFireBlock.getState: soul fire on its base blocks,
-                    // fire shaped by its neighbours elsewhere.
                     let at = BlockPos::new(pos[0], pos[1], pos[2]);
-                    let fire =
-                        self.with_level(|b, level, ticks| b.fire_state_for(level, ticks, at));
-                    self.level_set(pos, fire)?;
+                    self.ignite_block_from(at, "explosion", player)?;
                 }
             }
         }

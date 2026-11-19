@@ -6020,9 +6020,7 @@ impl Game<'_> {
                             .is_air(self.world.block(fire[0], fire[1], fire[2]))
                     {
                         let at = BlockPos::new(fire[0], fire[1], fire[2]);
-                        let state =
-                            self.with_level(|b, level, ticks| b.fire_state_for(level, ticks, at));
-                        self.level_set(fire, state)?;
+                        self.ignite_block_from(at, "fireball", None)?;
                     }
                 }
                 Hit::None => {}

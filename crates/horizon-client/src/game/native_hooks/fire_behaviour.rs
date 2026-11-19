@@ -1,14 +1,43 @@
 use super::*;
 
+impl Game<'_> {
+    /// Replace a checked air block with fire, after reporting the actual ignition source.
+    pub(in crate::game) fn ignite_block_from(
+        &mut self,
+        pos: BlockPos,
+        cause: &'static str,
+        player: Option<u128>,
+    ) -> horizon_client::Result<()> {
+        let state = self.with_level(|behaviour, level, ticks| {
+            level
+                .block_ignite_allowed_by(pos, cause, player)
+                .then(|| behaviour.fire_state_for(level, ticks, pos))
+        });
+        if let Some(state) = state {
+            self.level_set([pos.x, pos.y, pos.z], state)?;
+        }
+        Ok(())
+    }
+}
+
 /// The level's side of fire and lava ignition (`FireBlock`, `LavaFluid`), which `GameLevel`'s
 /// `LevelAccess` forwards to: the mods' answers on an authoritative server, and the level's own
 /// facts. A client's copy of the level asks no mod.
 impl GameLevel<'_> {
     /// `allow_block_ignite`: the `block_ignite` hook's cancel.
     pub(in crate::game) fn block_ignite_allowed(&self, pos: BlockPos, cause: &'static str) -> bool {
+        self.block_ignite_allowed_by(pos, cause, self.native_player)
+    }
+
+    fn block_ignite_allowed_by(
+        &self,
+        pos: BlockPos,
+        cause: &'static str,
+        player: Option<u128>,
+    ) -> bool {
         let mut cancel = false;
         if self.native_authoritative {
-            self.native_block_ignite(self.dimension, self.native_player, pos, cause, &mut cancel);
+            self.native_block_ignite(self.dimension, player, pos, cause, &mut cancel);
         }
         !cancel
     }

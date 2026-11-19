@@ -3,9 +3,10 @@
 
 pub trait Hooks {
     /// On an authoritative server, fire is about to be placed at `pos` by
-    /// flint and steel, a fire charge, lava, lightning or fire spread. Set
-    /// `player` is the acting server player when there is one. Set `cancel` to
-    /// leave the position unchanged.
+    /// flint and steel, a fire charge, lava, lightning, fire spread or an
+    /// explosion. `player` is the acting server player when there is one, or
+    /// the direct source player for an explosion. Set `cancel` to leave the
+    /// position unchanged.
     #[hook(
         side = "server",
         contract = "cancel",

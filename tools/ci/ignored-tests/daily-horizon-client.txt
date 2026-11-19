@@ -92,6 +92,7 @@ horizon-client game::native_explosion_resistance_tests::a_block_state_reads_the_
 horizon-client game::native_explosion_resistance_tests::a_cell_reads_what_a_blast_meets_there lib daily resources
 horizon-client game::native_explosion_resistance_tests::a_reads_calculator_is_the_one_the_blasts_rays_use lib daily resources
 horizon-client game::native_explosion_resistance_tests::a_two_layer_box_reads_y_after_z_after_x lib daily resources
+horizon-client game::native_explosions_tests::a_blast_checks_individual_ignitions_and_the_direct_player lib daily resources
 horizon-client game::native_explosions_tests::a_blast_that_keeps_blocks_still_lights_fire lib daily resources
 horizon-client game::native_explosions_tests::a_block_particle_weight_past_the_packets_int_explodes_nothing lib daily resources
 horizon-client game::native_explosions_tests::a_calculator_that_damages_no_entities_leaves_health_while_blocks_break lib daily resources
@@ -105,6 +106,7 @@ horizon-client game::native_explosions_tests::a_players_firework_rocket_credits_
 horizon-client game::native_explosions_tests::a_players_fishing_bobber_credits_the_player lib daily resources
 horizon-client game::native_explosions_tests::a_players_thrown_trident_credits_the_player lib daily resources
 horizon-client game::native_explosions_tests::a_radius_of_48_breaks_a_block_40_blocks_from_the_centre lib daily resources
+horizon-client game::native_explosions_tests::a_small_fireball_checks_fire_protection_without_inheriting_its_shooter lib daily resources
 horizon-client game::native_explosions_tests::a_trigger_blast_presses_a_button_and_breaks_nothing lib daily resources
 horizon-client game::native_explosions_tests::a_wind_charge_source_brings_its_tag_calculator_unless_a_calculator_is_passed lib daily resources
 horizon-client game::native_explosions_tests::an_invalid_source_explodes_nothing lib daily resources

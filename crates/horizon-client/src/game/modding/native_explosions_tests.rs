@@ -472,6 +472,130 @@ fn a_blast_that_keeps_blocks_still_lights_fire() {
 
 #[test]
 #[ignore = "daily"]
+fn a_blast_checks_individual_ignitions_and_the_direct_player() {
+    use mod_api::{BlockIgniteEvent, LevelDimension, LevelHost};
+
+    type Ignitions = Vec<([i32; 3], Option<u128>)>;
+    struct ProtectFire(Arc<Mutex<Ignitions>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectFire {
+        fn block_ignite(&self, _: &dyn LevelHost, event: &mut BlockIgniteEvent<'_>) -> Flow {
+            assert!(matches!(event.dimension, LevelDimension::Overworld));
+            assert_eq!(event.cause, "explosion");
+            let pos = [event.pos.x, event.pos.y, event.pos.z];
+            self.0.lock().unwrap().push((pos, event.player));
+            if pos[0] < 8 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    run_on_guest_stack(|| {
+        const PLAYER_ID: u32 = 55;
+        const PLAYER_UUID: u128 = 177;
+        for direct in [false, true] {
+            let ignitions = Arc::new(Mutex::new(Vec::new()));
+            let mods = vec![ModEntry::new(
+                "protect-fire",
+                Box::new(ProtectFire(ignitions.clone())),
+            )]
+            .into();
+            mod_platform::testing::with_mods(mods, || {
+                with_game(|game| {
+                    floor(game);
+                    game.player = Some(
+                        PlayerMotion::new(game.motion, Vec3::new(0.5, 104.0, 0.5)).unwrap(),
+                    );
+                    bind_local_player(game, PLAYER_ID, PLAYER_UUID);
+                    let blast = Blast {
+                        source: direct.then(|| game.entity(PLAYER_ID).unwrap()),
+                        fire: true,
+                        interaction: ExplosionInteraction::None,
+                        ..Blast::at([8.5, 80.5, 8.5], 4.0)
+                    };
+                    explode(game, Via::Native, blast, Ok(()));
+                    let heard = ignitions.lock().unwrap();
+                    assert!(heard.iter().any(|(pos, _)| pos[0] < 8));
+                    assert!(heard.iter().any(|(pos, _)| pos[0] >= 8));
+                    assert!(
+                        heard
+                            .iter()
+                            .all(|(_, player)| *player == direct.then_some(PLAYER_UUID))
+                    );
+                    for (pos, _) in heard.iter() {
+                        let expected = if pos[0] < 8 {
+                            "minecraft:air"
+                        } else {
+                            "minecraft:fire"
+                        };
+                        assert_eq!(name(game, *pos), expected, "{pos:?}");
+                    }
+                    assert_eq!(stone(game), 256);
+                });
+            });
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_small_fireball_checks_fire_protection_without_inheriting_its_shooter() {
+    use horizon_client::projectiles::{Hit, Projectile, ProjectileKind};
+    use mod_api::{BlockIgniteEvent, LevelDimension, LevelHost};
+
+    struct ProtectFire;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectFire {
+        fn block_ignite(&self, _: &dyn LevelHost, event: &mut BlockIgniteEvent<'_>) -> Flow {
+            assert!(matches!(event.dimension, LevelDimension::Overworld));
+            assert_eq!(event.cause, "fireball");
+            assert_eq!(event.player, None);
+            assert_eq!(event.pos.y, 80);
+            if event.pos.x < 8 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let mods = vec![ModEntry::new("protect-fireball", Box::new(ProtectFire))].into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            floor(game);
+            game.player = Some(
+                PlayerMotion::new(game.motion, Vec3::new(0.5, 104.0, 0.5)).unwrap(),
+            );
+            bind_local_player(game, 55, 177);
+            for (x, expected) in [(2, "minecraft:air"), (10, "minecraft:fire")] {
+                let pos = Vec3::new(f64::from(x) + 0.5, 80.0, 2.5);
+                let shot = Projectile::fireball(
+                    ProjectileKind::SmallFireball,
+                    pos,
+                    Some(Who::Player),
+                    [0.0, -1.0, 0.0],
+                );
+                game.projectile_hit(
+                    &shot,
+                    Hit::Block {
+                        pos: [x, 79, 2],
+                        face: [0, 1, 0],
+                        at: pos,
+                    },
+                )
+                .unwrap();
+                assert_eq!(name(game, [x, 80, 2]), expected);
+            }
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn an_invalid_source_explodes_nothing() {
     run_on_guest_stack(|| {
         for via in BOTH {
