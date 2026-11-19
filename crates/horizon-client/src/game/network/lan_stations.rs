@@ -648,32 +648,22 @@ impl Game<'_> {
         }) else {
             return;
         };
-        let Some(enchanted) = self.table_enchant(seed, button, gs.menu.data[button], &item) else {
+        let need = button as i32 + 1;
+        // Resolve the mutable proposal while the guest's real inventory is installed.
+        let Some(Some(enchanted)) = self.as_guest(conn, |game| {
+            let (enchanted, given) =
+                game.table_enchant_for_player(seed, button, gs.menu.data[button], &item)?;
+            game.enchantment_performed(need);
+            game.award_custom_stat("enchant_item", 1);
+            if mod_api::__private::listened(mod_api::HookId::PlayerEnchantItem) {
+                game.native_player_enchant_item(uuid, entity_id, &enchanted, &given);
+            }
+            game.trigger_enchanted_item(&enchanted, need);
+            Some(enchanted)
+        }) else {
             return;
         };
         let enchanted_for_hook = enchanted.clone();
-        let need = button as i32 + 1;
-        // The enchantments the item got, for PlayerEnchantItemEvent.
-        let given = mod_api::__private::listened(mod_api::HookId::PlayerEnchantItem).then(|| {
-            horizon_client::stations::enchantment_list(
-                &self.stations().enchantments,
-                self.items(),
-                seed,
-                button,
-                gs.menu.data[button],
-                &item,
-            )
-        });
-        // Player.onEnchantmentPerformed, and EnchantmentMenu's awardStat(ENCHANT_ITEM).
-        self.as_guest(conn, |game| {
-            game.enchantment_performed(need);
-            game.award_custom_stat("enchant_item", 1);
-            if let Some(given) = &given {
-                game.native_player_enchant_item(uuid, entity_id, &enchanted, given);
-            }
-            // CriteriaTriggers.ENCHANTED_ITEM, with the levels it cost.
-            game.trigger_enchanted_item(&enchanted, need);
-        });
         let new_seed = self.world.random.next_int();
         if let Some(host) = self.lan.as_mut() {
             {
@@ -1215,4 +1205,97 @@ pub(super) fn station_inputs(gs: &GuestStation) -> Vec<ItemStack> {
     menu_of(gs.kind)
         .map(|(_, _, inputs)| inputs.filter_map(|s| gs.menu.slot(s).cloned()).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::native_entity_refs::tests::with_game;
+    use crate::game::native_item_places::tests::{guest, open_to_lan};
+
+    struct Revise;
+
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Revise {
+        fn player_enchant_item_pre(
+            &self,
+            host: &mut dyn mod_api::ServerHost,
+            event: &mut mod_api::PlayerEnchantItemPreEvent<'_>,
+        ) {
+            assert_eq!(event.player.uuid(), 123);
+            assert!(!event.enchantments.is_empty());
+            event.enchantments.clear();
+            if event.input.item().id(host) != "minecraft:iron_pickaxe" {
+                event.enchantments.extend([
+                    ("minecraft:fortune".into(), 5),
+                    ("example:missing".into(), 1),
+                    ("minecraft:sharpness".into(), 256),
+                ]);
+                event
+                    .book_enchantments
+                    .push(("minecraft:unbreaking".into(), 2));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn table_proposal_pays_once_and_keeps_both_book_enchantment_components() {
+        let mods: mod_api::Mods =
+            vec![mod_api::ModEntry::new("revise-table", Box::new(Revise))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                open_to_lan(game);
+                game.lan.as_mut().unwrap().hub.guests.push(guest(1));
+                for id in [
+                    "minecraft:book",
+                    "minecraft:diamond_pickaxe",
+                    "minecraft:iron_pickaxe",
+                ] {
+                    game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                        guest.xp_seed = 7;
+                        guest.xp_level = 35;
+                    });
+                    let mut menu = Box::new(Menu::new(Kind::Enchanting));
+                    let env = game.menu_env();
+                    menu.set_slot(&env, 0, Some(ItemStack::new(id, 1)));
+                    menu.set_slot(&env, 1, Some(ItemStack::new("minecraft:lapis_lazuli", 6)));
+                    menu.data[2] = 30;
+                    let mut station = GuestStation {
+                        window: 1,
+                        state: 0,
+                        kind: StationKind::Enchanting,
+                        pos: [0, 70, 0],
+                        menu,
+                        sent_data: Vec::new(),
+                        last_sound: 0,
+                    };
+                    game.lan_enchant(0, &mut station, 2);
+                    let output = station.menu.slot(0).unwrap();
+                    let lapis = station.menu.slot(1).unwrap().count;
+                    let xp = game.lan.as_ref().unwrap().hub.guests[0].xp_level;
+                    match id {
+                        "minecraft:book" => {
+                            assert_eq!(&*output.item, "minecraft:enchanted_book");
+                            assert_eq!(
+                                output.stored_enchantments(),
+                                [("minecraft:fortune".into(), 5)]
+                            );
+                            assert_eq!(output.enchantments(), [("minecraft:unbreaking".into(), 2)]);
+                            assert_eq!((xp, lapis), (32, 3));
+                        }
+                        "minecraft:diamond_pickaxe" => {
+                            assert_eq!(output.enchantments(), [("minecraft:fortune".into(), 5)]);
+                            assert!(output.stored_enchantments().is_empty());
+                            assert_eq!((xp, lapis), (32, 3));
+                        }
+                        _ => {
+                            assert_eq!(output, &ItemStack::new(id, 1));
+                            assert_eq!((xp, lapis), (35, 6));
+                        }
+                    }
+                }
+            });
+        });
+    }
 }

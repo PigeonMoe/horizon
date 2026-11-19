@@ -7432,6 +7432,25 @@ impl Game<'_> {
         }
         self.tracked_special_box(id as i32)
     }
+    /// Award the part of one collected orb left by Mending.
+    fn give_orb_experience_points(&mut self, remainder: u32) {
+        if remainder == 0 {
+            return;
+        }
+        let mut points = remainder.min(i32::MAX as u32) as i32;
+        if mod_api::__private::listened(mod_api::HookId::PlayerOrbXpPre)
+            && let Some(player) = self.native_acting_player()
+        {
+            self.native_player_orb_xp_pre(mod_api::__private::PlayerOrbXpPreCall {
+                player,
+                points: &mut points,
+            });
+        }
+        if points > 0 {
+            self.give_experience_points(points);
+        }
+    }
+
     /// `Player.giveExperiencePoints`: `add_experience_levels` runs once for each
     /// level gained or lost, and the mods hear of the level change once.
     pub(super) fn give_experience_points(&mut self, points: i32) {

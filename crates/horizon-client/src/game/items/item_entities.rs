@@ -670,9 +670,7 @@ impl Game<'_> {
                 crate::game::pickups::Collector::Player,
             );
         }
-        if gained > 0 {
-            self.give_experience_points(gained as i32);
-        }
+        self.give_orb_experience_points(gained);
     }
 
     /// `Player.dropEquipment` for the player who died: unless keep_inventory

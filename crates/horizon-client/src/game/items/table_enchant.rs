@@ -1,6 +1,8 @@
 //! The enchanting table's result (`EnchantmentMenu.clickMenuButton`), with
 //! `ItemPart::apply_enchantments` (`IItemExtension.applyEnchantments`) asked for it.
 use super::*;
+use horizon_items::item_data::Levels;
+use mod_api::TryIntoApi;
 
 /// Says once per item that its `apply_enchantments` parts answered a count other than the
 /// input's, which the table can't hold.
@@ -31,15 +33,77 @@ impl Game<'_> {
         cost: i32,
         input: &ItemStack,
     ) -> Option<ItemStack> {
-        use horizon_client::stations;
-        let enchantments = &self.stations().enchantments;
-        if !mod_api::__private::item_listens(mod_api::HookId::ApplyEnchantments, &input.item) {
-            return stations::apply_enchantment(enchantments, self.items(), seed, row, cost, input);
+        let list = self.table_selection(seed, row, cost, input);
+        self.apply_table_selection(input, &list)
+    }
+
+    fn table_selection(&self, seed: i32, row: usize, cost: i32, input: &ItemStack) -> Levels {
+        horizon_client::stations::enchantment_list(
+            &self.stations().enchantments,
+            self.items(),
+            seed,
+            row,
+            cost,
+            input,
+        )
+    }
+
+    /// Resolve the final table proposal on the admitted player's server turn.
+    pub(in crate::game) fn table_enchant_for_player(
+        &mut self,
+        seed: i32,
+        row: usize,
+        cost: i32,
+        input: &ItemStack,
+    ) -> Option<(ItemStack, Levels)> {
+        let mut list = self.table_selection(seed, row, cost, input);
+        if list.is_empty() {
+            return None;
         }
-        let list = stations::enchantment_list(enchantments, self.items(), seed, row, cost, input);
-        let vanilla = stations::apply_enchantment_list(input, list.clone())?;
+
+        if mod_api::__private::listened(mod_api::HookId::PlayerEnchantItemPre)
+            && let Some(player) = self.native_acting_player()
+            && let Ok(api_input) = input.try_into_api()
+        {
+            let mut enchantments: Vec<_> = list
+                .iter()
+                .map(|(id, level)| (id.to_string(), *level))
+                .collect();
+            let mut book_enchantments = Vec::new();
+            self.native_player_enchant_item_pre(mod_api::__private::PlayerEnchantItemPreCall {
+                player,
+                input: &api_input,
+                enchantments: &mut enchantments,
+                book_enchantments: &mut book_enchantments,
+            });
+            let registry = &self.stations().enchantments;
+            let registered = |(id, level): &(String, u32)| {
+                (1..=255).contains(level) && registry.get(id).is_some()
+            };
+            list = enchantments
+                .into_iter()
+                .filter(registered)
+                .map(|(id, level)| (id.into(), level))
+                .collect();
+            if &*input.item == "minecraft:book" && !book_enchantments.is_empty() {
+                let mut book = input.clone();
+                for (id, level) in book_enchantments.into_iter().filter(registered) {
+                    book.enchant(&id, level);
+                }
+                return Some((self.apply_table_selection(&book, &list)?, list));
+            }
+        }
+
+        Some((self.apply_table_selection(input, &list)?, list))
+    }
+
+    fn apply_table_selection(&self, input: &ItemStack, list: &Levels) -> Option<ItemStack> {
+        let vanilla = horizon_client::stations::apply_enchantment_list(input, list.clone())?;
+        if !mod_api::__private::item_listens(mod_api::HookId::ApplyEnchantments, &input.item) {
+            return Some(vanilla);
+        }
         let mut result = vanilla.clone();
-        self.native_apply_enchantments(input, &list, &mut result);
+        self.native_apply_enchantments(input, list, &mut result);
         if result.count != input.count {
             refuse_table_count(&input.item, input.count, result.count);
             return Some(vanilla);

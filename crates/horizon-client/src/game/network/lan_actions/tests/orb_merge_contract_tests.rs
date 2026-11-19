@@ -266,3 +266,45 @@ fn a_count_past_what_a_save_holds_refuses_the_merge() {
         assert_eq!(game.orbs[0].count, i32::MAX as u32);
     });
 }
+
+struct DoubleRemainder;
+
+#[mod_api::__subscriptions]
+impl Hooks for DoubleRemainder {
+    fn player_orb_xp_pre(
+        &self,
+        _: &mut dyn ServerHost,
+        event: &mut mod_api::PlayerOrbXpPreEvent,
+    ) {
+        assert_eq!(event.player.uuid(), 123);
+        assert_eq!(event.points, 3, "Mending spends two of the five points");
+        event.points *= 2;
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn orb_xp_listener_only_changes_the_remainder_after_mending() {
+    mod_platform::testing::with_mods(mods(DoubleRemainder), || {
+        with_game(|game| {
+            open(game);
+            game.as_guest(1, |game| {
+                let mut gear =
+                    horizon_client::items::ItemStack::new("minecraft:diamond_pickaxe", 1);
+                gear.enchant("minecraft:mending", 1);
+                gear.damage = 4;
+                game.inventory[game.selected] = Some(gear);
+                game.give_experience_points(4);
+                assert_eq!(game.experience.total, 4, "direct XP bypasses the orb hook");
+            })
+            .unwrap();
+
+            game.orbs.push(orb(41, 0.5, 5, 2));
+            game.guest_orbs(0);
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.xp_total, 10);
+            assert_eq!(guest.inventory[guest.selected].as_ref().unwrap().damage, 0);
+            assert_eq!((game.orbs[0].value, game.orbs[0].count), (5, 1));
+        });
+    });
+}

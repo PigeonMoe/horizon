@@ -353,9 +353,7 @@ impl Game<'_> {
         let value = orb.value.max(0) as u32;
         self.as_guest(conn, |game| {
             let rest = game.mending(value);
-            if rest > 0 {
-                game.give_experience_points(rest.min(i32::MAX as u32) as i32);
-            }
+            game.give_orb_experience_points(rest);
         });
     }
 }

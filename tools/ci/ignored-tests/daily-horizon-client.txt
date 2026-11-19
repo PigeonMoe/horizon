@@ -55,7 +55,9 @@ horizon-client game::gui_clips::dispatch_tests::a_hook_call_clips_what_its_mod_d
 horizon-client game::gui_entity::tests::a_screen_draws_a_mob_by_type_once_and_refuses_what_it_cant_draw lib daily game-boot
 horizon-client game::item_pickup_shape_tests::a_lifted_item_is_visible_at_its_actual_block_before_pickup lib daily resources
 horizon-client game::item_use::interact_vibration_tests::removed_potion_remainder_never_reaches_the_hand_or_inventory lib daily resources
+horizon-client game::lan_actions::pickups::orb_merge_contract_tests::orb_xp_listener_only_changes_the_remainder_after_mending lib daily resources
 horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_mount_position_before_replacing_a_menu lib daily resources
+horizon-client game::lan_stations::tests::table_proposal_pays_once_and_keeps_both_book_enchantment_components lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
 horizon-client game::machines::dispenser_selection_tests::dispenser_selection_reports_the_slot_and_stack_before_ordinary_dispense lib daily resources
 horizon-client game::machines::double_chest_transfer_tests::hopper_push_and_pull_use_the_double_chest_midpoint_across_a_boundary lib daily resources
