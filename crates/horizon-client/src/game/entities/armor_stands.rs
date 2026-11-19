@@ -1113,6 +1113,7 @@ impl Game<'_> {
                 subject: None,
             };
             let mut tops: Vec<BlockPos> = Vec::new();
+            let was_on_ground = a.on_ground;
             if let Some(step) = a.tick_move(
                 &mut scene,
                 facts,
@@ -1122,12 +1123,22 @@ impl Game<'_> {
                 &nearby,
                 &self.loop_context,
             ) {
-                // LivingEntity.aiStep: `travel` first, then the blocks' push.
+                // LivingEntity.aiStep settles the travel before testing the final position.
                 a.tick_settle(medium, step);
-                a.push_by_bubble_column_over(world, registry, facts, collision, |pos| {
-                    tops.push(pos)
-                });
+                let next = a.position;
+                let allowed = self.ridden_vehicle_move_allowed(id, at, next);
+                let a = &mut self.armor_stands[i];
+                if allowed {
+                    a.push_by_bubble_column_over(world, registry, facts, collision, |pos| {
+                        tops.push(pos)
+                    });
+                } else {
+                    a.position = at;
+                    a.yaw = a.previous_yaw;
+                    a.on_ground = was_on_ground;
+                }
             }
+            let a = &self.armor_stands[i];
             let section_step = (a.id, a.previous, a.position);
             for pos in tops {
                 self.bubble_column_particles(pos);
@@ -2729,6 +2740,80 @@ mod pumpkin_equippable_use_tests {
                 "actual connected UseItem Equippable adoption failures: {failures:?}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod stand_ridden_move_tests {
+    use crate::game::native_guest_turn_tests::with_guests;
+    use horizon_client::{chunk::Chunk, entities::ArmorStand};
+    use horizon_core::{geometry::Vec3, position::ChunkPos};
+    use mod_api::{Flow, Hooks, Host, ModEntry, RiddenVehicleMovePreEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_moving_stand_checks_its_player_passenger_before_crossing() {
+        const ID: u32 = 151;
+        const RIDER: u128 = 13;
+        const START: Vec3 = Vec3::new(0.5, 200.0, 2.5);
+        struct Claim(Arc<AtomicUsize>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Claim {
+            fn ridden_vehicle_move_pre(
+                &self,
+                _: &dyn Host,
+                event: &mut RiddenVehicleMovePreEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.player, RIDER);
+                assert_eq!(event.vehicle, ID);
+                assert_eq!(event.dimension, "minecraft:overworld");
+                assert_eq!(event.from, START.components());
+                assert!(event.to[0] > 1.0);
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mods = vec![ModEntry::new("stand-move-claim", Box::new(Claim(calls.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.build_registries();
+                game.set_allow_commands(true);
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                game.block_ticks
+                    .add_empty_chunk(ChunkPos::new(0, 0))
+                    .unwrap();
+                assert!(game.run_command("forceload add 0 0"));
+                game.armor_stands.push(ArmorStand::new(ID, START, 0.0));
+                let rider = game.player(RIDER).unwrap().entity();
+                let stand = game.entity(ID).unwrap();
+                assert!(game.entity_start_riding(rider, stand, true));
+
+                let motion = Vec3::new(0.75, 0.0, 0.0);
+                game.armor_stands[0].velocity = motion;
+                game.tick_armor_stands().unwrap();
+                assert_eq!(game.armor_stands[0].position, START);
+                assert!(game.armor_stands[0].velocity.x > 0.0);
+                assert_eq!(game.entity_vehicle(rider), Some(stand));
+
+                game.armor_stands[0].velocity = motion;
+                game.tick_armor_stands().unwrap();
+                assert!(game.armor_stands[0].position.x > 1.0);
+                assert_eq!(game.entity_vehicle(rider), Some(stand));
+            });
+        });
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 }
 
