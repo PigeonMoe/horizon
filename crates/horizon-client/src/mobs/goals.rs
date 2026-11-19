@@ -2866,11 +2866,10 @@ impl Goal for EatBlock {
             // runs either way, so a sheep still sheds its wool and ages up.
             if cx.w.has_tag("minecraft:edible_for_sheep", &here) {
                 if cx.w.can_grief(m.id) {
-                    cx.events.push(MobEvent::BreakBlock {
+                    cx.events.push(MobEvent::DestroyBlockWithoutLoot {
+                        mob: m.id,
                         pos: [x, y, z],
-                        by: None,
-                        drop: false,
-                        breaker: None,
+                        expected: cx.w.world.block(x, y, z),
                     });
                 }
                 super::ai::ate(m, cx.events);
@@ -3488,7 +3487,7 @@ mod eat_block_tests {
         let bitten = |events: &[MobEvent]| {
             events
                 .iter()
-                .filter(|e| matches!(e, MobEvent::BreakBlock { drop: false, .. }))
+                .filter(|e| matches!(e, MobEvent::DestroyBlockWithoutLoot { .. }))
                 .count()
         };
         let ate = |events: &[MobEvent]| {

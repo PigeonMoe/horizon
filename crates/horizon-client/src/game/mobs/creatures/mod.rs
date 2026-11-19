@@ -5,6 +5,8 @@
 #[path = "../../creatures/biome_facts.rs"]
 pub(super) mod biome_facts;
 #[cfg(test)]
+mod block_change_tests;
+#[cfg(test)]
 mod borrowed_panic_tests;
 mod borrowed_tick;
 mod breeding;
@@ -3134,26 +3136,9 @@ impl Game<'_> {
                     effect,
                     flags,
                 } => {
-                    if effect {
-                        // EatBlockGoal passes the block's default state constant
-                        // (Blocks.GRASS_BLOCK.defaultBlockState()), not the live state
-                        // (which could be snowy).
-                        let old = self.world.block(pos[0], pos[1], pos[2]);
-                        let state = self
-                            .pack
-                            .assets
-                            .registry
-                            .default_state(&self.res.facts().get(old).name)
-                            .unwrap_or(old);
-                        self.level_event_at(2001, pos, state.0 as i32);
-                    }
                     if let Some(state) = self.pack.assets.registry.default_state(name) {
-                        let old_name = self
-                            .res
-                            .facts()
-                            .get(self.world.block(pos[0], pos[1], pos[2]))
-                            .name
-                            .clone();
+                        let from = self.world.block(pos[0], pos[1], pos[2]);
+                        let old_name = self.res.facts().get(from).name.clone();
                         let mut cancel = false;
                         if let Some(mob) = mob
                             && let Some(kind) = self
@@ -3162,7 +3147,6 @@ impl Game<'_> {
                                 .find(|m| m.id == mob)
                                 .map(|m| m.kind.id.clone())
                         {
-                            let from = self.world.block(pos[0], pos[1], pos[2]);
                             self.native_entity_change_block_pre(
                                 crate::game::native_hooks::EntityChangeBlockPreCall {
                                     player: None,
@@ -3176,6 +3160,17 @@ impl Game<'_> {
                             );
                         }
                         if !cancel {
+                            if effect {
+                                // EatBlockGoal uses the default grass state, even if the
+                                // actual grass is snowy, and only after the change is allowed.
+                                let appearance = self
+                                    .pack
+                                    .assets
+                                    .registry
+                                    .default_state(&old_name)
+                                    .unwrap_or(from);
+                                self.level_event_at(2001, pos, appearance.0 as i32);
+                            }
                             self.level_set_with_flags(pos, state, flags)?;
                             if let Some(mob) = mob
                                 && let Some(m) = self.mobs.iter().find(|m| m.id == mob)
@@ -3206,6 +3201,46 @@ impl Game<'_> {
                     }
                     if let Some(mob) = poof {
                         self.mob_poof(mob);
+                    }
+                }
+                MobEvent::DestroyBlockWithoutLoot { mob, pos, expected } => {
+                    let from = self.world.block(pos[0], pos[1], pos[2]);
+                    if from != expected {
+                        continue;
+                    }
+                    let Some(kind) = self
+                        .mobs
+                        .iter()
+                        .find(|m| m.id == mob)
+                        .map(|m| m.kind.id.clone())
+                    else {
+                        continue;
+                    };
+                    let behaviours = self.res.behaviours();
+                    let to = behaviours.legacy_block(behaviours.fluid(from));
+                    let mut cancel = false;
+                    self.native_entity_change_block_pre(
+                        crate::game::native_hooks::EntityChangeBlockPreCall {
+                            player: None,
+                            entity: Some(mob),
+                            kind: &kind,
+                            pos,
+                            from,
+                            to,
+                            cancel: &mut cancel,
+                        },
+                    );
+                    if !cancel {
+                        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+                        if self
+                            .with_level(|b, level, ticks| b.destroy_block(level, ticks, at, false))
+                        {
+                            let facts = self.res.facts();
+                            let old_name = facts.get(from).name.clone();
+                            let new_name = facts.get(to).name.clone();
+                            self.native_entity_change_block(mob, &kind, pos, &old_name, &new_name);
+                        }
+                        self.process_level_events()?;
                     }
                 }
                 MobEvent::BreakBlock {

@@ -2262,6 +2262,13 @@ pub enum MobEvent {
         /// its loot's `LootContextParams.THIS_ENTITY` is this one, as `by`'s is.
         breaker: Option<u32>,
     },
+    /// A burning mob melts powder snow or a sheep eats a tuft. Paper asks
+    /// `EntityChangeBlockEvent` for this no-drop destruction with the mob as actor.
+    DestroyBlockWithoutLoot {
+        mob: u32,
+        pos: [i32; 3],
+        expected: horizon_world::registry::BlockStateId,
+    },
     /// `EndermanTakeBlockGoal`: the enderman `mob` picks up the block `state` at
     /// `pos` (it already holds it); the block turns to air unless a mod stops it
     /// or it is no longer that block.

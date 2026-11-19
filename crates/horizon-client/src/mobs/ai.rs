@@ -1549,11 +1549,10 @@ impl crate::block_contact::InsideWalk for MobInside<'_, '_, '_> {
         // block (`canEntityGrief` for the mob), then EXTINGUISH puts it out.
         if self.w.block_name(x, y, z) == "minecraft:powder_snow" {
             if self.m.is_on_fire() && self.w.can_grief(self.m.id) {
-                self.events.push(MobEvent::BreakBlock {
+                self.events.push(MobEvent::DestroyBlockWithoutLoot {
+                    mob: self.m.id,
                     pos: p,
-                    drop: false,
-                    by: None,
-                    breaker: None,
+                    expected: self.w.world.block(x, y, z),
                 });
             }
             self.m.extinguish_fire();
@@ -6264,14 +6263,14 @@ mod burn_and_rose_tests {
                 assert!(m.is_on_fire());
                 let (mut lr, mut events) = (crate::health::TestLevel::new(7), Vec::new());
                 assert!(tick(&mut m, &day, &mut lr.level(), &mut events));
-                let broken: Vec<([i32; 3], bool)> = events
+                let broken: Vec<_> = events
                     .iter()
                     .filter_map(|e| match e {
-                        MobEvent::BreakBlock { pos, drop, .. } => Some((*pos, *drop)),
+                        MobEvent::DestroyBlockWithoutLoot { mob, pos, .. } => Some((*mob, *pos)),
                         _ => None,
                     })
                     .collect();
-                assert_eq!(broken, vec![([0, 64, 0], false)], "the powder snow breaks");
+                assert_eq!(broken, vec![(m.id, [0, 64, 0])], "the powder snow breaks");
                 assert_eq!(m.fire_ticks, 0, "and puts the zombie out");
                 events.clear();
                 for _ in 0..200 {
@@ -6282,7 +6281,7 @@ mod burn_and_rose_tests {
                 assert!(
                     !events
                         .iter()
-                        .any(|e| matches!(e, MobEvent::BreakBlock { .. })),
+                        .any(|e| matches!(e, MobEvent::DestroyBlockWithoutLoot { .. })),
                     "nothing left to destroy"
                 );
             },

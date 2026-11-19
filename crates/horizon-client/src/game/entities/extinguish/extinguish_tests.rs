@@ -105,6 +105,64 @@ fn powder_snow_puts_a_burning_player_out_with_the_hiss() {
     assert_eq!(heard(&game), 1, "one hiss");
 }
 
+#[test]
+#[ignore = "daily"]
+fn powder_snow_respects_the_burning_players_block_change_permission() {
+    use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+    use mod_api::{EntityChangeBlockPreEvent, Flow, Hooks, ModEntry, ServerHost};
+
+    const PLAYER: u128 = 31;
+    const PROTECTED: [i32; 3] = [4, 64, 4];
+    const OPEN: [i32; 3] = [5, 64, 4];
+
+    struct Claims;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Claims {
+        fn entity_change_block_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut EntityChangeBlockPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player, Some(PLAYER));
+            assert_eq!(event.entity, None);
+            assert_eq!(event.kind, "minecraft:player");
+            assert_eq!(
+                Some(event.from),
+                host.block_state_id("minecraft:powder_snow")
+            );
+            assert_eq!(Some(event.to), host.block_state_id("minecraft:air"));
+            if event.pos == PROTECTED {
+                Flow::Cancel
+            } else {
+                assert_eq!(event.pos, OPEN);
+                Flow::Continue
+            }
+        }
+    }
+
+    run_on_guest_stack(|| {
+        mod_platform::testing::with_mods(
+            [ModEntry::new("powder-snow-protection", Box::new(Claims))].into(),
+            || {
+                with_game(|game| {
+                    game.load_ticking_neighbourhood(0, 0);
+                    game.lan_acting_uuid = Some(PLAYER);
+                    let snow = state(game, "minecraft:powder_snow", "");
+                    for [x, y, z] in [PROTECTED, OPEN] {
+                        game.world.set(x, y, z, snow).unwrap();
+                        burn_in(game, [x, y, z]);
+                        assert!(game.player.as_ref().unwrap().fire_ticks <= 0, "fire out");
+                    }
+                    assert_eq!(block(game, PROTECTED), "minecraft:powder_snow");
+                    assert_eq!(block(game, OPEN), "minecraft:air");
+                    assert_eq!(heard(game), 2, "one hiss per contact");
+                })
+            },
+        );
+    });
+}
+
 /// `LayeredCauldronBlock.handleEntityOnFireInside`: the level-3 water
 /// cauldron drops to level 2, and the hiss plays.
 #[test]

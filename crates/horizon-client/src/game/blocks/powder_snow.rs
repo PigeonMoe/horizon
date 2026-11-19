@@ -46,6 +46,21 @@ impl Game<'_> {
         if self.remote.is_some() || !self.is_powder_snow(at) || !self.may_interact_at(pos) {
             return;
         }
+        let from = self.world.block(pos.x, pos.y, pos.z);
+        let player = self.native_acting_id();
+        let mut cancel = false;
+        self.native_entity_change_block_pre(crate::game::native_hooks::EntityChangeBlockPreCall {
+            player: Some(player),
+            entity: None,
+            kind: "minecraft:player",
+            pos: at,
+            from,
+            to: self.world.air,
+            cancel: &mut cancel,
+        });
+        if cancel {
+            return;
+        }
         self.with_level(|b, level, ticks| b.destroy_block(level, ticks, pos, false));
         let _ = self.process_level_events();
         self.world.modified.insert((at[0] >> 4, at[2] >> 4));
