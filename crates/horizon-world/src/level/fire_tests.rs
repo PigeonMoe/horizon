@@ -279,3 +279,21 @@ fn lava_queries_exact_positions_and_faces_in_both_random_tick_branches() {
         ]
     );
 }
+
+#[test]
+fn lava_keeps_testing_the_upward_candidates_after_a_refused_ignition() {
+    let Some(mut w) = world() else { return };
+    let lava = BlockPos::new(4, 8, 4);
+    let first = BlockPos::new(3, 9, 3);
+    let second = BlockPos::new(4, 10, 2);
+    let planks = w.id("oak_planks", &[]);
+    w.put(lava, w.id("lava", &[]));
+    w.put(first.offset(-1, 0, 0), planks);
+    w.put(second.offset(1, 0, 0), planks);
+    w.level.unignitable.insert(first);
+    // Seed 42 gives two upward rolls, first north-west and then north-east.
+    *w.level.random() = LegacyRandom::new(42);
+    w.b().sim(&mut w.level, &mut w.ticks).lava_random_tick(lava);
+    assert_eq!(w.get(first), w.b().air());
+    assert!(is_fire(&w, second));
+}

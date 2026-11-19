@@ -1,7 +1,7 @@
 //! `FlowingFluid` (water and lava) ticking and spreading, `LiquidBlock`
 //! interactions, liquid containers (waterlogging) and bucket pickup.
 use super::{
-    Behaviours, LevelAccess, Sim, Spread,
+    Behaviours, BlockId, LevelAccess, Sim, Spread,
     buckets::{Douse, Drain, PlacedLiquid},
     classes::{Class, Interface},
     update::{HORIZONTAL, above, below, rel},
@@ -676,20 +676,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         target: FluidState,
     ) {
         let b = self.b;
-        let from = rel(pos, direction.opposite());
-        if !self.level.allow_spread(Spread::Fluid, from, pos) {
-            return;
-        }
         let lava = kind.same_family(FluidKind::Lava);
         if lava && direction == Direction::Down && b.is_water_fluid(self.fluid_at(pos).kind()) {
-            if b.instance_of(state, Class::Liquid)
-                && let Some(state) =
-                    self.level
-                        .fluid_place_block(pos, from, b.default_of(b.named.stone))
-            {
-                self.set_block_and_update(pos, state);
+            if b.instance_of(state, Class::Liquid) {
+                self.form_fluid_block(pos, rel(pos, direction.opposite()), b.named.stone);
+            } else {
+                self.level_event(1501, pos, 0);
             }
-            self.level_event(1501, pos, 0);
             return;
         }
         if self.is_liquid_container(state) {
@@ -721,6 +714,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if neighbour > 0 {
             for (direction, new_fluid) in self.spread_targets(kind, pos, state) {
                 let neighbour_pos = rel(pos, direction);
+                if !self.level.is_loaded(neighbour_pos)
+                    || !self.level.allow_spread(Spread::Fluid, pos, neighbour_pos)
+                {
+                    continue;
+                }
                 let neighbour_state = self.state(neighbour_pos);
                 self.spread_to(kind, neighbour_pos, neighbour_state, direction, new_fluid);
             }
@@ -739,6 +737,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             if self.can_be_replaced_with(below_fluid, below_pos, new_below.kind(), Direction::Down)
                 && self.can_hold_specific_fluid(below_state, new_below.kind())
             {
+                if !self.level.allow_spread(Spread::Fluid, pos, below_pos) {
+                    return;
+                }
                 self.spread_to(kind, below_pos, below_state, Direction::Down, new_below);
                 if self.source_neighbour_count(kind, pos) >= 3 {
                     self.spread_to_sides(kind, pos, fluid, state);
@@ -817,6 +818,19 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
 
     // ---- LiquidBlock ----
 
+    /// Paper's BlockForm precedes the write and its fizz. The fluid-placement
+    /// hook can still substitute the state proposed to formation listeners.
+    fn form_fluid_block(&mut self, pos: BlockPos, liquid: BlockPos, block: BlockId) {
+        if let Some(state) = self
+            .level
+            .fluid_place_block(pos, liquid, self.b.default_of(block))
+            && self.level.allow_block_form(pos, self.state(pos), state)
+            && self.set_block_and_update(pos, state)
+        {
+            self.level_event(1501, pos, 0);
+        }
+    }
+
     /// `LiquidBlock.shouldSpreadLiquid`, including lava's conversions.
     pub(crate) fn should_spread_liquid(&mut self, pos: BlockPos, state: BlockStateId) -> bool {
         let b = self.b;
@@ -832,20 +846,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 } else {
                     b.named.cobblestone
                 };
-                if let Some(state) = self.level.fluid_place_block(pos, pos, b.default_of(block)) {
-                    self.set_block_and_update(pos, state);
-                }
-                self.level_event(1501, pos, 0);
+                self.form_fluid_block(pos, pos, block);
                 return false;
             }
             if over_soul_soil && b.is_block(self.state(neighbour), b.named.blue_ice) {
-                if let Some(state) =
-                    self.level
-                        .fluid_place_block(pos, pos, b.default_of(b.named.basalt))
-                {
-                    self.set_block_and_update(pos, state);
-                }
-                self.level_event(1501, pos, 0);
+                self.form_fluid_block(pos, pos, b.named.basalt);
                 return false;
             }
         }
@@ -887,7 +892,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         .any(|d| self.lava_flammable(rel(test, d), d.opposite()))
                     {
                         if !self.level.allow_block_ignite(test, "lava") {
-                            return;
+                            continue;
                         }
                         let fire = self.fire_state_for(test);
                         if let Some(state) = self.level.fluid_place_block(test, pos, fire) {

@@ -93,6 +93,8 @@ pub(crate) struct TestLevel {
     pub lava_ignites: HashMap<BlockStateId, bool>,
     /// Positions where `allow_block_burn` refuses, as a `block_burn` listener would.
     pub unburnable: HashSet<BlockPos>,
+    pub unignitable: HashSet<BlockPos>,
+    pub unformable: HashSet<BlockPos>,
     /// Every `on_caught_fire`: position, old state, face and the level events before it.
     pub caught_fire: Vec<(BlockPos, BlockStateId, Direction, usize)>,
     /// What `before_smoke_source` answers for a state.
@@ -160,6 +162,8 @@ impl TestLevel {
             fire_sources: HashMap::new(),
             lava_ignites: HashMap::new(),
             unburnable: HashSet::new(),
+            unignitable: HashSet::new(),
+            unformable: HashSet::new(),
             caught_fire: Vec::new(),
             smoke_sources: HashMap::new(),
             openers: HashMap::new(),
@@ -329,7 +333,7 @@ impl LevelAccess for TestLevel {
     }
     fn allow_block_form(&self, pos: BlockPos, from: BlockStateId, to: BlockStateId) -> bool {
         self.form_checks.borrow_mut().push((pos, from, to));
-        !self.guarded.contains(&pos)
+        !self.guarded.contains(&pos) && !self.unformable.contains(&pos)
     }
     fn allow_spread(&self, kind: Spread, from: BlockPos, to: BlockPos) -> bool {
         if kind == Spread::Growth {
@@ -403,6 +407,9 @@ impl LevelAccess for TestLevel {
     }
     fn redstone_experiments(&self) -> bool {
         self.experimental_redstone
+    }
+    fn allow_block_ignite(&self, pos: BlockPos, _cause: &'static str) -> bool {
+        !self.unignitable.contains(&pos)
     }
     fn allow_block_burn(&self, pos: BlockPos) -> bool {
         !self.unburnable.contains(&pos)
@@ -1756,6 +1763,77 @@ fn lava_meets_water() {
         "{}",
         w.name(BlockPos::new(1, 1, 0))
     );
+}
+
+#[test]
+fn fluid_solidification_checks_formation_before_writing_or_playing_its_fizz() {
+    let lava_pos = BlockPos::new(0, 5, 0);
+    let side = lava_pos.offset(1, 0, 0);
+    let below = lava_pos.offset(0, -1, 0);
+    for (level, neighbour, formed) in [
+        ("0", "water", "obsidian"),
+        ("1", "water", "cobblestone"),
+        ("0", "blue_ice", "basalt"),
+    ] {
+        let mut w = world!();
+        let lava = w.id("lava", &[("level", level)]);
+        let outcome = w.id(formed, &[]);
+        w.put(lava_pos, lava);
+        w.put(side, w.id(neighbour, &[]));
+        w.put(below, w.id("soul_soil", &[]));
+        w.level.guarded.insert(lava_pos);
+        w.b()
+            .sim(&mut w.level, &mut w.ticks)
+            .liquid_block_changed(lava_pos, lava);
+        assert_eq!(w.level.form_checks.take(), [(lava_pos, lava, outcome)]);
+        assert_eq!(w.get(lava_pos), lava);
+        assert!(w.level.events.is_empty());
+        w.level.guarded.remove(&lava_pos);
+        w.b()
+            .sim(&mut w.level, &mut w.ticks)
+            .liquid_block_changed(lava_pos, lava);
+        assert_eq!(w.level.form_checks.take(), [(lava_pos, lava, outcome)]);
+        assert_eq!(w.get(lava_pos), outcome);
+        assert!(w.level.events.iter().any(|event| matches!(event, LevelEvent::LevelEvent { id: 1501, pos, .. } if *pos == lava_pos)));
+    }
+
+    let mut w = world!();
+    let water = w.id("water", &[]);
+    let lava = w.id("lava", &[]);
+    let stone = w.id("stone", &[]);
+    w.put(lava_pos, lava);
+    w.put(below, water);
+    w.level.unformable.insert(below);
+    w.b().sim(&mut w.level, &mut w.ticks).fluid_tick(lava_pos);
+    assert_eq!(w.level.form_checks.take(), [(below, water, stone)]);
+    assert_eq!(w.get(below), water);
+    assert!(w.level.events.is_empty());
+    w.level.unformable.remove(&below);
+    w.b().sim(&mut w.level, &mut w.ticks).fluid_tick(lava_pos);
+    assert_eq!(w.level.form_checks.take(), [(below, water, stone)]);
+    assert_eq!(w.get(below), stone);
+    assert_eq!(w.get(lava_pos), lava);
+}
+
+#[test]
+fn refusing_downward_flow_does_not_spread_sideways_even_beside_three_sources() {
+    let mut w = world!();
+    let water = w.id("water", &[]);
+    let at = BlockPos::new(0, 5, 0);
+    let below = at.offset(0, -1, 0);
+    let east = at.offset(1, 0, 0);
+    for (x, z) in [(0, 0), (-1, 0), (0, -1), (0, 1)] {
+        w.put(at.offset(x, 0, z), water);
+    }
+    w.level.guarded.insert(below);
+    w.b().sim(&mut w.level, &mut w.ticks).fluid_tick(at);
+    assert_eq!(w.get(below), w.b().air());
+    assert_eq!(w.get(east), w.b().air());
+    assert_eq!(w.get(at), water);
+    w.level.guarded.remove(&below);
+    w.b().sim(&mut w.level, &mut w.ticks).fluid_tick(at);
+    assert_ne!(w.get(below), w.b().air());
+    assert_ne!(w.get(east), w.b().air());
 }
 
 #[test]
