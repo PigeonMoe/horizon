@@ -18,6 +18,7 @@ horizon-client game::container_loot::tests::seeds_and_fill_listeners lib daily c
 horizon-client game::container_loot::tests::transfers_between_containers lib daily child-process
 horizon-client game::crafting_recipe_kind_tests::registered_crafting_remainder_drops_through_server_item_toss lib daily resources
 horizon-client game::crafting_recipe_kind_tests::unregistered_serializer_failed_reload_preserves_previous_recipes lib daily resources
+horizon-client game::creatures::block_change_tests::living_block_changes_keep_powder_snow_and_grass_when_denied lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::footwear_checks_current_gear_before_farmland_and_pearls_write lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::gliding_impact_wears_the_real_head_slot_and_only_protects_that_glide lib daily resources
 horizon-client game::creatures::snow_golem_form_tests::snow_trail_uses_formation_and_vibrates_only_after_writing lib daily resources
@@ -41,6 +42,7 @@ horizon-client game::explosion_detonate::tests::removing_the_next_target_from_a_
 horizon-client game::explosion_detonate::tests::special_query_excludes_a_box_that_only_touches_the_boundary lib daily game-boot
 horizon-client game::explosion_detonate::tests::the_exploding_source_is_not_in_the_list_nor_hurt lib daily game-boot
 horizon-client game::explosion_detonate::tests::the_list_order_is_the_walk_order lib daily game-boot
+horizon-client game::extinguish::extinguish_tests::powder_snow_respects_the_burning_players_block_change_permission lib daily resources
 horizon-client game::fireworks::hit_attempt_tests::a_firework_checks_its_launcher_when_it_hurts_a_player lib daily resources
 horizon-client game::fireworks::hit_attempt_tests::a_loaded_fireworks_item_can_prevent_damage_without_suppressing_the_burst lib daily resources
 horizon-client game::explosion_detonate::tests::with_no_listener_the_blast_is_unchanged lib daily game-boot
@@ -55,6 +57,7 @@ horizon-client game::gui_clips::dispatch_tests::a_hook_call_clips_what_its_mod_d
 horizon-client game::gui_entity::tests::a_screen_draws_a_mob_by_type_once_and_refuses_what_it_cant_draw lib daily game-boot
 horizon-client game::item_pickup_shape_tests::a_lifted_item_is_visible_at_its_actual_block_before_pickup lib daily resources
 horizon-client game::item_use::interact_vibration_tests::removed_potion_remainder_never_reaches_the_hand_or_inventory lib daily resources
+horizon-client game::lan_actions::boat_holder_movement_tests::a_leash_knot_click_checks_the_fence_before_transferring_the_leash lib daily resources
 horizon-client game::lan_actions::pickups::orb_merge_contract_tests::orb_xp_listener_only_changes_the_remainder_after_mending lib daily resources
 horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_mount_position_before_replacing_a_menu lib daily resources
 horizon-client game::lan_stations::tests::table_proposal_pays_once_and_keeps_both_book_enchantment_components lib daily resources
