@@ -21,8 +21,21 @@ mod tests {
     use horizon_client::mobs::{DamageKind, Mob};
     use horizon_core::geometry::Vec3;
     use mod_api::{
-        Flow, Hooks, LivingDeathEvent, LivingDeathPostEvent, LivingDropsEvent,
-        LivingExperienceDropEvent, MobKilledEvent, ModEntry, ServerHost,
+        AttachmentCodec, AttachmentType, Compound, Flow, Holder, Hooks, LivingDeathEvent,
+        LivingDeathPostEvent, LivingDropsEvent, LivingExperienceDropEvent, MobKilledEvent,
+        ModEntry, ServerHost,
+    };
+
+    static PLAYER_DOSE: AttachmentType<Compound> = AttachmentType {
+        namespace: "deaths",
+        name: "dose",
+        default: Compound::new,
+        codec: Some(AttachmentCodec {
+            encode: |data| Ok(data.clone()),
+            decode: |data| Ok(data.clone()),
+        }),
+        copy_on_death: true,
+        sync: false,
     };
     use std::sync::{
         Arc, Mutex,
@@ -73,8 +86,25 @@ mod tests {
             self.experience.store(true, Ordering::SeqCst);
             Flow::Continue
         }
-        fn living_death_post(&self, _: &mut dyn ServerHost, event: &mut LivingDeathPostEvent<'_>) {
+        fn living_death_post(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut LivingDeathPostEvent<'_>,
+        ) {
             self.heard.lock().unwrap().push("post");
+            if let Some(entity) = host.entity(event.entity)
+                && entity
+                    .kind(host)
+                    .is_some_and(|kind| kind.id(host) == "minecraft:player")
+                && let Some(uuid) = entity.uuid(host)
+                && host
+                    .player(uuid)
+                    .is_some_and(|player| player.entity() == entity)
+            {
+                PLAYER_DOSE
+                    .set(host, Holder::Player(uuid), Compound::new())
+                    .unwrap();
+            }
             let mut post = self.post.lock().unwrap();
             post.entity = Some(event.entity);
             post.damage_type = Some(event.damage_type.to_owned());
@@ -246,9 +276,23 @@ mod tests {
                     guest.inventory[0] =
                         Some(horizon_client::items::ItemStack::new("minecraft:stone", 1));
                 });
-                let id = game.lan.as_ref().unwrap().hub.guests[0].entity_id as u32;
+                let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                let id = guest.entity_id as u32;
+                let holder = Holder::Player(guest.uuid);
+                PLAYER_DOSE
+                    .set(
+                        game,
+                        holder,
+                        Compound::from([("dose".into(), mod_api::Tag::Int(75))]),
+                    )
+                    .unwrap();
 
                 game.guest_die(0, 1);
+
+                assert_eq!(
+                    PLAYER_DOSE.get_existing(game, holder),
+                    Ok(Some(Compound::new()))
+                );
 
                 assert_eq!(
                     *heard.lock().unwrap(),

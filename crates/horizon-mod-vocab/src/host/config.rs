@@ -87,6 +87,11 @@ pub trait ConfigServerHost {
     /// Startup opt-in for test-only content. Test registration runs regardless.
     #[access(Metadata)]
     fn game_tests_enabled(&self) -> bool;
+    /// A monotonic reading in milliseconds with a process-local origin.
+    /// Use differences within the current server process for elapsed time
+    /// independent of the world clock, tick rate or a paused tick loop.
+    #[access(WorldOnly)]
+    fn server_monotonic_millis(&self) -> u64;
     /// Side: server.
     /// The server's tick rate (20 unless `/tick rate` changed it) and the
     /// milliseconds its ticks took on average lately, as `/tick query`

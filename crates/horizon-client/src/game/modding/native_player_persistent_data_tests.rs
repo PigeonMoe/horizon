@@ -33,6 +33,34 @@ fn persistent_data_is_kept_in_the_players_record() {
     with_guests(|game| {
         let players = game.players().server_players();
         let (a, b) = (players[0], players[1]);
+        let radiation = mod_api::Identifier::parse("slimefun:radiation").unwrap();
+        let paper_value = Tag::String("27;0".into());
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update_connection(13, |guest| {
+                guest.saved = Some(Tag::compound([
+                    (
+                        "BukkitValues",
+                        Tag::compound([("slimefun:radiation", paper_value.clone())]),
+                    ),
+                    ("slimefun:radiation", Tag::Int(99)),
+                ]));
+            });
+        assert_eq!(a.paper_persistent_value(game, &radiation), None);
+        assert_eq!(
+            b.paper_persistent_value(game, &radiation),
+            Some(paper_value.clone())
+        );
+        game.as_guest(13, |game| {
+            assert_eq!(
+                b.paper_persistent_value(game, &radiation),
+                Some(paper_value)
+            );
+        })
+        .unwrap();
         assert_eq!(b.persistent_data(game), Some(Compound::new()));
         let mut data = Compound::new();
         data.insert("husksync:key".into(), Tag::Int(7));

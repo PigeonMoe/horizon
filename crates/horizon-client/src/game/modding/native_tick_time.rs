@@ -1,8 +1,15 @@
 //! The tick's spare time, as mods read it (`MinecraftServer.haveTime`).
 use super::Game;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 impl Game<'_> {
+    pub(super) fn server_monotonic_millis(&self) -> u64 {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        let millis = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
+        u64::try_from(millis).unwrap_or(u64::MAX)
+    }
+
     /// `MinecraftServer.haveTime`: the current server tick has not reached the
     /// moment the next one is due. A client, and a server outside a scheduled
     /// tick, always has time, as NeoForge's client `LevelTickEvent.hasTime` does.
@@ -27,6 +34,11 @@ mod tests {
     #[ignore = "daily"]
     fn a_server_has_time_until_its_tick_deadline_passes() {
         with_game(|game| {
+            let before = game.server_monotonic_millis();
+            let game_tick = game.world.game_time;
+            std::thread::sleep(Duration::from_millis(4));
+            assert!(game.server_monotonic_millis() >= before + 4);
+            assert_eq!(game.world.game_time, game_tick);
             game.server_tick_deadline = None;
             assert!(game.server_has_time());
             game.server_tick_deadline = Some(Instant::now() + Duration::from_secs(60));

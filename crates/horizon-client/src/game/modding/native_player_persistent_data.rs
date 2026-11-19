@@ -2,7 +2,7 @@
 //! replaced whole, for mods that carry a player between servers.
 use super::{Game, native_server::PlayerRead};
 use horizon_core::nbt::{Compound, Tag};
-use mod_api::{PlayerDataRefusal, PlayerRef};
+use mod_api::{Identifier, PlayerDataRefusal, PlayerRef};
 
 /// The key of the mods' compound in a player's saved data (NeoForge's `Entity.PERSISTED_NBT_TAG`).
 const PERSISTENT_DATA: &str = "NeoForgeData";
@@ -43,6 +43,21 @@ impl Game<'_> {
             PlayerRead::Acting { .. } => persistent_data(self.level.player_extra.as_ref()),
             PlayerRead::Guest(g) => persistent_data(g.saved.as_ref()),
         })
+    }
+
+    pub(super) fn player_paper_persistent_value(
+        &self,
+        player: PlayerRef,
+        key: &Identifier,
+    ) -> Option<Tag> {
+        if self.remote.is_some() {
+            return None;
+        }
+        let saved = match self.player_handle_read(player)? {
+            PlayerRead::Acting { .. } => self.level.player_extra.as_ref(),
+            PlayerRead::Guest(guest) => guest.saved.as_ref(),
+        }?;
+        saved.get("BukkitValues")?.get(&key.to_string()).cloned()
     }
 
     /// Replaces the mods' compound on a living player, in their turn so it lands in the record

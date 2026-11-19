@@ -370,6 +370,11 @@ pub trait PlayersBackend {
     /// is none. None for a stale or unavailable player and on a client.
     #[access(WorldOnly)]
     fn player_persistent_data(&self, player: PlayerRef) -> Option<Compound>;
+    /// Read one top-level key of a converted Paper player's `BukkitValues`
+    /// persistent data container. The complete saved player is never lent.
+    /// None on the client, for an unavailable player or when the key is absent.
+    #[access(WorldOnly)]
+    fn player_paper_persistent_value(&self, player: PlayerRef, key: &Identifier) -> Option<Tag>;
     /// Side: both.
     /// `ServerPlayerGameMode.getGameModeForPlayer`; Paper `HumanEntity#getGameMode`.
     /// None for stale, offline or unavailable players (including displaced outer players).
