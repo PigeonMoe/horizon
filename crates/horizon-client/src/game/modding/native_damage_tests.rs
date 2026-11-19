@@ -188,6 +188,89 @@ fn damage_admission_checks_the_player_responsible_for_the_actual_hit() {
 
 #[test]
 #[ignore = "daily"]
+fn armor_stand_sweeps_and_sourced_damage_check_the_living_target() {
+    use super::commands::Target;
+    use super::mace::Spared;
+    use horizon_client::entities::ArmorStand;
+
+    struct ProtectStand;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectStand {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut mod_api::EntityDamageTargetPreEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.target_kind, "minecraft:armor_stand");
+            assert!(event.alive_kind);
+            assert_eq!(event.player.map(|player| player.uuid), Some(225020));
+            if event.position[0] < 2.0 {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+
+    crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
+        let mods = vec![mod_api::ModEntry::new("protect-stand", Box::new(ProtectStand))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                survival_player(game, 225020);
+                game.world.game_time = 100;
+                for (id, x) in [(225021, 1.5), (225022, 2.5)] {
+                    game.armor_stands
+                        .push(ArmorStand::new(id, Vec3::new(x, 0.0, 0.0), 0.0));
+                }
+                let target = game.armor_stands[0].bounds();
+                let protected_last_hit = game.armor_stands[0].last_hit;
+                game.sweep_damage(target, Spared::Nothing, 1.0);
+                assert_eq!(game.armor_stands[0].last_hit, protected_last_hit);
+                assert_eq!(game.armor_stands[1].last_hit, 100);
+
+                for (id, allowed) in [(225021, false), (225022, true)] {
+                    assert_eq!(
+                        game.hurt_target(
+                            Target::Stand(id),
+                            2.0,
+                            "minecraft:arrow",
+                            Some(Target::Player),
+                            None,
+                            None,
+                        ),
+                        allowed
+                    );
+                }
+                assert_eq!(game.armor_stands.len(), 1);
+                assert_eq!(game.armor_stands[0].id, 225021);
+                assert!(!game.hurt_target(
+                    Target::Stand(225021),
+                    2.0,
+                    "minecraft:generic_kill",
+                    Some(Target::Player),
+                    None,
+                    None,
+                ));
+                assert_eq!(game.armor_stands.len(), 1);
+                // A source-free hit does not raise the by-entity protection event.
+                assert!(game.hurt_target(
+                    Target::Stand(225021),
+                    2.0,
+                    "minecraft:arrow",
+                    None,
+                    None,
+                    None,
+                ));
+                assert!(game.armor_stands.is_empty());
+            });
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn mob_drops_record_the_players_credit_on_an_environmental_death() {
     struct Listener(Arc<Mutex<Vec<Option<u128>>>>);
 

@@ -943,6 +943,9 @@ impl Game<'_> {
         ) {
             return false;
         }
+        if !self.armor_stand_damage_allowed(i, attacker) {
+            return false;
+        }
 
         self.break_armor_stand_by_hit(
             i,
@@ -951,6 +954,13 @@ impl Game<'_> {
             Some(super::commands::Target::Player),
         )
     }
+
+    fn armor_stand_damage_allowed(&mut self, index: usize, attacker: i32) -> bool {
+        let position = self.armor_stands[index].position.components();
+        let player = self.damage_player_by_entity(attacker);
+        self.entity_target_damage_allowed("minecraft:armor_stand", position, true, player.as_ref())
+    }
+
     /// The end of `ArmorStand.hurtServer` for a source in
     /// `#can_break_armor_stand` or `#always_kills_armor_stands`, which returns
     /// true: a creative causing player breaks the stand at once; otherwise the
@@ -1472,8 +1482,13 @@ impl Game<'_> {
         {
             return false;
         }
+        let causing_id = causing
+            .and_then(|target| self.network_entity_id(target))
+            .unwrap_or(0);
         if tagged("minecraft:bypasses_invulnerability") {
-            self.kill_target(Target::Stand(id));
+            if causing.is_none() || self.armor_stand_damage_allowed(i, causing_id) {
+                self.kill_target(Target::Stand(id));
+            }
             return false;
         }
         // Entity.isInvulnerableToBase: the flag, unless a creative player hits.
@@ -1507,13 +1522,17 @@ impl Game<'_> {
             tagged("minecraft:ignites_armor_stands"),
             tagged("minecraft:burns_armor_stands"),
         );
-        let causing_id = causing
-            .and_then(|target| self.network_entity_id(target))
-            .unwrap_or(0) as u32;
         let (breaks, always_kills) = (
             tagged("minecraft:can_break_armor_stand"),
             tagged("minecraft:always_kills_armor_stands"),
         );
+        if causing.is_some()
+            && (explosion || ignites || burns || breaks || always_kills)
+            && !self.armor_stand_damage_allowed(i, causing_id)
+        {
+            return false;
+        }
+        let causing_id = causing_id as u32;
         if explosion {
             self.break_armor_stand_by_anything(i, damage_type, causing_id);
             return false;
