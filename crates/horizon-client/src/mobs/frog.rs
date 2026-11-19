@@ -411,6 +411,10 @@ impl LaySpawn {
             let spawn = [rel[0], rel[1] + 1, rel[2]];
             if open_top && supports && Self::is_air(cx.w, spawn) {
                 if let Some(state) = cx.w.registry.default_state("minecraft:frogspawn") {
+                    if !cx.w.may_change_block(m, spawn) {
+                        set_pregnant(m, false);
+                        return;
+                    }
                     cx.events.push(MobEvent::SetBlock { pos: spawn, state });
                     cx.events.push(MobEvent::GameEvent {
                         event: "minecraft:block_place",
@@ -1465,6 +1469,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn laying_frogspawn_posts_block_place_from_the_frog() {
+        use crate::mobs::mob_hooks::BlockChangeGuard;
+
         let ran = crate::mobs::world::with_built_test_world(
             &[],
             |world, registry| {
@@ -1474,6 +1480,7 @@ mod tests {
                 );
                 let water = registry.default_state("minecraft:water").unwrap();
                 world.set(8, 63, 7, water).unwrap();
+                world.set(9, 63, 8, water).unwrap();
             },
             |w, _| {
                 let mut m = frog();
@@ -1508,6 +1515,23 @@ mod tests {
                     "the new frogspawn posts block_place from the frog: {events:?}"
                 );
                 assert!(!is_pregnant(&m), "laying erases the pregnancy");
+
+                let guarded = [[8, 64, 7]];
+                let guard = BlockChangeGuard(&guarded);
+                let mut protected = w.clone();
+                protected.mob_hooks = Some(&guard);
+                set_pregnant(&mut m, true);
+                events.clear();
+                LaySpawn::lay(
+                    &mut m,
+                    &mut Cx {
+                        w: &protected,
+                        level: &mut lr.level(),
+                        events: &mut events,
+                    },
+                );
+                assert!(events.is_empty(), "refused laying has no writes or effects");
+                assert!(!is_pregnant(&m), "the refusal ends this pregnancy");
             },
         );
         assert!(ran, "vanilla data is missing");
