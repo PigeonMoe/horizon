@@ -164,7 +164,7 @@ mod tests {
                 player.ground.on_ground = true;
                 player.velocity = Vec3::new(0.2, 0.0, 0.0);
                 let mut world = MotionWorld {
-                    footwear: None,
+                    landing_equipment: None,
                     entities: &[],
                     player: &mut player,
                     scene: &mut game.world,

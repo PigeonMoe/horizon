@@ -98,6 +98,8 @@ pub(crate) fn install() {
             },
             player_footwear_listened: || true,
             player_footwear_reaction: |_, _, _, _, _, _, _| {},
+            player_gliding_impact_listened: || false,
+            player_gliding_impact: |_, _, _, _, _, _, _| {},
             has_mods: || false,
             player_name_format: |context, _, displayname| {
                 if let Some(value) = context.setting("rules_mod", "stack") {

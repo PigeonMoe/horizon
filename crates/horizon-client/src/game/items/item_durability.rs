@@ -50,14 +50,14 @@ impl Game<'_> {
             .as_ref()
             .is_some_and(|s| s.count > 0 && &*s.item != "minecraft:air");
         let level = crate::game::entity::damage_level_of!(self, attack);
-        let sound = std::cell::Cell::new(None);
+        let reaction = std::cell::Cell::new(horizon_client::landing::LandingReaction::None);
         let footwear =
             footwear_action.and_then(|action| acting_footwear!(self).map(|boots| (action, boots)));
         let mut level = match footwear {
             Some((action, boots)) => {
                 level
                     .reborrow()
-                    .with_footwear(Some(boots), &self.loop_context, action, &sound)
+                    .with_footwear(boots, &self.loop_context, action, &reaction)
             }
             None => level.reborrow(),
         };

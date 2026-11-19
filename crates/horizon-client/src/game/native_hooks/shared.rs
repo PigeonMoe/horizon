@@ -1326,7 +1326,7 @@ pub(super) fn incoming_damage(
     let regular = mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage);
     let protection = !level.client_side()
         && mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre);
-    if !regular && !protection && !level.has_footwear() {
+    if !regular && !protection && !level.has_landing_impact() {
         return false;
     }
     let (entity, kind, source) = hurt_server_args(hurting, level.attack());
@@ -1373,7 +1373,7 @@ pub(super) fn incoming_damage(
             return true;
         }
     }
-    kind == "minecraft:player" && level.footwear_cancels()
+    kind == "minecraft:player" && level.landing_impact_cancels()
 }
 
 /// `native_living_damage_pre` for the damage code.

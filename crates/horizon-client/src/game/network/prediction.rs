@@ -76,7 +76,7 @@ impl Game<'_> {
                     // Game.sync_player_body's part that depends on the blocks.
                     body.nudge = super::closest_space_nudge(body, &self.world, self.res.facts());
                     MotionWorld {
-                        footwear: None,
+                        landing_equipment: None,
                         entities: &[],
                         player: body,
                         scene: &mut self.world,

@@ -53,6 +53,7 @@ impl Game<'_> {
             let _ = host.hub.update_guest(conn, |g| {
                 let gliding = start && !in_liquid;
                 if g.fall_flying != gliding {
+                    g.glide_ended_for_impact |= !gliding;
                     g.fall_flying = gliding;
                     changed = Some((g.uuid, g.name.clone(), gliding));
                 } else if !gliding {

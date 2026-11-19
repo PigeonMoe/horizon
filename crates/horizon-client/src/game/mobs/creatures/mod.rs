@@ -9108,7 +9108,7 @@ mod tests {
         assert_eq!(player.position, destination);
         assert_eq!(player.fall_distance, 0.0);
         let damaged = MotionWorld {
-            footwear: None,
+            landing_equipment: None,
             entities: &[],
             player,
             scene: &mut game.world,

@@ -285,6 +285,16 @@ pub(crate) fn install_client_hooks() {
                 &context, action, actor, boots, persisted, sound, cancel,
             );
         },
+        player_gliding_impact_listened: || {
+            mod_api::__private::listened(mod_api::HookId::PlayerGlidingImpact)
+        },
+        player_gliding_impact: |context, action, actor, helmet, persisted, reaction, cancel| {
+            let reader = horizon_client_render::api_context::LoopReader(context);
+            let context = reader.context();
+            mod_api::dispatch_player_gliding_impact(
+                &context, action, actor, helmet, persisted, reaction, cancel,
+            );
+        },
         has_mods: || !mod_api::__private::mods().is_empty(),
         player_name_format: |context, username, displayname| {
             use game::api_values::{TryIntoApi, TryIntoEngine};

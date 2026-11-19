@@ -330,7 +330,7 @@ impl Game<'_> {
             player.yaw = yaw;
             player.ground.on_ground = true;
             let mut w = MotionWorld {
-                footwear: None,
+                landing_equipment: None,
                 entities: &[],
                 player,
                 scene: &mut game.world,

@@ -39,6 +39,22 @@ macro_rules! acting_footwear {
         )
     };
 }
+macro_rules! acting_landing_equipment {
+    ($game:ident, $stopped_gliding:expr) => {
+        horizon_client::landing::LandingEquipment::new(
+            $game.lan_acting_uuid.or_else(|| {
+                $game
+                    .level
+                    .player_uuid
+                    .map(horizon_client::lan::playerdata::ints_uuid)
+            }),
+            $game.mode,
+            &mut $game.armor,
+            $game.level.player_extra.as_ref(),
+            $stopped_gliding,
+        )
+    };
+}
 macro_rules! world_recipes {
     ($s:ident) => {
         match &$s.world_tables {

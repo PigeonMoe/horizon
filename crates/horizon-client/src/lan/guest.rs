@@ -443,6 +443,8 @@ pub struct Guest {
     /// ServerEntity.sendChanges, so the cleared flag reaches the client with the next tick's data: a landing glide
     /// lasts one more tick on its ground, and a jump then keeps the speed (the elytra hop).
     pub glide_end_unsent: bool,
+    /// A real glide ended before this server tick's movement damage was processed.
+    pub glide_ended_for_impact: bool,
     /// Pose last delivered to this player's own entity data, initially Standing.
     pub sent_pose: Pose,
     /// The shoulder parrots (Player.DATA_SHOULDER_PARROT_LEFT and _RIGHT) the
@@ -825,6 +827,7 @@ impl Guest {
             sent_frozen: 0,
             sent_shared: 0,
             glide_end_unsent: false,
+            glide_ended_for_impact: false,
             sent_pose: Pose::Standing,
             sent_shoulders: [None; 2],
             sent_stuck: (0, 0),
@@ -1048,6 +1051,7 @@ impl Guest {
     }
     /// `updateFallFlying` ends the glide (`glide_end_unsent`: its end reaches the client a tick later).
     pub fn end_glide(&mut self) {
+        self.glide_ended_for_impact |= self.fall_flying;
         self.fall_flying = false;
         self.glide_end_unsent = true;
     }

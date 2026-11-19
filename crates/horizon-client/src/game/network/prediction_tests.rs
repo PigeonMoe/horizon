@@ -140,7 +140,7 @@ fn powder_snow_walk(boots: &str) -> Vec<f64> {
             game.world.block_log_held.clear();
             for tick in 0..20 {
                 horizon_client::motion::MotionWorld {
-                    footwear: None,
+                    landing_equipment: None,
                     entities: &[],
                     player: &mut client,
                     scene: &mut game.world,

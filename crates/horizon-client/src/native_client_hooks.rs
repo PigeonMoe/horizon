@@ -16,6 +16,8 @@ pub struct NativeClientHooks {
     pub farmland_trample: fn(&LoopContext, u32, [i32; 3], u32, f64, &mut bool),
     pub player_footwear_listened: fn() -> bool,
     pub player_footwear_reaction: PlayerFootwearHook,
+    pub player_gliding_impact_listened: fn() -> bool,
+    pub player_gliding_impact: PlayerGlidingImpactHook,
     pub has_mods: fn() -> bool,
     pub player_name_format: fn(&LoopContext, &crate::text::Text, &mut crate::text::Text),
     pub player_tab_list_name_format: fn(&LoopContext, u128, &str, &mut Option<crate::text::Text>),
@@ -61,6 +63,39 @@ pub type PlayerFootwearHook = fn(
     &mut Option<String>,
     &mut bool,
 );
+
+pub type PlayerGlidingImpactHook = fn(
+    &LoopContext,
+    &str,
+    (u128, mod_api::GameMode),
+    &mod_api::ItemStack,
+    Option<&horizon_core::nbt::Compound>,
+    &mut (Option<String>, bool),
+    &mut bool,
+);
+
+pub(crate) fn player_gliding_impact_listened() -> bool {
+    HOOKS
+        .get()
+        .is_some_and(|hooks| (hooks.player_gliding_impact_listened)())
+}
+
+pub(crate) fn player_gliding_impact(
+    context: &LoopContext,
+    action: &str,
+    actor: (u128, mod_api::GameMode),
+    helmet: &mod_api::ItemStack,
+    persisted: Option<&horizon_core::nbt::Compound>,
+    reaction: &mut (Option<String>, bool),
+    cancel: &mut bool,
+) {
+    if let Some(hooks) = HOOKS
+        .get()
+        .filter(|hooks| (hooks.player_gliding_impact_listened)())
+    {
+        (hooks.player_gliding_impact)(context, action, actor, helmet, persisted, reaction, cancel);
+    }
+}
 
 pub(crate) fn player_footwear_listened() -> bool {
     HOOKS

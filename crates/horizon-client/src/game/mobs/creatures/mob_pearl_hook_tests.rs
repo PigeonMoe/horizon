@@ -321,7 +321,7 @@ fn footwear_checks_current_gear_before_farmland_and_pearls_write() {
             game.world.set(6, 64, 6, farmland).unwrap();
             let health = game.player.as_ref().unwrap().health.health();
             let mut w = MotionWorld {
-                footwear: acting_footwear!(game),
+                landing_equipment: acting_landing_equipment!(game, false),
                 entities: &[],
                 player: game.player.as_mut().unwrap(),
                 scene: &mut game.world,
@@ -370,5 +370,128 @@ fn footwear_checks_current_gear_before_farmland_and_pearls_write() {
             assert!(game.player.as_ref().unwrap().health.health() < health);
             assert_eq!(calls.lock().unwrap().len(), 3);
         })
+    });
+}
+
+struct FlightProbe(Arc<Mutex<Vec<String>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for FlightProbe {
+    fn player_gliding_impact(
+        &self,
+        _: &dyn mod_api::LoopContext,
+        event: &mut mod_api::PlayerGlidingImpactEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.actor, (7, mod_api::GameMode::Survival));
+        assert_eq!(
+            event.helmet.item(),
+            mod_api::__private::item_key("minecraft:leather_helmet").unwrap()
+        );
+        self.0.lock().unwrap().push(event.action.to_owned());
+        *event.reaction = (Some("minecraft:block.stone.hit".into()), true);
+        Flow::Cancel
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn gliding_impact_wears_the_real_head_slot_and_only_protects_that_glide() {
+    use horizon_client::{
+        landing::FallEvent,
+        motion::{MotionEvent, MotionWorld, PlayerMotion},
+    };
+    use horizon_world::fall_damage::FallDamageWorld;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mods: mod_api::Mods = vec![ModEntry::new(
+        "player-flight-impact-proof",
+        Box::new(FlightProbe(Arc::clone(&calls))),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::entry::install_client_hooks();
+        with_game(|game| {
+            game.mode = mod_api::GameMode::Survival;
+            game.lan_acting_uuid = Some(7);
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            for y in 64..=65 {
+                for z in 5..=7 {
+                    game.world.set(9, y, z, stone).unwrap();
+                }
+            }
+            let start = Vec3::new(8.0, 64.0, 6.5);
+            let mut player = PlayerMotion::new(game.motion, start).unwrap();
+            let health = player.health.health();
+            player.fall_flying = true;
+            player.yaw = -90.0;
+            player.carry_client_movement(Vec3::new(1.2, 0.0, 0.0));
+            game.player = Some(player);
+            let mut helmet = ItemStack::new("minecraft:leather_helmet", 1);
+            let max = world_items!(game).get(&helmet.item).unwrap().max_damage;
+            helmet.damage = max - 1;
+            game.armor[0] = Some(helmet.clone());
+            let world = |game: &mut Game<'_>, just_stopped_gliding, collide_with_wall| {
+                let mut w = MotionWorld {
+                    landing_equipment: acting_landing_equipment!(game, just_stopped_gliding),
+                    entities: &[],
+                    player: game.player.as_mut().unwrap(),
+                    scene: &mut game.world,
+                    assets: &game.pack.assets,
+                    collision_binding: game.collision,
+                    resources: game.motion,
+                    health: &game.health_resources,
+                    tag_items: Some(world_items!(game)),
+                    loop_context: &game.loop_context,
+                    damage_hooks: &game.damage_hooks,
+                    block_registries: Some(&game.pack.block_registries),
+                };
+                w.player.events.clear();
+                if collide_with_wall {
+                    w.server_travel().unwrap();
+                } else {
+                    w.player.fall_flying = false;
+                    w.fall_on(stone, BlockPos::new(8, 63, 6), 8.0).unwrap();
+                }
+                let sounds: Vec<_> = w
+                    .player
+                    .events
+                    .iter()
+                    .filter_map(|event| {
+                        if let MotionEvent::Fall(FallEvent::HelmetSound { name, .. }) = event {
+                            Some(*name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                (w.player.health.health(), sounds)
+            };
+            assert_eq!(
+                world(game, false, true),
+                (health, vec!["minecraft:block.stone.hit"])
+            );
+            assert_eq!(game.armor[0].as_ref().unwrap().damage, max);
+            assert_eq!(
+                world(game, true, false),
+                (
+                    health,
+                    vec!["minecraft:block.stone.hit", "minecraft:entity.item.break"]
+                )
+            );
+            assert!(game.armor[0].is_none());
+            game.armor[0] = Some(helmet);
+            let (health_after, sounds) = world(game, false, false);
+            assert!(health_after < health);
+            assert!(sounds.is_empty());
+            assert_eq!(game.armor[0].as_ref().unwrap().damage, max - 1);
+            assert_eq!(&*calls.lock().unwrap(), &["fly_into_wall", "fall_damage"]);
+        });
     });
 }

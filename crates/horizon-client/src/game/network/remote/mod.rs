@@ -6424,7 +6424,7 @@ impl Game<'_> {
                 );
             }
             MotionWorld {
-                footwear: None,
+                landing_equipment: None,
                 entities: &entity_collisions,
                 player,
                 scene: &mut self.world,
@@ -6446,7 +6446,7 @@ impl Game<'_> {
             if riding && !dead {
                 player.client_side = true;
                 let mut passenger = MotionWorld {
-                    footwear: None,
+                    landing_equipment: None,
                     entities: &entity_collisions,
                     player: &mut *player,
                     scene: &mut self.world,

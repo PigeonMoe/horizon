@@ -19,7 +19,7 @@ fn a_ground_jump_awards_the_jump_statistic() {
     player.ground.on_ground = true;
     {
         let mut world = MotionWorld {
-            footwear: None,
+            landing_equipment: None,
             entities: &[],
             player: &mut player,
             scene: &mut game.world,

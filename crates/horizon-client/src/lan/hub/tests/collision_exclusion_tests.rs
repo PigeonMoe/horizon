@@ -46,7 +46,7 @@ fn walk(
     (0..20)
         .map(|_| {
             MotionWorld {
-                footwear: None,
+                landing_equipment: None,
                 entities: &[],
                 player: &mut client,
                 scene: &mut *scene,

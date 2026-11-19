@@ -57,6 +57,21 @@ pub fn native_player_footwear_reaction(
     );
 }
 
+#[inline(never)]
+pub fn native_player_gliding_impact(
+    context: &LoopContext,
+    action: &str,
+    actor: (u128, GameMode),
+    helmet: &ItemStack,
+    persisted: Option<&Compound>,
+    reaction: &mut (Option<String>, bool),
+    cancel: &mut bool,
+) {
+    crate::native_client_hooks::player_gliding_impact(
+        context, action, actor, helmet, persisted, reaction, cancel,
+    );
+}
+
 /// Read-only, short-lived references to the authoritative player's worn feet and saved data.
 #[derive(Clone, Copy)]
 pub struct PlayerFootwear<'a> {
@@ -77,14 +92,8 @@ impl<'a> PlayerFootwear<'a> {
             return None;
         }
         let player = uuid?;
-        let boots = boots.filter(|stack| stack.count > 0 && &*stack.item != "minecraft:air")?;
-        let persisted = saved
-            .and_then(|saved| saved.get("NeoForgeData"))
-            .and_then(|data| data.get("PlayerPersisted"))
-            .and_then(|tag| match tag {
-                horizon_core::nbt::Tag::Compound(data) => Some(data),
-                _ => None,
-            });
+        let boots = worn_stack(boots)?;
+        let persisted = player_persisted(saved);
         Some(Self {
             player,
             mode,
@@ -111,13 +120,119 @@ impl<'a> PlayerFootwear<'a> {
             &mut sound,
             &mut cancel,
         );
-        cancel.then(|| {
-            let sound = sound?;
-            let registry = context.registry("minecraft:sound_event")?;
-            registry
-                .iter()
-                .any(|id| id == &sound)
-                .then(|| crate::mobs::entity_sounds::intern_full_id(&sound))
+        cancel.then(|| registered_sound(context, sound.as_deref()))
+    }
+}
+
+fn worn_stack(stack: Option<&crate::items::ItemStack>) -> Option<&crate::items::ItemStack> {
+    stack.filter(|stack| stack.count > 0 && &*stack.item != "minecraft:air")
+}
+
+fn player_persisted(saved: Option<&horizon_core::nbt::Tag>) -> Option<&Compound> {
+    match saved?.get("NeoForgeData")?.get("PlayerPersisted")? {
+        horizon_core::nbt::Tag::Compound(data) => Some(data),
+        _ => None,
+    }
+}
+
+fn registered_sound(context: &LoopContext, id: Option<&str>) -> Option<&'static str> {
+    let id = id?;
+    context
+        .registry("minecraft:sound_event")?
+        .iter()
+        .any(|key| key == id)
+        .then(|| crate::mobs::entity_sounds::intern_full_id(id))
+}
+
+/// Equipment belonging to the player whose movement is executing now.
+pub struct LandingEquipment<'a> {
+    boots: Option<PlayerFootwear<'a>>,
+    helmet: Option<FlightHelmet<'a>>,
+}
+
+struct FlightHelmet<'a> {
+    actor: (u128, GameMode),
+    persisted: Option<&'a Compound>,
+    slot: &'a mut Option<crate::items::ItemStack>,
+    just_stopped_gliding: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HelmetSource<'a> {
+    actor: (u128, GameMode),
+    persisted: Option<&'a Compound>,
+    item: &'a crate::items::ItemStack,
+}
+
+#[derive(Clone, Copy, Default)]
+#[doc(hidden)]
+pub enum LandingReaction {
+    #[default]
+    None,
+    Footwear(Option<&'static str>),
+    Helmet {
+        sound: Option<&'static str>,
+        wear: bool,
+    },
+}
+
+impl<'a> LandingEquipment<'a> {
+    pub fn new(
+        uuid: Option<u128>,
+        mode: GameMode,
+        armor: &'a mut [Option<crate::items::ItemStack>; 4],
+        saved: Option<&'a horizon_core::nbt::Tag>,
+        just_stopped_gliding: bool,
+    ) -> Option<Self> {
+        let [head, _, _, feet] = armor;
+        let boots = PlayerFootwear::new(uuid, mode, feet.as_ref(), saved);
+        let helmet = if crate::native_client_hooks::player_gliding_impact_listened() {
+            uuid.map(|uuid| FlightHelmet {
+                actor: (uuid, mode),
+                persisted: player_persisted(saved),
+                slot: head,
+                just_stopped_gliding,
+            })
+        } else {
+            None
+        };
+        (boots.is_some() || helmet.is_some()).then_some(Self { boots, helmet })
+    }
+
+    fn helmet_at_impact(&self, gliding: bool) -> Option<HelmetSource<'_>> {
+        let helmet = self.helmet.as_ref()?;
+        if !gliding && !helmet.just_stopped_gliding {
+            return None;
+        }
+        Some(HelmetSource {
+            actor: helmet.actor,
+            persisted: helmet.persisted,
+            item: worn_stack(helmet.slot.as_ref())?,
+        })
+    }
+}
+
+impl HelmetSource<'_> {
+    pub(crate) fn reaction(self, context: &LoopContext, action: &str) -> Option<LandingReaction> {
+        use horizon_world::native_load_context::LoopSide;
+        if context.side() != LoopSide::Server {
+            return None;
+        }
+        let mut reaction = (None, false);
+        let mut cancel = false;
+        let helmet = crate::crafting::mod_kinds::to_api(self.item)?;
+        native_player_gliding_impact(
+            context,
+            action,
+            self.actor,
+            &helmet,
+            self.persisted,
+            &mut reaction,
+            &mut cancel,
+        );
+        cancel.then(|| LandingReaction::Helmet {
+            sound: registered_sound(context, reaction.0.as_deref()),
+            wear: reaction.1,
         })
     }
 }
@@ -268,6 +383,11 @@ pub enum FallEvent {
         state: BlockStateId,
     },
     FootwearSound(&'static str),
+    HelmetSound {
+        name: &'static str,
+        eye: [f64; 3],
+    },
+    HelmetWorn,
     Broadcast(u8),
     Write {
         position: BlockPos,
@@ -355,6 +475,8 @@ impl FallEvent {
             ),
             Self::BlockFallSound { .. } => "block-fall-sound".into(),
             Self::FootwearSound(name) => format!("footwear-sound {name}"),
+            Self::HelmetSound { name, .. } => format!("helmet-sound {name}"),
+            Self::HelmetWorn => "helmet-worn".into(),
             Self::Broadcast(event) => format!("broadcast {event}"),
             Self::Write {
                 position,
@@ -653,11 +775,15 @@ impl BlockLandingWorld for MotionWorld<'_, '_, '_> {
             &mut cancel,
         );
         cancel
-            || self.footwear.is_some_and(|footwear| {
-                footwear
-                    .reaction(self.loop_context, "farmland_trample")
-                    .is_some()
-            })
+            || self
+                .landing_equipment
+                .as_ref()
+                .and_then(|equipment| equipment.boots)
+                .is_some_and(|footwear| {
+                    footwear
+                        .reaction(self.loop_context, "farmland_trample")
+                        .is_some()
+                })
     }
     fn suppressing_bounce(&mut self) -> Result<bool> {
         Ok(self.player.shift_key_down)
@@ -830,31 +956,107 @@ impl LivingFallWorld for FallCall<'_, '_, '_, '_> {
             source: self.source,
             amount,
         });
-        let resources = self.world.health;
-        let rules = self.world.scene.health_rules;
-        let footwear = self
-            .world
-            .footwear
-            .filter(|_| matches!(self.source, LandingDamage::Fall));
-        let sound = std::cell::Cell::new(None);
-        self.world.player.hurt(
+        let source = self.world.health.landing_source(self.source);
+        let action = matches!(self.source, LandingDamage::Fall).then_some("fall_damage");
+        self.world.impact_damage(source, amount, action)
+    }
+}
+
+impl MotionWorld<'_, '_, '_> {
+    /// The server's fall or gliding wall-hit damage boundary, before armor or health changes.
+    pub(crate) fn impact_damage(
+        &mut self,
+        source: horizon_world::damage_source::DamageTypeId,
+        amount: f32,
+        action: Option<&'static str>,
+    ) -> Result<()> {
+        let (boots, helmet) = action
+            .and_then(|action| self.landing_equipment.as_ref().map(|gear| (action, gear)))
+            .map_or((None, None), |(action, gear)| {
+                let boots = (action == "fall_damage").then_some(gear.boots).flatten();
+                (boots, gear.helmet_at_impact(self.player.fall_flying))
+            });
+        let reaction = std::cell::Cell::new(LandingReaction::None);
+        let rules = self.scene.health_rules;
+        self.player.hurt(
             &mut crate::health::DamageLevel::of(
-                self.world.scene,
-                self.world.assets.registry,
-                self.world.tag_items,
-                self.world.block_registries,
-                self.world.damage_hooks,
+                self.scene,
+                self.assets.registry,
+                self.tag_items,
+                self.block_registries,
+                self.damage_hooks,
             )
-            .with_footwear(footwear, self.world.loop_context, "fall_damage", &sound),
-            resources,
+            .with_landing_impact(
+                boots,
+                helmet,
+                self.loop_context,
+                action.unwrap_or(""),
+                &reaction,
+            ),
+            self.health,
             rules,
-            resources.landing_source(self.source),
+            source,
             amount,
         )?;
-        if let Some(sound) = sound.get() {
-            self.world.fall_event(FallEvent::FootwearSound(sound));
+        match reaction.get() {
+            LandingReaction::Footwear(Some(sound)) => {
+                self.fall_event(FallEvent::FootwearSound(sound))
+            }
+            LandingReaction::Helmet { sound, wear } => {
+                if let Some(name) = sound {
+                    self.helmet_sound(name);
+                }
+                if wear {
+                    self.wear_impact_helmet();
+                }
+            }
+            _ => {}
         }
         Ok(())
+    }
+
+    fn helmet_sound(&mut self, name: &'static str) {
+        let at = self.player.position;
+        let eye = [
+            at.x,
+            at.y + f64::from(self.player.dimensions.eye_height),
+            at.z,
+        ];
+        self.fall_event(FallEvent::HelmetSound { name, eye });
+    }
+
+    fn wear_impact_helmet(&mut self) {
+        let Some(gear) = self
+            .landing_equipment
+            .as_mut()
+            .and_then(|gear| gear.helmet.as_mut())
+        else {
+            return;
+        };
+        let Some(helmet) = gear.slot.as_mut().filter(|helmet| helmet.count != 0) else {
+            return;
+        };
+        let info = self.tag_items.and_then(|items| items.get(&helmet.item));
+        let max = info.map_or(0, |info| info.max_damage) as i32;
+        if gear.actor.1 == GameMode::Creative
+            || max <= 0
+            || helmet.carries_component(info, "minecraft:unbreakable")
+        {
+            return;
+        }
+        let level = helmet.tag_enchantment_level("minecraft:unbreaking");
+        if level > 0 && self.player.random.next_double() >= 0.6 + 0.4 / (f64::from(level) + 1.0) {
+            return;
+        }
+        let damage = helmet.effective_damage(info);
+        if damage >= max {
+            // ItemMeta wear consumes the item on the impact after reaching material max damage.
+            *gear.slot = None;
+            self.helmet_sound("minecraft:entity.item.break");
+        } else {
+            helmet.damage = (damage + 1) as u32;
+        }
+        self.fall_event(FallEvent::HelmetWorn);
     }
 }
 #[cfg(test)]
@@ -913,7 +1115,7 @@ mod tests {
                     .unwrap();
                 BlockLandingWorld::cause_fall_damage(
                     &mut MotionWorld {
-                        footwear: None,
+                        landing_equipment: None,
                         entities: &[],
                         player: &mut player,
                         scene: &mut scene,

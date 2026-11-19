@@ -74,7 +74,7 @@ impl Game<'_> {
             .and_then(|g| g.moves.last().map(|m| m.0[1]))
             .unwrap_or(0.0);
         self.guest_glide_tick(conn, fell);
-        let Some((moves, from_ground)) = self.lan.as_mut().and_then(|host| {
+        let Some((moves, from_ground, just_stopped_gliding)) = self.lan.as_mut().and_then(|host| {
             host.hub.update_guest(conn, |g| {
                 let moves = std::mem::take(&mut g.moves);
                 let from_ground = if moves.is_empty() {
@@ -82,7 +82,8 @@ impl Game<'_> {
                 } else {
                     g.moves_from_ground
                 };
-                (moves, from_ground)
+                let just_stopped_gliding = std::mem::take(&mut g.glide_ended_for_impact);
+                (moves, from_ground, just_stopped_gliding)
             })
         }) else {
             return;
@@ -152,7 +153,7 @@ impl Game<'_> {
             };
             player.fluids.boat = boat;
             let mut w = MotionWorld {
-                footwear: acting_footwear!(game),
+                landing_equipment: acting_landing_equipment!(game, just_stopped_gliding),
                 entities: &[],
                 player,
                 scene: &mut game.world,
@@ -263,6 +264,9 @@ impl Game<'_> {
                 w.server_player_pose_tick()
             };
             let mut events = std::mem::take(&mut w.player.events);
+            if landing_helmet_changed(&events) {
+                game.apply_equipment();
+            }
             if let Some((at, alive)) = rose {
                 game.end_tracked_fall(at, alive);
             }
@@ -313,7 +317,7 @@ impl Game<'_> {
             events.append(&mut player.events);
             player.carry_client_movement(tick_movement);
             let _ = MotionWorld {
-                footwear: acting_footwear!(game),
+                landing_equipment: acting_landing_equipment!(game, just_stopped_gliding),
                 entities: &[],
                 player,
                 scene: &mut game.world,
@@ -335,11 +339,15 @@ impl Game<'_> {
                 return (events, None);
             };
             // Landing damage from this travel reaches the tracker too.
+            let helmet_changed = landing_helmet_changed(&player.events);
             events.append(&mut player.events);
             // A hurt since the last tick marked the velocity (Entity.markHurt):
             // ServerEntity.sendChanges sends it as it is after this travel.
             let marked = std::mem::take(&mut player.health.sync_velocity);
             let velocity = marked.then_some(player.velocity);
+            if helmet_changed {
+                game.apply_equipment();
+            }
             // Player.causeFallDamage: a fall of 2 blocks or more counts.
             for event in &events {
                 if let MotionEvent::Fall(horizon_client::landing::FallEvent::Statistic(cm)) = event
@@ -479,6 +487,21 @@ impl Game<'_> {
                         None,
                     );
                 }
+                MotionEvent::Fall(horizon_client::landing::FallEvent::HelmetSound {
+                    name,
+                    eye,
+                }) => {
+                    let seed = self.world.random.next_long();
+                    self.play_sound_to(
+                        crate::game::commands::Target::Guest(conn),
+                        name,
+                        eye,
+                        1.0,
+                        1.0,
+                        mod_api::SoundSource::Players.index(),
+                        seed,
+                    );
+                }
                 MotionEvent::Fall(event) => {
                     let player = self
                         .lan
@@ -576,6 +599,15 @@ impl Game<'_> {
             }
         }
     }
+}
+
+fn landing_helmet_changed(events: &[MotionEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            MotionEvent::Fall(horizon_client::landing::FallEvent::HelmetWorn)
+        )
+    })
 }
 
 impl Game<'_> {

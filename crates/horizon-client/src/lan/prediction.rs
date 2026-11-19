@@ -889,7 +889,7 @@ mod tests {
         client.pitch = run.pitch;
         let mut world = |player: &mut PlayerMotion, f: &mut dyn FnMut(&mut MotionWorld)| {
             f(&mut MotionWorld {
-                footwear: None,
+                landing_equipment: None,
                 entities: &[],
                 player,
                 scene: &mut scene,

@@ -203,7 +203,7 @@ fn a_landing_posts_the_block_game_event_its_rule_posts() {
         let mut player = PlayerMotion::new(game.motion, Vec3::new(2.5, 5.0, 3.5)).unwrap();
         {
             let mut world = MotionWorld {
-                footwear: None,
+                landing_equipment: None,
                 entities: &[],
                 player: &mut player,
                 scene: &mut game.world,

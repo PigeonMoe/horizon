@@ -127,15 +127,16 @@ pub struct DamageLevel<'a> {
     /// Which entry of `LivingEntity.knockback` a push in progress came through, for
     /// `living_knockback` ([`Self::through_short_knockback`]).
     knock_entry: mod_api::KnockbackEntry,
-    footwear: Option<FootwearHit<'a>>,
+    landing_impact: Option<LandingImpact<'a>>,
 }
 
 #[derive(Clone, Copy)]
-struct FootwearHit<'a> {
-    boots: crate::landing::PlayerFootwear<'a>,
+struct LandingImpact<'a> {
+    boots: Option<crate::landing::PlayerFootwear<'a>>,
+    helmet: Option<crate::landing::HelmetSource<'a>>,
     context: &'a horizon_world::native_load_context::LoopContext,
     action: &'static str,
-    sound: &'a std::cell::Cell<Option<&'static str>>,
+    reaction: &'a std::cell::Cell<crate::landing::LandingReaction>,
 }
 impl<'a> DamageLevel<'a> {
     /// The level of `world`, whose blocks `registry` names.
@@ -170,7 +171,7 @@ impl<'a> DamageLevel<'a> {
             attack: &NO_ATTACK,
             client_side: false,
             knock_entry: mod_api::KnockbackEntry::Full,
-            footwear: None,
+            landing_impact: None,
         }
     }
     /// The level of `world`, with the random and attachments `lent` took out of it.
@@ -197,7 +198,7 @@ impl<'a> DamageLevel<'a> {
             attack: &NO_ATTACK,
             client_side: false,
             knock_entry: mod_api::KnockbackEntry::Full,
-            footwear: None,
+            landing_impact: None,
         }
     }
     /// The same level, for a shorter borrow.
@@ -217,7 +218,7 @@ impl<'a> DamageLevel<'a> {
             attack: self.attack,
             client_side: self.client_side,
             knock_entry: self.knock_entry,
-            footwear: self.footwear,
+            landing_impact: self.landing_impact,
         }
     }
     /// The same level with a task-local random, retaining its typed hook and attachment context.
@@ -240,41 +241,61 @@ impl<'a> DamageLevel<'a> {
             attack: self.attack,
             client_side: self.client_side,
             knock_entry: self.knock_entry,
-            footwear: self.footwear,
+            landing_impact: self.landing_impact,
         }
     }
     /// Borrow equipment for this particular player hit. Ordinary damage sites have none.
-    pub fn with_footwear(
+    pub(crate) fn with_landing_impact(
         mut self,
         boots: Option<crate::landing::PlayerFootwear<'a>>,
+        helmet: Option<crate::landing::HelmetSource<'a>>,
         context: &'a horizon_world::native_load_context::LoopContext,
         action: &'static str,
-        sound: &'a std::cell::Cell<Option<&'static str>>,
+        reaction: &'a std::cell::Cell<crate::landing::LandingReaction>,
     ) -> Self {
-        self.footwear = boots.map(|boots| FootwearHit {
+        self.landing_impact = (boots.is_some() || helmet.is_some()).then_some(LandingImpact {
             boots,
+            helmet,
             context,
             action,
-            sound,
+            reaction,
         });
         self
     }
 
-    pub fn has_footwear(&self) -> bool {
-        self.footwear.is_some()
+    pub fn with_footwear(
+        self,
+        boots: crate::landing::PlayerFootwear<'a>,
+        context: &'a horizon_world::native_load_context::LoopContext,
+        action: &'static str,
+        reaction: &'a std::cell::Cell<crate::landing::LandingReaction>,
+    ) -> Self {
+        self.with_landing_impact(Some(boots), None, context, action, reaction)
+    }
+
+    pub fn has_landing_impact(&self) -> bool {
+        self.landing_impact.is_some()
     }
 
     /// Called only after the ordinary protection and incoming damage hooks allow the hit.
-    pub fn footwear_cancels(&self) -> bool {
-        let Some(footwear) = self.footwear else {
+    pub fn landing_impact_cancels(&self) -> bool {
+        let Some(impact) = self.landing_impact else {
             return false;
         };
-        if let Some(sound) = footwear.boots.reaction(footwear.context, footwear.action) {
-            footwear.sound.set(sound);
-            true
-        } else {
-            false
-        }
+        let reaction = impact
+            .helmet
+            .and_then(|helmet| helmet.reaction(impact.context, impact.action))
+            .or_else(|| {
+                impact
+                    .boots?
+                    .reaction(impact.context, impact.action)
+                    .map(crate::landing::LandingReaction::Footwear)
+            });
+        let Some(reaction) = reaction else {
+            return false;
+        };
+        impact.reaction.set(reaction);
+        true
     }
     /// Runs `push` as the short entry of `LivingEntity.knockback` (power and direction), which
     /// delegates to the full entry: the knockback hook, fired once inside the full entry, tells
