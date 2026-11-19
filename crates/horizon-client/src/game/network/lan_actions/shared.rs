@@ -3313,6 +3313,10 @@ mod menu_still_valid_tests;
 mod projectile_lifecycle_tests;
 
 #[cfg(test)]
+#[path = "tests/refused_placement_inventory_tests.rs"]
+mod refused_placement_inventory_tests;
+
+#[cfg(test)]
 #[path = "tests/spin_target_tests.rs"]
 mod spin_target_tests;
 

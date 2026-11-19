@@ -270,6 +270,7 @@ impl Game<'_> {
         hand: Hand,
     ) -> Result<bool, ActionRefused> {
         let mut consumed = false;
+        let mut restore_hand = false;
         let Some(host) = self.lan.as_mut() else {
             return Err(ActionRefused::Stale);
         };
@@ -349,10 +350,14 @@ impl Game<'_> {
                         g.swings_started != swings && g.predicted_swings == predicted,
                         consumed,
                         attempt,
+                        g.use_failed,
                     )
                 })
                 .ok();
             consumed = used.is_some_and(|u| u.1);
+            restore_hand = used.is_some_and(|(_, consumed, placement, failed)| {
+                placement && (!consumed || failed)
+            });
             let swung = used.map(|u| u.0);
             self.lan_swing_back(conn, swung);
             self.guest_use_sounds(conn, logged, heard);
@@ -360,7 +365,7 @@ impl Game<'_> {
             // world says why. Vanilla asks twice for the top (once
             // before the swing, once in the check that also has the
             // bottom), so a player there is told twice.
-            if let Some((_, false, true)) = used {
+            if let Some((_, false, true, _)) = used {
                 if face == [0, 1, 0] && hit.pos[1] >= max_y {
                     self.build_limit_message(conn, true, max_y);
                     self.build_limit_message(conn, true, max_y);
@@ -380,6 +385,13 @@ impl Game<'_> {
             let state = self.world.block(pos[0], pos[1], pos[2]).0 as i32;
             host.hub
                 .send_to(conn, &C::BlockUpdate(play::BlockUpdate { pos, state }));
+        }
+        if restore_hand && let Some(guest) = host.hub.guests.connection_index(conn) {
+            let slot = match hand {
+                Hand::Main => 36 + host.hub.guests[guest].selected,
+                Hand::Off => 45,
+            };
+            host.hub.send_inventory_slot(guest, slot);
         }
         refused.map_or(Ok(consumed), Err)
     }

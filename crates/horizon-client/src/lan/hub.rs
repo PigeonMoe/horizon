@@ -2288,6 +2288,23 @@ impl Hub {
         })
     }
 
+    /// Send an inventory-menu slot even if the authoritative stack did not
+    /// change. The client may have predicted a different stack for this slot.
+    pub fn send_inventory_slot(&mut self, i: usize, slot: usize) {
+        let current = self.guests[i].menu_slot(slot);
+        let item = self.stack(&current);
+        self.guests.update(i, |guest| {
+            guest.menu_state = (guest.menu_state + 1) & 0x7FFF;
+            guest.send(&C::ContainerSetSlot(play::ContainerSetSlot {
+                container: 0,
+                state: guest.menu_state,
+                slot: slot as i16,
+                item,
+            }));
+            guest.menu_sent[slot] = current;
+        });
+    }
+
     // ---- per tick ------------------------------------------------------
 
     /// A whole tick with one level: the network, the level, then the
