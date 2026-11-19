@@ -2,7 +2,10 @@
 //! break the blocks around the one its player broke as that player breaks them, taking their
 //! drops and experience in `block_drops`.
 use super::Game;
-use mod_api::PlayerRef;
+use horizon_client::items::ItemStack;
+use horizon_core::position::BlockPos;
+use horizon_world::registry::BlockStateId;
+use mod_api::{LevelRef, PlayerRef};
 use std::cell::Cell;
 
 /// How many player breaks may be inside one another on the server thread. A `break_block` or
@@ -40,6 +43,11 @@ impl Drop for NestedBreak {
     }
 }
 
+enum ProtectedBreak<'a> {
+    Remove,
+    Naturally(Option<&'a ItemStack>),
+}
+
 impl Game<'_> {
     /// `ServerPlayerGameMode.destroyBlock` at `pos` as `player` breaks it, as FTB Ultimine does
     /// (`PlayersBackendMut::player_destroy_block` says what holds and what is refused). With
@@ -69,7 +77,27 @@ impl Game<'_> {
         &mut self,
         player: PlayerRef,
         pos: [i32; 3],
-        state: horizon_world::registry::BlockStateId,
+        state: BlockStateId,
+    ) -> bool {
+        self.protected_block_break(player, pos, state, ProtectedBreak::Remove)
+    }
+
+    pub(super) fn player_break_block_naturally(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        state: BlockStateId,
+        tool: Option<&ItemStack>,
+    ) -> bool {
+        self.protected_block_break(player, pos, state, ProtectedBreak::Naturally(tool))
+    }
+
+    fn protected_block_break(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        state: BlockStateId,
+        how: ProtectedBreak<'_>,
     ) -> bool {
         if !self.native_authoritative() || !self.native_player_current(player) {
             return false;
@@ -104,13 +132,70 @@ impl Game<'_> {
             let mut canceled = false;
             game.native_break_block(pos, state, &mut canceled, &mut None);
             if !canceled && game.native_player_current(player) && matches(game) {
-                removed = game.with_player_actor(|game| {
-                    game.level_destroy_block(level, pos, false, None, false)
-                        .is_some()
+                removed = game.with_player_actor(|game| match how {
+                    ProtectedBreak::Remove => game
+                        .level_destroy_block(level, pos, false, None, false)
+                        .is_some(),
+                    ProtectedBreak::Naturally(tool) => {
+                        game.break_level_block_naturally(level, pos, state, tool)
+                    }
                 });
             }
         });
         removed
+    }
+
+    fn break_level_block_naturally(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockStateId,
+        tool: Option<&ItemStack>,
+    ) -> bool {
+        let facts = self.res.facts().get(state);
+        let harvest = !facts.requires_tool || self.res.items().correct_for_drops(tool, &facts.name);
+        let block_drops = self
+            .ui
+            .rules
+            .bool_at(horizon_client::gamerules::vanilla::BLOCK_DROPS);
+        let key = (pos[0], pos[1], pos[2]);
+        let live = block_drops
+            .then(|| self.live_block_entity(key, &facts.name))
+            .flatten();
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        // Capture the loot context while the block and its entity are present.
+        // Do not publish any drops until removal actually succeeds.
+        let stacks = if harvest && block_drops {
+            self.with_level(|_, level, _| level.block_drops_of(at, state, tool, None))
+        } else {
+            Vec::new()
+        };
+        if self
+            .level_destroy_block(level, pos, false, None, false)
+            .is_none()
+        {
+            return false;
+        }
+
+        // Like a player's ordinary break, observers see the removed state and
+        // have read-only access to the old block entity and its attachments.
+        if block_drops {
+            let breaker = Some(self.native_acting_id());
+            let mut drops =
+                self.player_block_dropped((pos, state), (breaker, tool, live), (stacks, Some(0)));
+            drops.experience = 0;
+            self.spawn_block_drops(pos, drops);
+        }
+        if harvest {
+            let prevents_melting =
+                tool.is_some_and(|stack| stack.enchantment_level("minecraft:silk_touch") > 0);
+            self.with_level(|behaviours, level, ticks| {
+                behaviours.ice_destroyed_by_player(level, ticks, at, state, prevents_melting);
+                behaviours.turtle_egg_destroyed_by_player(level, ticks, at, state);
+            });
+            let _ = self.process_level_events();
+        }
+        true
     }
 
     fn break_as_acting_player(&mut self, pos: [i32; 3], into_inventory: bool) -> bool {
@@ -294,6 +379,110 @@ mod tests {
                 assert!(!popped(game, "minecraft:gravel") && !popped(game, "minecraft:flint"));
                 assert_eq!(game.held().unwrap().damage, 0);
             })
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_protected_natural_break_drops_with_its_tool_and_lends_the_old_container() {
+        use crate::game::api_values::TryIntoApi;
+        use mod_api::{BlockDropsEvent, Compound, Flow, LevelHost, Tag};
+        use std::sync::{Arc, Mutex};
+
+        const ORE: [i32; 3] = [6, 64, 4];
+        const GUARDED: [i32; 3] = [7, 64, 4];
+        const WRONG_TOOL: [i32; 3] = [8, 64, 4];
+        const CHEST: [i32; 3] = [9, 64, 4];
+        struct Observe(Arc<Mutex<Vec<[i32; 3]>>>);
+
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Observe {
+            fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+                let pos = [event.pos.x, event.pos.y, event.pos.z];
+                self.0.lock().unwrap().push(pos);
+                assert_eq!(event.breaker, Some(123));
+                assert_eq!(event.experience, 0);
+                if pos == CHEST {
+                    let old = event.block_entity.expect("old chest is still readable");
+                    assert_eq!(
+                        level.block_entity_saved_attachment(old, "natural-break", "saved"),
+                        Some(Compound::from([("marked".into(), Tag::Byte(1))])),
+                    );
+                }
+                if pos == WRONG_TOOL {
+                    assert!(event.drops.is_empty());
+                }
+                event.experience = 10;
+                Flow::Continue
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<[i32; 3]>>> = Arc::default();
+        let mods: mod_api::Mods = vec![
+            mod_api::ModEntry::new("protect-gravel", Box::new(ProtectGravel(GUARDED))),
+            mod_api::ModEntry::new("natural-break", Box::new(Observe(seen.clone()))),
+        ]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                game.build_registries();
+                game.load_server_loot();
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let tool = ItemStack::new("minecraft:diamond_pickaxe", 1);
+                let player = with_player(game, tool.clone());
+                let tool = tool.try_into_api().unwrap();
+                for pos in [ORE, GUARDED, WRONG_TOOL] {
+                    place(game, pos, "minecraft:diamond_ore");
+                }
+                place(game, CHEST, "minecraft:chest");
+                let [x, y, z] = CHEST;
+                let mut inventory = vec![None; 27];
+                inventory[0] = Some(ItemStack::new("minecraft:quartz", 3));
+                game.world.block_entities.insert(
+                    (x, y, z),
+                    horizon_client::containers::BlockEntity::Chest(inventory),
+                );
+                let recorded = Compound::from([("marked".into(), Tag::Byte(1))]);
+                let saved = Tag::compound([("value", Tag::Compound(recorded))]);
+                game.world.block_entities.restore_attachments(
+                    (x, y, z),
+                    mod_api::Attachments::from_nbt(Compound::from([(
+                        "natural-break".into(),
+                        Tag::compound([("saved", saved)]),
+                    )])),
+                );
+
+                let ore = game
+                    .world
+                    .block(ORE[0], ORE[1], ORE[2])
+                    .try_into_api()
+                    .unwrap();
+                let chest = game.world.block(x, y, z).try_into_api().unwrap();
+                assert!(!player.break_block_naturally(game, GUARDED, ore, Some(&tool)));
+                assert!(!player.break_block_naturally(game, ORE, chest, Some(&tool)));
+                assert_eq!(block(game, GUARDED), "minecraft:diamond_ore");
+                assert_eq!(block(game, ORE), "minecraft:diamond_ore");
+                assert!(player.break_block_naturally(game, WRONG_TOOL, ore, None));
+                assert!(!popped(game, "minecraft:diamond"));
+                assert!(player.break_block_naturally(game, ORE, ore, Some(&tool)));
+                assert!(popped(game, "minecraft:diamond"));
+                assert!(player.break_block_naturally(game, CHEST, chest, Some(&tool)));
+                assert_eq!(
+                    game.dropped
+                        .iter()
+                        .filter(|item| &*item.stack.item == "minecraft:quartz")
+                        .map(|item| item.stack.count)
+                        .sum::<u32>(),
+                    3
+                );
+                assert_eq!(*seen.lock().unwrap(), [WRONG_TOOL, ORE, CHEST]);
+                assert!(game.orbs.is_empty());
+                assert_eq!(game.held().unwrap().damage, 0);
+                assert_eq!(game.stats.get("mined", "minecraft:diamond_ore"), 0);
+                assert_eq!(block(game, CHEST), "minecraft:air");
+            });
         });
     }
 

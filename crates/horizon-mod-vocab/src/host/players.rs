@@ -1057,6 +1057,22 @@ pub trait PlayersBackendMut {
         pos: [i32; 3],
         expected: BlockState,
     ) -> bool;
+    /// Side: server.
+    /// Break exactly the expected block after this player's normal protection checks
+    /// and `break_block` veto. Drop its natural loot with the supplied tool (None is
+    /// an empty hand), which must be suitable when the block requires one. The old
+    /// block entity is lent to `block_drops` after successful removal, even on a
+    /// creative break or when the loot roll returned no stacks. No experience, tool
+    /// wear, exhaustion or mined statistics are added. Refuses unloaded blocks,
+    /// stale players, restricted game modes and states a listener replaced.
+    #[access(WorldOnly)]
+    fn player_break_block_naturally(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        expected: BlockState,
+        tool: Option<&ItemStack>,
+    ) -> bool;
     /// Side: both.
     /// Simulate one client movement tick for this server player without changing the player. Refuses stale, absent, dead, spectator or riding players and invalid input.
     #[access(WorldOnly)]
