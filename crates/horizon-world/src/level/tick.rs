@@ -203,7 +203,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Class::Frogspawn => {
                     if !self.can_survive(state, pos) {
                         self.destroy_block(pos, false, 512);
-                    } else {
+                    } else if self.level.allow_block_fade(pos, state, b.air()) {
                         self.emit(LevelEvent::BlockEvent {
                             pos,
                             state,

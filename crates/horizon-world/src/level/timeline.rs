@@ -155,6 +155,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             return;
         }
         let hatch = b.table.int(state, b.props.hatch);
+        if hatch >= 2 && !self.level.allow_block_fade(pos, state, b.air()) {
+            return;
+        }
         let pitch = 0.9 + self.random().next_float() * 0.2;
         if hatch < 2 {
             self.play(pos, "minecraft:entity.turtle.egg_crack", 0.7, pitch);

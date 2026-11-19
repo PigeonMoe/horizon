@@ -109,3 +109,77 @@ fn frosted_ice_keeps_its_age_on_a_veto_and_retries_on_its_next_tick() {
     assert_eq!(w.level.fade_checks.take(), [(AT, from, older)]);
     assert_eq!(w.get(AT), older);
 }
+
+#[test]
+fn healthy_frogspawn_asks_before_hatching_but_lost_support_removes_it() {
+    let mut w = world!();
+    let frogspawn = w.id("frogspawn", &[]);
+    let water = w.id("water", &[("level", "0")]);
+    let air = w.b().air();
+    let below = AT.offset(0, -1, 0);
+    w.put(below, water);
+    w.put(AT, frogspawn);
+    w.level.guarded.insert(AT);
+    schedule(&mut w, frogspawn);
+    w.tick();
+    assert_eq!(w.get(AT), frogspawn);
+    assert_eq!(w.level.fade_checks.take(), [(AT, frogspawn, air)]);
+    assert!(w.level.events.is_empty());
+    assert!(!w.ticks.has_block_tick(AT, w.b().block(frogspawn)));
+
+    w.level.guarded.remove(&AT);
+    schedule(&mut w, frogspawn);
+    w.tick();
+    assert_eq!(w.get(AT), air);
+    assert_eq!(w.level.fade_checks.take(), [(AT, frogspawn, air)]);
+    assert!(w.level.events.iter().any(|event| matches!(
+        event,
+        LevelEvent::BlockEvent { pos, kind: "hatch", .. } if *pos == AT
+    )));
+
+    w.put(below, air);
+    w.put(AT, frogspawn);
+    w.level.events.clear();
+    w.level.guarded.insert(AT);
+    schedule(&mut w, frogspawn);
+    w.tick();
+    assert_eq!(w.get(AT), air);
+    assert!(w.level.fade_checks.take().is_empty());
+    assert!(
+        !w.level
+            .events
+            .iter()
+            .any(|event| matches!(event, LevelEvent::BlockEvent { kind: "hatch", .. }))
+    );
+}
+
+#[test]
+fn turtle_eggs_ask_at_final_hatch_and_try_again_on_a_later_random_tick() {
+    let mut w = world!();
+    let cracked = w.id("turtle_egg", &[("hatch", "1"), ("eggs", "2")]);
+    let mature = w.id("turtle_egg", &[("hatch", "2"), ("eggs", "2")]);
+    let air = w.b().air();
+    w.put(AT.offset(0, -1, 0), w.id("sand", &[]));
+    w.put(AT, cracked);
+    w.level.day_time = 21500;
+    w.level.guarded.insert(AT);
+    w.b().random_tick(&mut w.level, &mut w.ticks, AT);
+    assert_eq!(w.get(AT), mature);
+    assert!(w.level.fade_checks.take().is_empty());
+
+    w.level.events.clear();
+    w.b().random_tick(&mut w.level, &mut w.ticks, AT);
+    assert_eq!(w.get(AT), mature);
+    assert_eq!(w.level.fade_checks.take(), [(AT, mature, air)]);
+    assert!(w.level.events.is_empty());
+
+    w.level.guarded.remove(&AT);
+    w.b().random_tick(&mut w.level, &mut w.ticks, AT);
+    assert_eq!(w.get(AT), air);
+    assert_eq!(w.level.fade_checks.take(), [(AT, mature, air)]);
+    assert!(w.level.events.iter().any(|event| matches!(
+        event,
+        LevelEvent::BlockEvent { pos, state, kind: "hatch_turtles" }
+            if *pos == AT && *state == mature
+    )));
+}
