@@ -1956,6 +1956,7 @@ horizon-client game::native_surface::tests::a_block_part_answers_the_friction_an
 horizon-client game::native_surface::tests::mob_travel_and_both_leash_sites_use_the_parts_answer_once lib daily resources
 horizon-client game::native_tick_time::tests::a_client_level_always_has_time lib daily resources
 horizon-client game::native_tick_time::tests::a_server_has_time_until_its_tick_deadline_passes lib daily resources
+horizon-client game::native_tick_time::tests::a_server_reports_its_local_civil_minute_in_the_world_phase lib daily resources
 horizon-client game::native_tick_time::tests::the_tick_listeners_see_the_deadline_through_the_host lib daily resources
 horizon-client game::native_unspawned_mob::tests::a_handle_kept_past_its_hook_is_expired lib daily resources
 horizon-client game::native_unspawned_mob::tests::a_panicking_listener_still_ends_the_lend lib daily resources

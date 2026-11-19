@@ -92,6 +92,11 @@ pub trait ConfigServerHost {
     /// independent of the world clock, tick rate or a paused tick loop.
     #[access(WorldOnly)]
     fn server_monotonic_millis(&self) -> u64;
+    /// The server's current civil minute in its configured system time zone.
+    /// Values are year, month (1–12), day (1–31), hour (0–23) and minute (0–59).
+    /// For calendar labels, not for measuring an interval or a world tick.
+    #[access(WorldOnly)]
+    fn server_local_minute(&self) -> [i32; 5];
     /// Side: server.
     /// The server's tick rate (20 unless `/tick rate` changed it) and the
     /// milliseconds its ticks took on average lately, as `/tick query`

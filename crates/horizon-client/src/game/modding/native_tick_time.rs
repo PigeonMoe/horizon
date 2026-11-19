@@ -1,5 +1,6 @@
 //! The tick's spare time, as mods read it (`MinecraftServer.haveTime`).
 use super::Game;
+use chrono::{Datelike, Local, Timelike};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -8,6 +9,17 @@ impl Game<'_> {
         static ORIGIN: OnceLock<Instant> = OnceLock::new();
         let millis = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
         u64::try_from(millis).unwrap_or(u64::MAX)
+    }
+
+    pub(super) fn server_local_minute(&self) -> [i32; 5] {
+        let date = Local::now();
+        [
+            date.year(),
+            date.month() as i32,
+            date.day() as i32,
+            date.hour() as i32,
+            date.minute() as i32,
+        ]
     }
 
     /// `MinecraftServer.haveTime`: the current server tick has not reached the
@@ -54,6 +66,58 @@ mod tests {
         with_client_game(|game| {
             game.server_tick_deadline = Some(Instant::now() - Duration::from_millis(1));
             assert!(game.server_has_time());
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_server_reports_its_local_civil_minute_in_the_world_phase() {
+        use chrono::{Datelike, Local, Timelike};
+
+        let local_minute = || {
+            let now = Local::now();
+            [
+                now.year(),
+                now.month() as i32,
+                now.day() as i32,
+                now.hour() as i32,
+                now.minute() as i32,
+            ]
+        };
+        struct Calendar(Arc<Mutex<Option<[i32; 5]>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Calendar {
+            fn server_tick(&self, host: &mut dyn ServerHost, _: &mut ServerTickEvent<'_>) {
+                *self.0.lock().unwrap() = Some(host.server_local_minute());
+            }
+        }
+
+        let actual = Arc::new(Mutex::new(None));
+        let mods = vec![ModEntry::new(
+            "calendar",
+            Box::new(Calendar(actual.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let before = local_minute();
+                let _phase =
+                    mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
+                let context =
+                    mod_api::LifecycleContext::from(mod_api::__private::built::LifecycleContext {
+                        authority: mod_api::Authority::DedicatedServer,
+                        epoch: mod_api::WorldEpoch::new(5),
+                        tick: mod_api::TickId::new(1),
+                    });
+                game.native_server_tick(
+                    &context,
+                    ServerTickPhase::ServerTickStart {
+                        world_running: true,
+                    },
+                );
+                let expected = [Some(before), Some(local_minute())];
+                assert!(expected.contains(&*actual.lock().unwrap()));
+            });
         });
     }
 
