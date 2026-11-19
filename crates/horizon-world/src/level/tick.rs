@@ -1730,6 +1730,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let modifier = if own == 0 { 0.75 } else { 1.0 };
         if self.random().next_float() < chance * chance * modifier
             && let Some(next) = self.copper_next(state)
+            && self.level.allow_block_form(pos, state, next)
         {
             self.set_block_and_update(pos, next);
         }

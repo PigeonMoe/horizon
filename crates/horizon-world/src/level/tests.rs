@@ -53,9 +53,10 @@ pub(crate) struct TestLevel {
     pub cake_asks: std::cell::Cell<u32>,
     pub tick_ready: bool,
     pub block_events_ready: bool,
-    /// Positions that refuse fluids, fire, growth and piston moves, as a land claim would.
+    /// Positions that refuse fluids, fire, growth, formation, fading and piston moves.
     pub guarded: HashSet<BlockPos>,
     pub fade_checks: std::cell::RefCell<Vec<(BlockPos, BlockStateId, BlockStateId)>>,
+    pub form_checks: std::cell::RefCell<Vec<(BlockPos, BlockStateId, BlockStateId)>>,
     pub growth_spread_checks: std::cell::RefCell<Vec<(BlockPos, BlockPos)>>,
     pub guarded_current: HashSet<BlockPos>,
     pub guarded_falling: HashSet<BlockPos>,
@@ -143,6 +144,7 @@ impl TestLevel {
             block_events_ready: true,
             guarded: HashSet::new(),
             fade_checks: Default::default(),
+            form_checks: Default::default(),
             growth_spread_checks: std::cell::RefCell::new(Vec::new()),
             guarded_current: HashSet::new(),
             guarded_falling: HashSet::new(),
@@ -323,6 +325,10 @@ impl LevelAccess for TestLevel {
     }
     fn allow_block_fade(&self, pos: BlockPos, from: BlockStateId, to: BlockStateId) -> bool {
         self.fade_checks.borrow_mut().push((pos, from, to));
+        !self.guarded.contains(&pos)
+    }
+    fn allow_block_form(&self, pos: BlockPos, from: BlockStateId, to: BlockStateId) -> bool {
+        self.form_checks.borrow_mut().push((pos, from, to));
         !self.guarded.contains(&pos)
     }
     fn allow_spread(&self, kind: Spread, from: BlockPos, to: BlockPos) -> bool {
@@ -994,6 +1000,43 @@ fn a_viewed_copper_chest_does_not_weather() {
     w.level.opened.clear();
     f.behaviours.random_tick(&mut w.level, &mut w.ticks, pos);
     assert_ne!(draw(&w), before, "a closed one rolls changeOverTime");
+}
+
+#[test]
+fn copper_weathering_checks_the_proposed_state_after_both_random_rolls() {
+    let cases: &[(&str, &str, &[(&str, &str)])] = &[
+        ("copper_block", "exposed_copper", &[]),
+        (
+            "copper_chest",
+            "exposed_copper_chest",
+            &[("facing", "east"), ("type", "single")],
+        ),
+    ];
+    let pos = BlockPos::new(1, 64, 1);
+    for &(base, weathered, properties) in cases {
+        let mut w = world!();
+        let from = w.id(base, properties);
+        let to = w.id(weathered, properties);
+        w.put(pos, from);
+        w.level.guarded.insert(pos);
+
+        w.level.random.set_seed(42);
+        w.b().random_tick(&mut w.level, &mut w.ticks, pos);
+        assert!(w.level.form_checks.take().is_empty());
+        assert_eq!(w.get(pos), from);
+
+        // This seed passes both weathering rolls when there is no nearby copper.
+        w.level.random.set_seed(4608);
+        w.b().random_tick(&mut w.level, &mut w.ticks, pos);
+        assert_eq!(w.level.form_checks.take(), [(pos, from, to)]);
+        assert_eq!(w.get(pos), from);
+
+        w.level.guarded.remove(&pos);
+        w.level.random.set_seed(4608);
+        w.b().random_tick(&mut w.level, &mut w.ticks, pos);
+        assert_eq!(w.level.form_checks.take(), [(pos, from, to)]);
+        assert_eq!(w.get(pos), to);
+    }
 }
 
 #[test]
