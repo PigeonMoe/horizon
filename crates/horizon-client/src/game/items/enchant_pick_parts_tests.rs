@@ -230,7 +230,12 @@ fn apply_enchantments_starts_from_vanilla_and_refuses_another_count() {
         *answers.applied.lock().unwrap() = Some((7, 1));
         let mut changed = vanilla.clone();
         changed.damage = 7;
-        assert_eq!(game.table_enchant(7, 2, 30, &sword), Some(changed));
+        let mut actual = game.table_enchant(7, 2, 30, &sword).unwrap();
+        // The part round-trips the enchantment component as a map keyed by id.
+        // Equality here compares its keys and levels regardless of that order.
+        actual.data_mut().enchantments.sort_unstable();
+        changed.data_mut().enchantments.sort_unstable();
+        assert_eq!(actual, changed);
         // A count other than the input's is refused: vanilla's result.
         *answers.applied.lock().unwrap() = Some((7, 2));
         assert_eq!(game.table_enchant(7, 2, 30, &sword), Some(vanilla));
