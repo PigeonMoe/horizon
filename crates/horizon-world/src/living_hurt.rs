@@ -262,18 +262,43 @@ impl<U> SelectedHurt<U> {
     }
 }
 
+fn cooldown_damage<U>(hit: &PendingHurt<U>) -> f32 {
+    let damage = if hit.helmet {
+        hit.damage * 0.75
+    } else {
+        hit.damage
+    };
+    if damage.is_finite() { damage } else { f32::MAX }
+}
+
+fn starts_hurt_cooldown<W: HurtWorld>(
+    s: &mut HurtState<W::Source>,
+    w: &mut W,
+) -> Result<bool, W::Error> {
+    Ok(!(s.cooldown as f32 > 10.0 && !w.tag(s, HurtTag::BypassesCooldown)?))
+}
+
+/// Ask if the hit reaches equipment and health without changing the cooldown or
+/// running a damage reduction modifier before the actual damage continuation.
+pub fn equipment_hurt_admitted<W: HurtWorld>(
+    s: &mut HurtState<W::Source>,
+    w: &mut W,
+    hit: &PendingHurt<W::UseItem>,
+) -> Result<bool, W::Error> {
+    Ok(starts_hurt_cooldown(s, w)? || !cooldown_rejects(cooldown_damage(hit), s.last_hurt))
+}
+
+fn cooldown_rejects(damage: f32, last_hurt: f32) -> bool {
+    damage <= last_hurt
+}
+
 pub fn select_equipment_hurt<W: HurtWorld>(
     s: &mut HurtState<W::Source>,
     w: &mut W,
     mut hit: PendingHurt<W::UseItem>,
 ) -> Result<Option<SelectedHurt<W::UseItem>>, W::Error> {
-    if hit.helmet {
-        hit.damage *= 0.75;
-    }
-    if !hit.damage.is_finite() {
-        hit.damage = f32::MAX;
-    }
-    let fresh = !(s.cooldown as f32 > 10.0 && !w.tag(s, HurtTag::BypassesCooldown)?);
+    hit.damage = cooldown_damage(&hit);
+    let fresh = starts_hurt_cooldown(s, w)?;
     hit.container.record_should_cause_side_effects(fresh);
     let (damage, cooldown) = if fresh {
         let cooldown = hit.container.post_attack_invulnerability_ticks();
@@ -281,7 +306,7 @@ pub fn select_equipment_hurt<W: HurtWorld>(
         s.cooldown = cooldown;
         (hit.damage, cooldown)
     } else {
-        if hit.damage <= s.last_hurt {
+        if cooldown_rejects(hit.damage, s.last_hurt) {
             return Ok(None);
         }
         let dealt = hit.container.reduce(

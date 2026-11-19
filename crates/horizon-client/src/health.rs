@@ -1093,33 +1093,44 @@ impl PlayerMotion {
             None,
         )?;
         if let Some(impact) = level.fall_equipment()
-            && let Some(pending) = hit.pending.clone()
+            && let Some(damage) =
+                self.admitted_reaction_damage(level, resources, rules, &mut hit)?
+            && let Some(reaction) = impact
+                .boots
+                .and_then(|boots| boots.fall_reaction(impact.context, damage))
         {
-            let damage = pending.damage_before_reductions();
-            // Bukkit's damage event is reached only after cooldown admission.
-            // Check the native decision without committing a hit that may cancel.
-            let admitted = self.in_combat(level, resources, rules, &mut hit, |combat, state| {
-                Ok(horizon_world::living_hurt::select_equipment_hurt(
-                    &mut state.clone(),
-                    combat,
-                    pending,
-                )?
-                .is_some())
-            })?;
-            if admitted
-                && let Some(reaction) = impact
-                    .boots
-                    .and_then(|boots| boots.fall_reaction(impact.context, damage))
-            {
-                impact.reaction.set(reaction);
-                return Ok(BlockOutcome {
-                    canceled: true,
-                    ..BlockOutcome::default()
-                });
-            }
+            impact.reaction.set(reaction);
+            return Ok(BlockOutcome {
+                canceled: true,
+                ..BlockOutcome::default()
+            });
         }
         self.finish_hurt(level, resources, rules, hit)
     }
+
+    /// A Paper-style reaction can see a hit after the ordinary protection and
+    /// cooldown gates, before the unmodified health/armor continuation.
+    pub(crate) fn admitted_reaction_damage(
+        &mut self,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+        hit: &mut PausedHurt,
+    ) -> Result<Option<f32>> {
+        let Some(pending) = hit.pending.clone() else {
+            return Ok(None);
+        };
+        let damage = pending.damage_before_reductions();
+        self.in_combat(level, resources, rules, hit, |combat, state| {
+            Ok(horizon_world::living_hurt::equipment_hurt_admitted(
+                &mut state.clone(),
+                combat,
+                &pending,
+            )?
+            .then_some(damage))
+        })
+    }
+
     /// `hurtServer` up to `hurtHelmet`, for a player who wears a `helmet`; the arguments are
     /// `hurt_caused_by`'s. The caller has the player and the level back to wear the helmet
     /// with ([`PausedHurt::helmet_damage`]), and ends the hit with [`Self::finish_hurt`].

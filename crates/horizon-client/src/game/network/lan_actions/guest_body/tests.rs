@@ -9,6 +9,8 @@ use std::sync::{Arc, atomic::AtomicI32, mpsc};
 
 #[path = "tests/fall_reset.rs"]
 mod fall_reset;
+#[path = "tests/fire_contact.rs"]
+mod fire_contact;
 
 #[test]
 #[ignore = "daily"]

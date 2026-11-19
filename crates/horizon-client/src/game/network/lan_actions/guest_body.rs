@@ -271,7 +271,32 @@ impl Game<'_> {
             let _ = w.server_block_damage(start);
             let _ = w.update_soul_speed_block();
             let _ = w.tick_environment_damage();
-            let _ = w.apply_fire_contact();
+            if !mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre) {
+                let _ = w.apply_fire_contact();
+            } else if let Ok(Some(damage)) = w.prepare_fire_contact()
+                && let Ok(Some((hit, admitted))) = w.start_fire_contact_hurt(damage)
+            {
+                let mut cancel = false;
+                if let Some(damage) = admitted.filter(|damage| *damage > 0.0)
+                    && let Some(player) = game.native_acting_player()
+                {
+                    game.native_player_environment_damage_pre(
+                        mod_api::__private::PlayerEnvironmentDamagePreCall {
+                            player,
+                            damage_type: "minecraft:in_fire",
+                            damage,
+                            cancel: &mut cancel,
+                        },
+                    );
+                }
+                let Some(motion) = game.motion_world_for_guest(just_stopped_gliding) else {
+                    return (Vec::new(), None);
+                };
+                w = motion;
+                if !cancel {
+                    let _ = w.finish_fire_contact_hurt(hit);
+                }
+            }
             let _ = w.server_hazards_tick(in_wall);
             // LivingEntity.aiStep: a Riptide spin counts down on the server's
             // copy too, or it would stay in the spin pose (eye 0.4) for good.

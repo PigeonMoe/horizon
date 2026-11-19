@@ -172,9 +172,18 @@ impl MotionWorld<'_, '_, '_> {
         Ok(())
     }
     pub fn apply_fire_contact(&mut self) -> Result<()> {
+        if let Some(damage) = self.prepare_fire_contact()? {
+            self.environment_hurt("minecraft:in_fire", damage)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the vanilla ignition of contacting a fire block and report its
+    /// damage if the authoritative caller needs to run a reaction in place.
+    pub fn prepare_fire_contact(&mut self) -> Result<Option<f32>> {
         if self.player.spectator {
             self.player.fire_ticks = 0;
-            return Ok(());
+            return Ok(None);
         }
         let damage = fire_contact(self.scene, self.assets.registry, self.player.bounds());
         if damage > 0.0 {
@@ -189,10 +198,68 @@ impl MotionWorld<'_, '_, '_> {
                 );
                 self.player.set_remaining_fire_ticks(ticks);
             }
-            self.environment_hurt("minecraft:in_fire", damage)?;
-        } else if self.player.fire_ticks <= 0 {
+            return Ok(Some(damage));
+        }
+        if self.player.fire_ticks <= 0 {
             self.player.fire_ticks = -20;
         }
+        Ok(None)
+    }
+
+    pub fn start_fire_contact_hurt(
+        &mut self,
+        damage: f32,
+    ) -> Result<Option<(crate::health::PausedHurt, Option<f32>)>> {
+        if self.player.invulnerable || self.player.spectator {
+            return Ok(None);
+        }
+        let source = self
+            .health
+            .damage
+            .id("minecraft:in_fire")
+            .ok_or("missing environment damage type")?;
+        let rules = self.scene.health_rules;
+        let mut level = crate::health::DamageLevel::of(
+            self.scene,
+            self.assets.registry,
+            self.tag_items,
+            self.block_registries,
+            self.damage_hooks,
+        );
+        let mut hit = self.player.start_hurt(
+            &mut level,
+            self.health,
+            rules,
+            source,
+            damage,
+            None,
+            false,
+            0,
+            false,
+            false,
+            true,
+            None,
+        )?;
+        let admitted =
+            self.player
+                .admitted_reaction_damage(&mut level, self.health, rules, &mut hit)?;
+        Ok(Some((hit, admitted)))
+    }
+
+    pub fn finish_fire_contact_hurt(&mut self, hit: crate::health::PausedHurt) -> Result<()> {
+        let rules = self.scene.health_rules;
+        self.player.finish_hurt(
+            &mut crate::health::DamageLevel::of(
+                self.scene,
+                self.assets.registry,
+                self.tag_items,
+                self.block_registries,
+                self.damage_hooks,
+            ),
+            self.health,
+            rules,
+            hit,
+        )?;
         Ok(())
     }
 }
