@@ -87,11 +87,11 @@ fn dragon_egg_clicks_stop_on_the_first_refused_destination() {
     }
 
     let probe = Arc::new(Probe::default());
-    mod_platform::__private::install(Arc::from([mod_api::ModEntry::new(
+    let mods = Arc::from([mod_api::ModEntry::new(
         "dragon-egg-spread-test",
         Box::new(Listener(probe.clone())),
-    )]));
-    crate::game::native_guest_turn_tests::with_guests(|game| {
+    )]);
+    let check = |game: &mut Game<'_>| {
         game.build_registries();
         for z in [0, 1] {
             game.world
@@ -175,6 +175,9 @@ fn dragon_egg_clicks_stop_on_the_first_refused_destination() {
                 if denied { air } else { egg },
             );
         }
+    };
+    mod_platform::testing::with_mods(mods, || {
+        crate::game::native_guest_turn_tests::with_guests(check);
     });
 }
 
