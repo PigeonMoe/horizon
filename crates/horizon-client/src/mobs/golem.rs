@@ -605,7 +605,9 @@ pub fn snow_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
     if !w.can_grief(m.id) {
         return;
     }
-    let mut placed = Vec::new();
+    let Some(state) = w.registry.default_state("minecraft:snow") else {
+        return;
+    };
     for i in 0..4 {
         let xx = (m.position.x + f64::from((i % 2 * 2 - 1) as f32 * 0.25)).floor() as i32;
         let zz = (m.position.z + f64::from((i / 2 % 2 * 2 - 1) as f32 * 0.25)).floor() as i32;
@@ -626,28 +628,16 @@ pub fn snow_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
                 || (&*below.name == "minecraft:snow"
                     && w.prop(xx, y - 1, zz, "layers") == Some("8"))
         };
-        if w.facts.is_air(w.world.block(xx, y, zz))
-            && supported
-            && !placed.contains(&[xx, y, zz])
-            && let Some(state) = w.registry.default_state("minecraft:snow")
-        {
-            placed.push([xx, y, zz]);
-            events.push(MobEvent::PlaceBlock {
-                mob: m.id,
+        if w.facts.is_air(w.world.block(xx, y, zz)) && supported {
+            // Samples can repeat. The live block changes only after an
+            // accepted formation, so a later sample can retry a refused one.
+            events.push(MobEvent::FormSnow {
+                golem: m.id,
                 pos: [xx, y, zz],
                 state,
             });
-            if let Some(state) = w.registry.default_state("minecraft:snow") {
-                events.push(MobEvent::GameEvent {
-                    event: "minecraft:block_place",
-                    at: [f64::from(xx) + 0.5, f64::from(y) + 0.5, f64::from(zz) + 0.5],
-                    source: m.id,
-                    state,
-                });
-            }
         }
     }
-    let _ = z;
 }
 
 #[cfg(test)]
@@ -738,7 +728,7 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
-    fn snow_trail_posts_block_place_with_golem_and_snow_state() {
+    fn snow_trail_queues_each_sample_and_checks_mob_griefing() {
         let ran = crate::mobs::world::with_built_test_world(
             &[],
             |world, reg| {
@@ -754,21 +744,18 @@ mod tests {
                 let mut events = Vec::new();
                 snow_ai_step(&mut golem, w, &mut events);
                 let snow = w.registry.default_state("minecraft:snow").unwrap();
-                let posted: Vec<_> = events
+                let samples: Vec<_> = events
                     .iter()
                     .filter_map(|e| match e {
-                        MobEvent::GameEvent {
-                            event,
-                            at,
-                            source,
-                            state,
-                        } => Some((*event, *at, *source, *state)),
+                        MobEvent::FormSnow { golem, pos, state } => Some((*golem, *pos, *state)),
                         _ => None,
                     })
                     .collect();
-                assert_eq!(
-                    posted,
-                    vec![("minecraft:block_place", [1.5, 1.5, 1.5], 42, snow)]
+                assert_eq!(samples, [(42, [1, 1, 1], snow); 4]);
+                assert!(
+                    !events
+                        .iter()
+                        .any(|e| matches!(e, MobEvent::GameEvent { .. }))
                 );
                 events.clear();
                 let mut denied = w.clone();
@@ -777,7 +764,7 @@ mod tests {
                 assert!(
                     events
                         .iter()
-                        .all(|e| !matches!(e, MobEvent::GameEvent { .. }))
+                        .all(|e| !matches!(e, MobEvent::FormSnow { .. }))
                 );
             },
         );
@@ -865,10 +852,15 @@ mod tests {
                     let placed = events
                         .iter()
                         .filter(|event| {
-                            let MobEvent::PlaceBlock { mob, pos, state } = event else {
+                            let MobEvent::FormSnow {
+                                golem: source,
+                                pos,
+                                state,
+                            } = event
+                            else {
                                 return false;
                             };
-                            assert_eq!(*mob, golem.id);
+                            assert_eq!(*source, golem.id);
                             assert_eq!(*pos, [1, 1, 1]);
                             assert_eq!(&*w.facts.get(*state).name, "minecraft:snow");
                             true
@@ -876,7 +868,7 @@ mod tests {
                         .count();
                     assert_eq!(
                         placed,
-                        usize::from(*expect),
+                        if *expect { 4 } else { 0 },
                         "{floor}{properties:?} under {here}"
                     );
                 },

@@ -2521,6 +2521,32 @@ impl Game<'_> {
         }
         Ok(())
     }
+    /// Paper's SnowGolem.aiStep forms snow on each still-valid trail sample.
+    pub(super) fn snow_golem_form_snow(
+        &mut self,
+        golem: u32,
+        pos: [i32; 3],
+        state: BlockStateId,
+    ) -> crate::Result<()> {
+        let before = self.world.block(pos[0], pos[1], pos[2]);
+        if !self.res.facts().is_air(before)
+            || !self.level_can_survive(pos, state)
+            || !self.level_form_block(pos, state)?
+        {
+            return Ok(());
+        }
+        let facts = self.res.facts();
+        let from = facts.get(before).name.clone();
+        let to = facts.get(state).name.clone();
+        self.native_entity_change_block(golem, "minecraft:snow_golem", pos, &from, &to);
+        self.post_block_game_event(
+            "minecraft:block_place",
+            pos,
+            Some(Who::Mob(golem)),
+            Some(state),
+        );
+        Ok(())
+    }
     /// The player clicking, as the block-use hooks name them: the acting
     /// player's UUID and entity id on a server, this client's own player on
     /// a client.

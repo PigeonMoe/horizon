@@ -19,6 +19,7 @@ horizon-client game::crafting_recipe_kind_tests::registered_crafting_remainder_d
 horizon-client game::crafting_recipe_kind_tests::unregistered_serializer_failed_reload_preserves_previous_recipes lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::footwear_checks_current_gear_before_farmland_and_pearls_write lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::gliding_impact_wears_the_real_head_slot_and_only_protects_that_glide lib daily resources
+horizon-client game::creatures::snow_golem_form_tests::snow_trail_uses_formation_and_vibrates_only_after_writing lib daily resources
 horizon-client game::dedicated::tests::console_logging_survives_closed_stdout lib daily child-process
 horizon-client game::dispenser::decision_tests::crown_is_prepared_once_for_three_and_eight_dispenser_candidates lib daily resources
 horizon-client game::enchant_effects::frost_walker_tests::frost_walker_leaves_refused_source_water_and_places_the_neighbor lib daily resources

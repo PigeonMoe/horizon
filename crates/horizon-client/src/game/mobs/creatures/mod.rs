@@ -26,6 +26,8 @@ mod residency;
 mod retained_limits_tests;
 mod section_steps;
 #[cfg(test)]
+mod snow_golem_form_tests;
+#[cfg(test)]
 #[path = "../../creatures/spawn_egg_mob_tests.rs"]
 mod spawn_egg_mob_tests;
 #[cfg(test)]
@@ -3035,6 +3037,9 @@ impl Game<'_> {
                 }
                 MobEvent::PlaceBlock { mob, pos, state } => {
                     self.mob_place_block(mob, pos, state)?
+                }
+                MobEvent::FormSnow { golem, pos, state } => {
+                    self.snow_golem_form_snow(golem, pos, state)?
                 }
                 MobEvent::CropRaided {
                     pos,

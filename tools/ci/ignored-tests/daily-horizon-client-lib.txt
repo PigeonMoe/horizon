@@ -244,7 +244,7 @@ horizon-client-lib mobs::golem::tests::a_village_golem_still_targets_the_player_
 horizon-client-lib mobs::golem::tests::an_invisible_player_does_not_make_a_golem_defend_the_village lib daily resources
 horizon-client-lib mobs::golem::tests::an_iron_golem_walks_to_a_spot_near_its_target lib daily resources
 horizon-client-lib mobs::golem::tests::snow_trail_follows_is_air_and_the_snow_layer_tags lib daily resources
-horizon-client-lib mobs::golem::tests::snow_trail_posts_block_place_with_golem_and_snow_state lib daily resources
+horizon-client-lib mobs::golem::tests::snow_trail_queues_each_sample_and_checks_mob_griefing lib daily resources
 horizon-client-lib mobs::golem::tests::the_poppy_goes_to_a_villager_in_the_box_within_six_blocks lib daily resources
 horizon-client-lib mobs::golem::tests::the_poppy_needs_sight_and_a_dimension_with_a_day lib daily resources
 horizon-client-lib mobs::guardian::elder_home_tests::a_silent_elder_guardian_curses_without_the_sound lib daily resources

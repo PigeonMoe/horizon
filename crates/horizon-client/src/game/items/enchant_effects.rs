@@ -1383,19 +1383,7 @@ impl Game<'_> {
                     {
                         continue;
                     }
-                    let from = self.world.block(pos[0], pos[1], pos[2]);
-                    let target = BlockPos::new(pos[0], pos[1], pos[2]);
-                    let formed = self.with_level(|blocks, level, ticks| {
-                        level.allow_block_form(target, from, new)
-                            && blocks.set_block(
-                                level,
-                                ticks,
-                                target,
-                                new,
-                                horizon_world::level::flags::UPDATE_ALL,
-                            )
-                    });
-                    if !formed || self.process_level_events().is_err() {
+                    if !matches!(self.level_form_block(pos, new), Ok(true)) {
                         continue;
                     }
                     if event {

@@ -3063,6 +3063,24 @@ impl Game<'_> {
     fn level_set(&mut self, pos: [i32; 3], state: BlockStateId) -> Result<()> {
         self.level_set_with_flags(pos, state, level_flags::UPDATE_ALL)
     }
+    /// Applies a natural formation only if its loaded position and the
+    /// authoritative BlockForm hook allow the write.
+    fn level_form_block(&mut self, pos: [i32; 3], state: BlockStateId) -> Result<bool> {
+        let [x, y, z] = pos;
+        if !self.world.is_loaded_at(x, y, z) {
+            return Ok(false);
+        }
+        let from = self.world.block(x, y, z);
+        let target = BlockPos::new(x, y, z);
+        let formed = self.with_level(|blocks, level, ticks| {
+            level.allow_block_form(target, from, state)
+                && blocks.set_block(level, ticks, target, state, level_flags::UPDATE_ALL)
+        });
+        if formed {
+            self.process_level_events()?;
+        }
+        Ok(formed)
+    }
     /// Level.setBlock with the caller's update flags.
     fn level_set_with_flags(
         &mut self,

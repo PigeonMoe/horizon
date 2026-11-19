@@ -6,7 +6,7 @@ impl Game<'_> {
     /// extends it): `placer` is about to set the block `state` at `pos`
     /// against `placed_against`, as a player placing an item
     /// (`BlockItem.place`, before the stack shrinks), an enderman putting its
-    /// block down or a snow golem's trail. `placement` is `Multi` when the
+    /// block down. `placement` is `Multi` when the
     /// placement writes more blocks (bed, door, tall plant). Cancel stops
     /// the whole placement. Server-side.
     pub(in crate::game) fn native_entity_place(
