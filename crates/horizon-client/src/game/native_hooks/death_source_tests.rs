@@ -804,3 +804,151 @@ fn mob_death_and_handle_preserve_namespaced_types() {
         },
     );
 }
+
+#[test]
+#[ignore = "daily"]
+fn player_drops_expose_recent_resolved_credit_separate_from_the_fatal_fall() {
+    use crate::game::{execution_role::ExecutionRole, native_guest_turn_tests::with_guests};
+    use horizon_protocol::packets::login::Property;
+    use mod_api::{GameProfile, LivingDropsEvent, ProfileProperty};
+
+    crate::game::in_own_process(
+        "game::native_hooks::death_source_tests::player_drops_expose_recent_resolved_credit_separate_from_the_fatal_fall",
+        || {
+            struct Seen {
+                attacker: i32,
+                kind: String,
+                recently_hit: bool,
+                credited: Option<u128>,
+                profile: GameProfile,
+                drops: usize,
+            }
+            struct Observe(Arc<Mutex<Vec<Seen>>>);
+            #[mod_api::__subscriptions]
+            impl Hooks for Observe {
+                fn living_drops(
+                    &self,
+                    host: &mut dyn ServerHost,
+                    event: &mut LivingDropsEvent<'_>,
+                ) -> Flow {
+                    assert_eq!(event.player, Some(13));
+                    let profile = host.player(13).unwrap().profile(host).unwrap();
+                    self.0.lock().unwrap().push(Seen {
+                        attacker: event.source.causing,
+                        kind: event.source.damage_type.to_owned(),
+                        recently_hit: event.recently_hit,
+                        credited: event.credited_player,
+                        profile,
+                        drops: event.drops.len(),
+                    });
+                    Flow::Continue
+                }
+            }
+
+            crate::entry::install_client_hooks();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            mod_platform::testing::with_mods(
+                vec![ModEntry::new(
+                    "player-drop-credit",
+                    Box::new(Observe(seen.clone())),
+                )]
+                .into(),
+                || {
+                    // All real server players, including the integrated owner's local connection,
+                    // are represented by a guest and use this death and drop path.
+                    for (role, delay, connected) in [
+                        (ExecutionRole::DedicatedServer, 20, true),
+                        (ExecutionRole::IntegratedServer, 100, true),
+                        (ExecutionRole::DedicatedServer, 20, false),
+                    ] {
+                        with_guests(|game| {
+                            game.options.execution_role = role;
+                            game.build_registries();
+                            game.set_allow_commands(true);
+                            assert!(game.run_command("difficulty normal"));
+                            // With inventory retention, a plugin can still add a drop.
+                            assert!(game.ui.rules.set(
+                                "keep_inventory",
+                                horizon_client::gamerules::Value::Bool(true),
+                            ));
+                            game.lan
+                                .as_mut()
+                                .unwrap()
+                                .hub
+                                .update_guest(13, |guest| {
+                                    guest.loaded = true;
+                                    guest.load_timeout = 0;
+                                    guest.inventory[0] =
+                                        Some(ItemStack::new("minecraft:diamond", 1));
+                                    guest.properties = vec![Property {
+                                        name: "textures".into(),
+                                        value: "e30=".into(),
+                                        signature: Some("signed".into()),
+                                    }];
+                                })
+                                .unwrap();
+                            game.as_guest(13, |game| {
+                                game.note_player_attacker(
+                                    "minecraft:player_attack",
+                                    12,
+                                    horizon_client::text::Text::literal("guest12"),
+                                    None,
+                                );
+                                assert!(game.hurt_player_from(
+                                    1.0,
+                                    None,
+                                    "minecraft:player_attack",
+                                    Some(None),
+                                    false,
+                                ));
+                            })
+                            .unwrap();
+                            if !connected {
+                                game.lan
+                                    .as_mut()
+                                    .unwrap()
+                                    .hub
+                                    .update_guest(12, |guest| {
+                                        guest.placed = false;
+                                    })
+                                    .unwrap();
+                            }
+                            game.world.game_time += delay;
+                            game.as_guest(13, |game| {
+                                assert!(game.hurt_player_from(
+                                    100.0,
+                                    None,
+                                    "minecraft:fall",
+                                    Some(None),
+                                    false,
+                                ));
+                            })
+                            .unwrap();
+                            game.guest_die(1, 13);
+                            let mut observations = seen.lock().unwrap();
+                            assert_eq!(observations.len(), 1);
+                            let actual = observations.pop().unwrap();
+                            assert_eq!(actual.attacker, 0);
+                            assert_eq!(actual.kind, "minecraft:fall");
+                            assert_eq!(actual.recently_hit, delay < 100);
+                            assert_eq!(actual.credited, (delay < 100 && connected).then_some(12));
+                            assert_eq!(actual.drops, 0);
+                            assert_eq!(
+                                actual.profile,
+                                GameProfile::new(
+                                    13,
+                                    "guest13".into(),
+                                    vec![ProfileProperty::new(
+                                        "textures".into(),
+                                        "e30=".into(),
+                                        Some("signed".into()),
+                                    )],
+                                )
+                            );
+                        });
+                    }
+                },
+            );
+        },
+    );
+}

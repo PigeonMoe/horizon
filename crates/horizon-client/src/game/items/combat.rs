@@ -50,11 +50,6 @@ impl CombatTracker {
         self.last_hurt_by_player = None;
         credit
     }
-    /// Whether a player hurt this body within the last 100 ticks
-    /// (`lastHurtByPlayerMemoryTime > 0`), without forgetting them.
-    pub(super) fn recently_hit_by_player(&self, now: i64) -> bool {
-        self.player_credit(now).is_some()
-    }
     /// The player reference while its 100-tick memory is active.
     pub(super) fn player_credit(&self, now: i64) -> Option<PlayerCredit> {
         self.last_hurt_by_player

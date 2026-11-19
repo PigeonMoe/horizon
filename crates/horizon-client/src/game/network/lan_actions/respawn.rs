@@ -438,11 +438,16 @@ impl Game<'_> {
             );
             // LivingEntity.die: the death animation, the dying player included.
             host.hub.entity_event(id, 3);
-            let recently_hit = killing.is_some()
-                && self
-                    .guest_combat
-                    .get(&conn)
-                    .is_some_and(|c| c.recently_hit_by_player(self.world.game_time));
+            // The remembered player can differ from the killing blow (for example,
+            // when the victim falls after a hit). Only a currently resolved player
+            // can act on this credit in the drop hook.
+            let player_credit = self
+                .guest_combat
+                .get(&conn)
+                .and_then(|combat| combat.player_credit(self.world.game_time));
+            let recently_hit = killing.is_some() && player_credit.is_some();
+            let credited_player = player_credit
+                .and_then(|credit| self.resolve_player_credit(credit).map(|_| credit.0));
             let dropping = crate::game::creatures::DyingDrops {
                 entity: id as u32,
                 kind: "minecraft:player",
@@ -451,7 +456,7 @@ impl Game<'_> {
                     crate::game::creatures::death_hurt_source(damage_type, attacker.unwrap_or(0))
                 }),
                 recently_hit,
-                credited_player: None,
+                credited_player,
             };
             // LivingEntity.die: the death is heard, and a sculk catalyst
             // nearby takes the experience (before the loot is dropped), as it

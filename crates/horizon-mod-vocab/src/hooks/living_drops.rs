@@ -18,7 +18,7 @@ pub trait Hooks {
     /// entity ids, 0 when none or not known) and `recently_hit` is whether a
     /// player hurt it within 100 ticks, which is what lets a mob drop its
     /// equipment. `credited_player` is the resolved player UUID from a mob's
-    /// kill credit. It can be present when the killing blow has no attacker.
+    /// or player's kill credit. It can be present when the killing blow has no attacker.
     /// An armor stand fires it from `brokenByAnything` with an
     /// empty list (its stand item and its equipment pop outside the list, as
     /// in vanilla). Experience orbs are not in the list
