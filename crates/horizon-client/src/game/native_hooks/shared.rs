@@ -2365,6 +2365,7 @@ pub(super) fn block_use_result(
 }
 
 /// What the mods answered a right click on a block (`right_click_block`).
+#[derive(Clone, Copy)]
 pub(super) enum BlockClickAnswer {
     /// Cancelled: this answers the click instead of the block and the item.
     Canceled(mod_api::InteractionResult),

@@ -1,24 +1,35 @@
 use super::*;
 
 impl Game<'_> {
+    pub(in crate::game) fn check_current_block_click(
+        &mut self,
+        hit: &crate::game::Hit,
+    ) -> BlockClickAnswer {
+        let held = self.held().cloned();
+        horizon_client::spans::time("use_mods", || {
+            self.right_click_block(hit, self.hand, held.as_ref())
+        })
+    }
+
     /// Finish all useOn handlers, including placement, before entering Item.use.
     pub(in crate::game) fn use_target_then_item(
         &mut self,
         hit: &crate::game::Hit,
     ) -> horizon_client::Result<bool> {
         self.guest_use = Some(crate::game::GuestUse::OnBlock(self.hand));
-        let result = self.with_block_use_original(self.hand, |g| {
-            let result = g.use_hand(Some(hit));
+        let (result, answer) = self.with_block_use_original(self.hand, |g| {
+            let answer = g.check_current_block_click(hit);
+            let result = g.use_hand_with_checked_click(Some(hit), Some((hit, answer)));
             if matches!(result, Ok(true)) && !g.use_failed {
                 g.finish_block_use(hit.pos, g.hand);
             }
-            result
+            (result, answer)
         });
         self.guest_use = None;
         if result? {
             return Ok(true);
         }
-        self.use_hand(None)
+        self.use_hand_with_checked_click(None, Some((hit, answer)))
     }
 
     pub(in crate::game) fn use_item_fallthrough(

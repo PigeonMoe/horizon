@@ -10,7 +10,8 @@ mod lifetime_tests;
 mod placement;
 pub(super) use placement::OutlineFluidRay;
 
-use super::{Game, InteractTarget, entity::Entity, entity_culling::at, view_vector};
+use super::native_hooks::BlockClickAnswer;
+use super::{Game, Hit, InteractTarget, entity::Entity, entity_culling::at, view_vector};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
 use horizon_client::{
@@ -1654,10 +1655,38 @@ impl Game<'_> {
         }
     }
     /// `BoatItem.use`: aim at a block or the water surface.
-    pub(super) fn place_boat(&mut self, stack: &ItemStack) -> bool {
-        let Some(boat) = self.boat_to_place(stack) else {
-            return false;
-        };
+    pub(super) fn place_boat(
+        &mut self,
+        stack: &ItemStack,
+        checked_click: Option<(&Hit, BlockClickAnswer)>,
+    ) -> Option<bool> {
+        let (wood, chest) = any_boat_wood(&stack.item)?;
+        let hit = self.boat_item_hit()?;
+        // Paper's BoatItem.use asks PlayerInteractEvent at its fluid-aware
+        // hit before creating the boat or using the stack.
+        if self.native_authoritative() {
+            let answer = checked_click
+                .filter(|(previous, _)| previous.pos == hit.pos && previous.face == hit.face)
+                .map_or_else(
+                    || self.right_click_block(&hit, self.hand, Some(stack)),
+                    |(_, answer)| answer,
+                );
+            match answer {
+                BlockClickAnswer::Canceled(answer) => {
+                    self.use_failed = answer == mod_api::InteractionResult::Fail;
+                    return Some(self.interaction_consumed(answer) || self.use_failed);
+                }
+                BlockClickAnswer::Go {
+                    use_block,
+                    use_item,
+                } => {
+                    if !use_block.or(true) || !use_item.or(true) {
+                        return Some(false);
+                    }
+                }
+            }
+        }
+        let boat = self.boat_from_hit(wood, chest, hit)?;
         self.next_entity += 1;
         let key = (
             boat.position.x.floor() as i32 >> 4,
@@ -1693,20 +1722,23 @@ impl Game<'_> {
         }
         self.award_stat("used", &stack.item, 1);
         self.swing_arm();
-        true
+        Some(true)
     }
     /// The boat `BoatItem.use` would place for `stack` (its SUCCESS), or
     /// None when it aims at nothing (PASS) or the spot is taken (FAIL).
     pub(super) fn boat_to_place(&self, stack: &ItemStack) -> Option<Boat> {
         let (wood, chest) = any_boat_wood(&stack.item)?;
+        self.boat_from_hit(wood, chest, self.boat_item_hit()?)
+    }
+
+    fn boat_from_hit(&self, wood: &str, chest: bool, hit: Hit) -> Option<Boat> {
         if !self.boat_models.has(wood, chest) {
             return None;
         }
-        let hit = self.boat_item_hit()?;
         let mut boat = Boat::new(
             self.next_entity + 1,
             Arc::from(wood),
-            Vec3::new(hit[0], hit[1], hit[2]),
+            Vec3::new(hit.point[0], hit.point[1], hit.point[2]),
             self.yaw,
         );
         if chest {

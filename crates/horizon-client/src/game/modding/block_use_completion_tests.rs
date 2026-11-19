@@ -183,6 +183,187 @@ fn dragon_egg_clicks_stop_on_the_first_refused_destination() {
 
 #[test]
 #[ignore = "daily"]
+fn boat_item_protects_its_fluid_hit_without_repeating_the_block_phase() {
+    use horizon_client::chunk::Chunk;
+    use horizon_protocol::packets::play::{Serverbound, UseItem, UseItemOn};
+    use mod_api::{Flow, HostSide, InteractionResult, RightClickBlockEvent};
+
+    const WATER: [i32; 3] = [3, 65, 4];
+    const SHORE: [i32; 3] = [3, 65, 2];
+    const SOLID: [i32; 3] = [7, 65, 4];
+    const UP: [i32; 3] = [0, 1, 0];
+
+    #[derive(Default)]
+    struct Probe {
+        cancellation: Option<InteractionResult>,
+        clicks: Vec<([i32; 3], [i32; 3])>,
+    }
+
+    struct Listener(Arc<Mutex<Probe>>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Listener {
+        fn right_click_block(&self, host: HostSide, event: &mut RightClickBlockEvent<'_>) -> Flow {
+            let HostSide::Server(host) = host else {
+                return Flow::Continue;
+            };
+            let click = &event.click;
+            assert_eq!(click.player, 12);
+            assert!(
+                click
+                    .stack
+                    .is_some_and(|stack| stack.item().id(host) == "minecraft:oak_boat")
+            );
+            let mut probe = self.0.lock().unwrap();
+            probe.clicks.push((click.pos, click.hit.face));
+            if let Some(answer) = probe.cancellation {
+                *event.cancellation_result = answer;
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let probe = Arc::new(Mutex::new(Probe::default()));
+    let mods = Arc::from([mod_api::ModEntry::new(
+        "boat-fluid-click-test",
+        Box::new(Listener(probe.clone())),
+    )]);
+    mod_platform::testing::with_mods(mods, || {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            game.build_registries();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let registry = &game.pack.assets.registry;
+            let water = registry.default_state("minecraft:water").unwrap();
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in 2..=5 {
+                for z in 3..=6 {
+                    game.world.set(x, 60, z, stone).unwrap();
+                    game.world.set(x, 65, z, water).unwrap();
+                }
+            }
+            for [x, y, z] in [SHORE, SOLID, [7, 65, 2]] {
+                game.world.set(x, y, z, stone).unwrap();
+            }
+            let guests = &mut game.lan.as_mut().unwrap().hub.guests;
+            guests
+                .update_connection(13, |guest| {
+                    guest.position = [13.5, 66.0, 13.5];
+                    guest.previous_position = guest.position;
+                })
+                .unwrap();
+            let set_guest = |game: &mut Game<'_>, x| {
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .update_connection(12, |guest| {
+                        guest.position = [x, 66.0, 2.5];
+                        guest.previous_position = guest.position;
+                        guest.yaw = 0.0;
+                        guest.pitch = 45.0;
+                        guest.inventory[0] = Some(ItemStack::new("minecraft:oak_boat", 1));
+                    })
+                    .unwrap();
+            };
+            let held = |game: &Game<'_>| {
+                game.lan.as_ref().unwrap().hub.guests[0].inventory[0]
+                    .as_ref()
+                    .map_or(0, |stack| stack.count)
+            };
+            let clicks = || std::mem::take(&mut probe.lock().unwrap().clicks);
+            let air_use = |game: &mut Game<'_>, sequence| {
+                game.lan_guest_packet(
+                    12,
+                    Serverbound::UseItem(UseItem {
+                        hand: 0,
+                        yaw: 0.0,
+                        pitch: 45.0,
+                        sequence,
+                    }),
+                );
+            };
+
+            set_guest(game, 3.5);
+            game.as_guest(12, |game| {
+                assert!(
+                    game.pick().is_none(),
+                    "the basic ray must miss the deep pond"
+                )
+            })
+            .unwrap();
+            let next_id = game.next_entity;
+            probe.lock().unwrap().cancellation = Some(InteractionResult::Fail);
+            air_use(game, 1);
+            assert_eq!(clicks(), [(WATER, UP)]);
+            assert!(game.boats.is_empty());
+            assert_eq!(game.next_entity, next_id);
+            assert_eq!(held(game), 1);
+
+            // A normal UseItemOn is already a block click. It never invokes
+            // BoatItem.use or asks again at the player's fluid-ray hit.
+            probe.lock().unwrap().cancellation = None;
+            game.lan_guest_packet(
+                12,
+                Serverbound::UseItemOn(UseItemOn {
+                    hand: 0,
+                    pos: SHORE,
+                    face: 1,
+                    cursor: [0.5, 1.0, 0.5],
+                    inside: false,
+                    world_border: false,
+                    sequence: 2,
+                }),
+            );
+            assert_eq!(clicks(), [(SHORE, UP)]);
+            assert!(game.boats.is_empty());
+            assert_eq!(held(game), 1);
+
+            air_use(game, 3);
+            assert_eq!(clicks(), [(WATER, UP)]);
+            assert_eq!(game.boats.len(), 1);
+            let at = game.boats[0].position;
+            assert_eq!(
+                [
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32
+                ],
+                WATER
+            );
+            assert_eq!(held(game), 0);
+
+            // The integrated click performs useOn and Item.use in one call.
+            // Matching its real block and face reuses the first answer.
+            let local_click = |game: &mut Game<'_>| {
+                game.as_guest(12, |game| {
+                    let hit = game.pick().unwrap();
+                    assert_eq!((hit.pos, hit.face), (SOLID, UP));
+                    game.use_hand(Some(&hit)).unwrap()
+                })
+                .unwrap()
+            };
+            set_guest(game, 7.5);
+            probe.lock().unwrap().cancellation = Some(InteractionResult::Pass);
+            assert!(!local_click(game));
+            assert_eq!(clicks(), [(SOLID, UP)]);
+            assert_eq!(game.boats.len(), 1);
+            assert_eq!(held(game), 1);
+
+            probe.lock().unwrap().cancellation = None;
+            assert!(local_click(game));
+            assert_eq!(clicks(), [(SOLID, UP)]);
+            assert_eq!(game.boats.len(), 2);
+            assert_eq!(held(game), 0);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn consuming_cancellation_has_one_outer_on_local_and_packet_routes() {
     let _recording = Recording::start();
     struct Listener(Arc<AtomicUsize>);

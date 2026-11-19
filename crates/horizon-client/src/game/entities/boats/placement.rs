@@ -1,5 +1,5 @@
 //! BoatItem's server POV clip; deliberately separate from renderer/mining picks.
-use super::{Fluid, Game};
+use super::{Fluid, Game, Hit};
 use horizon_core::{
     geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
     position::BlockPos,
@@ -87,7 +87,7 @@ impl RayWorld for OutlineFluidRay<'_, '_> {
 }
 impl Game<'_> {
     /// `Item.getPlayerPOVHitResult`: float view vector, OUTLINE and Fluid.ANY.
-    pub(super) fn boat_item_hit(&self) -> Option<[f64; 3]> {
+    pub(super) fn boat_item_hit(&self) -> Option<Hit> {
         let [x, y, z] = self.eye_position()?;
         let start = Vec3::new(x, y, z);
         let dir = horizon_world::view_direction::view_vector(self.pitch, self.yaw);
@@ -101,6 +101,7 @@ impl Game<'_> {
             256,
         )
         .ok()?;
-        (!hit.miss).then_some([hit.hit.location.x, hit.hit.location.y, hit.hit.location.z])
+        let BlockPos { x, y, z } = hit.hit.block;
+        (!hit.miss).then(|| Hit::from_block_hit([x, y, z], &hit.hit))
     }
 }

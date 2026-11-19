@@ -22,6 +22,14 @@ impl Game<'_> {
         {
             return self.use_target_then_item(hit);
         }
+        self.use_hand_with_checked_click(block_hit, None)
+    }
+
+    pub(in crate::game) fn use_hand_with_checked_click(
+        &mut self,
+        block_hit: Option<&Hit>,
+        checked_click: Option<(&Hit, native_hooks::BlockClickAnswer)>,
+    ) -> Result<bool> {
         self.use_failed = false;
         // isSecondaryUseActive with something in either hand keeps blocks
         // from reacting.
@@ -40,10 +48,8 @@ impl Game<'_> {
         let (mut use_block, mut use_item) = (TriState::Default, TriState::Default);
         let block_phase = horizon_client::spans::guard("use_block");
         if let Some(hit) = block_hit {
-            let held = self.held().cloned();
-            let answer = horizon_client::spans::time("use_mods", || {
-                self.right_click_block(hit, self.hand, held.as_ref())
-            });
+            let answer = checked_click
+                .map_or_else(|| self.check_current_block_click(hit), |(_, answer)| answer);
             match answer {
                 native_hooks::BlockClickAnswer::Go {
                     use_block: block,
@@ -555,8 +561,8 @@ impl Game<'_> {
             return Ok(true);
         }
         // BoatItem.use also performs its own fluid/block raycast.
-        if !on_block && self.place_boat(&stack) {
-            return Ok(true);
+        if !on_block && let Some(used) = self.place_boat(&stack, checked_click) {
+            return Ok(used);
         }
         // ItemStack.useOn passes in adventure mode unless the item's
         // can_place_on matches the clicked block; Item.use then runs as usual.
