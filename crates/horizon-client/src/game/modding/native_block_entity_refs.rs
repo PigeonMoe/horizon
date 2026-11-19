@@ -32,6 +32,67 @@ impl Game<'_> {
         Some((world, loaded_block_entity(world, fields.position)?))
     }
 
+    pub(super) fn block_entity_relocate_player_head(
+        &mut self,
+        entity: BlockEntityRef,
+        to: [i32; 3],
+        rotation: u8,
+    ) -> Result<Option<BlockEntityRef>, BlockEntityError> {
+        let fields = entity.fields();
+        let level = fields.level;
+        let from = fields.position;
+        let (_, runtime) = self
+            .native_block_entity_target(entity)
+            .ok_or(BlockEntityError::Stale)?;
+        if level.dimension() != self.dim.key() || !self.native_authoritative() {
+            return Err(BlockEntityError::Stale);
+        }
+        let [x, y, z] = to;
+        let target_key = (x, y, z);
+        if !matches!(runtime, BlockEntity::Skull(_))
+            || self
+                .res
+                .facts()
+                .get(self.world.block(from[0], from[1], from[2]))
+                .name
+                .as_ref()
+                != "minecraft:player_head"
+            || rotation > 15
+            || from
+                .into_iter()
+                .zip(to)
+                .map(|(a, b)| u64::from(a.abs_diff(b)))
+                .sum::<u64>()
+                != 1
+            || y <= self.world.shape.min_y
+            || !self.native_level_write_allowed(level, from)
+            || !self.native_level_write_allowed(level, to)
+            || !self
+                .border
+                .geometry()
+                .is_within_bounds(f64::from(x), f64::from(z), 0.0)
+            || !self.res.facts().is_air(self.world.block(x, y, z))
+            || self.world.block_entities.get(&target_key).is_some()
+            || self.world.block_entities.is_taken(&target_key)
+            || self.world.block_entities.carried(&target_key).is_some()
+        {
+            return Ok(None);
+        }
+        let Some(state) = self
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:player_head")
+            .and_then(|state| self.with_props(state, &[("rotation", &rotation.to_string())]))
+        else {
+            return Ok(None);
+        };
+        if !self.move_standing_head(from, to, state) {
+            return Ok(None);
+        }
+        Ok(self.block_entity(level, to))
+    }
+
     pub(super) fn block_entity_saved_attachment(
         &self,
         entity: BlockEntityRef,
@@ -578,7 +639,9 @@ impl Game<'_> {
         }
         self.journal_block_entity(key);
         match self.world.block_entities.get_mut(&key) {
-            Some(BlockEntity::Banner(banner)) => banner.name = name.map(|name| Tag::String(name.into())),
+            Some(BlockEntity::Banner(banner)) => {
+                banner.name = name.map(|name| Tag::String(name.into()))
+            }
             _ => {
                 match name {
                     Some(name) => self.world.block_names.insert(key, Tag::String(name.into())),
@@ -753,6 +816,90 @@ mod tests {
         let replacement =
             save_without_metadata(&world, pos, &entity, "minecraft:player_head").unwrap();
         assert!(!replacement.contains_key(&"PublicBukkitValues".into()));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_moved_head_keeps_its_profile_and_attachments_without_leaving_a_duplicate() {
+        use super::super::native_entity_refs::tests::with_game;
+        use horizon_mod_runtime::attachments::Attachments;
+        use mod_api::BlockUpdateFlags as Flags;
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            for x in [0, 1] {
+                game.world
+                    .chunks
+                    .insert((x, 0), Arc::new(Chunk::empty(x, 0)));
+            }
+            let from = [15, 69, 3];
+            let to = [16, 69, 3];
+            let level = game.level("minecraft:overworld").unwrap();
+            let registry = game.pack.assets.registry;
+            let head = registry.default_state("minecraft:player_head").unwrap();
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            assert_eq!(
+                game.level_set_block(level, from, head, Flags::CLIENTS),
+                Ok(true)
+            );
+            let original = game.block_entity(level, from).unwrap();
+            let profile = Tag::compound([("name", Tag::String("MoveFixture".into()))]);
+            assert_eq!(
+                original.merge_data(game, Compound::from([("profile".into(), profile.clone())])),
+                Ok(true)
+            );
+            let payload = Compound::from([("step".into(), Tag::Int(6))]);
+            let envelope = Tag::compound([("value", Tag::Compound(payload.clone()))]);
+            let saved = Compound::from([("test".into(), Tag::compound([("android", envelope)]))]);
+            game.world
+                .block_entities
+                .restore_attachments((from[0], from[1], from[2]), Attachments::from_nbt(saved));
+            assert_eq!(
+                game.block_entity_saved_attachment(original, "test", "android"),
+                Some(payload.clone())
+            );
+            assert_eq!(
+                game.level_set_block(level, to, stone, Flags::CLIENTS),
+                Ok(true)
+            );
+            assert_eq!(original.relocate_player_head(game, to, 4), Ok(None));
+            assert_eq!(
+                original.relocate_player_head(game, [14, 69, 4], 4),
+                Ok(None)
+            );
+            assert_eq!(game.block_entity(level, from), Some(original));
+            assert_eq!(
+                game.level_set_block(level, to, game.world.air, Flags::CLIENTS),
+                Ok(true)
+            );
+            let moved = original.relocate_player_head(game, to, 4).unwrap().unwrap();
+            assert!(game.block_entity(level, from).is_none());
+            assert!(
+                game.res
+                    .facts()
+                    .is_air(game.world.block(from[0], from[1], from[2]))
+            );
+            assert_eq!(
+                original.relocate_player_head(game, to, 4),
+                Err(BlockEntityError::Stale)
+            );
+            assert_eq!(
+                moved.data(game).unwrap().get(&"profile".into()),
+                Some(&profile)
+            );
+            assert_eq!(
+                game.block_entity_saved_attachment(moved, "test", "android"),
+                Some(payload)
+            );
+            assert_eq!(
+                game.block_entity_saved_attachment(original, "test", "android"),
+                None
+            );
+            assert_eq!(
+                game.world.block(to[0], to[1], to[2]),
+                game.with_props(head, &[("rotation", "4")]).unwrap()
+            );
+            assert!(game.dropped.is_empty());
+        });
     }
 
     #[test]

@@ -107,6 +107,20 @@ pub trait BlockEntitiesBackend {
 #[horizon_mod_api_macros::host_area]
 pub trait BlockEntitiesBackendMut {
     /// Side: server.
+    /// Move this standing player head one cell to an adjacent air block with the given vanilla
+    /// rotation (0 to 15). The skull profile, saved data and its attachments move together.
+    /// Menus anchored at the former position close and the old handle becomes stale.
+    /// Both cells must be loaded in the level in place, and the target must be inside
+    /// the build limits and world border. This is a device move, with no player or item drops.
+    /// Returns `Ok(None)` for an occupied or otherwise unsuitable destination or a non-player head.
+    #[access(WorldOnly)]
+    fn block_entity_relocate_player_head(
+        &mut self,
+        entity: BlockEntityRef,
+        to: [i32; 3],
+        rotation: u8,
+    ) -> Result<Option<BlockEntityRef>, BlockEntityError>;
+    /// Side: server.
     /// Change the lock through the same storage used by container opening and saving.
     #[access(WorldOnly)]
     fn block_entity_set_lock(

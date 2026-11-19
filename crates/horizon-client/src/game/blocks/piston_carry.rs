@@ -163,6 +163,45 @@ impl GameLevel<'_> {
 }
 
 impl Game<'_> {
+    /// Move a checked head with the same per-position payload and viewer handoff a piston uses.
+    pub(in crate::game) fn move_standing_head(
+        &mut self,
+        from: [i32; 3],
+        to: [i32; 3],
+        state: BlockStateId,
+    ) -> bool {
+        use mod_api::BlockUpdateFlags as Flags;
+        let from_pos = BlockPos::new(from[0], from[1], from[2]);
+        let to_pos = BlockPos::new(to[0], to[1], to[2]);
+        let empty = self.world.block(to[0], to[1], to[2]);
+        let air = self.world.air;
+        // Queue client updates, but keep shape changes and removal side effects out of the
+        // two-cell write so neither endpoint can be replaced during the payload transfer.
+        let flags = (Flags::CLIENTS
+            | Flags::KNOWN_SHAPE
+            | Flags::SKIP_BLOCK_ENTITY_SIDE_EFFECTS
+            | Flags::SKIP_ON_PLACE)
+            .bits();
+        let moved = self.with_level(|_, level, ticks| {
+            if !level.native_set_block(ticks, to, state, flags) {
+                return false;
+            }
+            level.carry_mod_block_entity(from_pos, to_pos);
+            if !level.native_set_block(ticks, from, air, flags) {
+                // Return the single carried payload to its original block on refusal.
+                if level.land_carried_block_entity(to_pos) {
+                    level.carry_mod_block_entity(to_pos, from_pos);
+                    level.land_carried_block_entity(from_pos);
+                }
+                level.native_set_block(ticks, to, empty, flags);
+                return false;
+            }
+            level.land_carried_block_entity(to_pos)
+        });
+        let _ = self.process_level_events();
+        moved
+    }
+
     /// `PistonMovingBlockEntity.saveAdditional` for a chunk save, with the
     /// block entity the piston carries under [`CARRIED_KEY`].
     pub(super) fn saved_moving_piston(&self, pos: BlockPos, piston: &MovingPiston) -> Tag {
