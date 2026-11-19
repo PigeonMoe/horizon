@@ -326,3 +326,82 @@ fn remaining_hit_callers_observe_refusals_and_zero_damage() {
         })
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_loaded_fireworks_item_can_prevent_damage_without_suppressing_the_burst() {
+    #[derive(Clone, Debug, PartialEq)]
+    enum Seen {
+        Damage(u32, bool),
+        Burst(u32, usize),
+    }
+    struct FireworkProbe(Arc<Mutex<Vec<Seen>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for FireworkProbe {
+        fn firework_damage_pre(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut mod_api::FireworkDamagePreEvent<'_>,
+        ) -> Flow {
+            let visual = event
+                .item
+                .components()
+                .and_then(|parts| parts.as_nbt().get(&"minecraft:custom_data".into()))
+                .and_then(|data| data.get("visual"))
+                .is_some_and(|tag| tag == &mod_api::Tag::Byte(1));
+            self.0
+                .lock()
+                .unwrap()
+                .push(Seen::Damage(event.entity, visual));
+            if visual { Flow::Cancel } else { Flow::Continue }
+        }
+
+        fn firework_explode(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut mod_api::FireworkExplodeEvent,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(Seen::Burst(event.entity, event.bursts));
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![mod_api::ModEntry::new(
+        "firework-visual",
+        Box::new(FireworkProbe(seen.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            game.build_registries();
+            fresh_player(game, GameMode::Survival);
+            game.player.as_mut().unwrap().client_loaded = true;
+
+            for (id, marker, health) in [(901, "1b", 20.0), (902, "0b", 13.0)] {
+                let (tag, _) = horizon_core::nbt::parse_snbt(&format!(
+                    r#"{{Pos:[0d,0d,0d],FireworksItem:{{id:"minecraft:firework_rocket",count:1,components:{{"minecraft:custom_data":{{visual:{marker}}},"minecraft:fireworks":{{flight_duration:1,explosions:[{{shape:"small_ball",colors:[I;65280]}}]}}}}}}}}"#
+                )).unwrap();
+                let mut rocket = Rocket::from_nbt(
+                    horizon_client::entity_nbt::firework_rocket_from_nbt(&tag, None).unwrap(),
+                );
+                rocket.id = id;
+                assert_eq!(rocket.explosions.len(), 1);
+                game.explode_rocket(&rocket);
+                assert_eq!(game.player.as_ref().unwrap().health.health(), health);
+            }
+        });
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            Seen::Damage(901, true),
+            Seen::Burst(901, 1),
+            Seen::Damage(902, false),
+            Seen::Burst(902, 1)
+        ],
+    );
+}

@@ -2943,6 +2943,13 @@ impl Game<'_> {
         self.fire_firework_explode(entity, pos, bursts);
     }
 
+    pub(in crate::game) fn native_firework_damage_pre(
+        &mut self,
+        call: mod_api::__private::FireworkDamagePreCall<'_>,
+    ) {
+        self.fire_firework_damage_pre(call);
+    }
+
     /// An experience bottle broke and its experience was awarded.
     pub(in crate::game) fn native_exp_bottle(&mut self, pos: [f64; 3], experience: u32) {
         self.fire_exp_bottle(pos, experience);

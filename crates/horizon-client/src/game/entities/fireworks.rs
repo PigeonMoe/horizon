@@ -3,7 +3,8 @@
 //! acceleration and 0.04 lift, the flight-duration lifetime, explosion
 //! damage with line of sight, and the client explosion (`createFireworks`).
 use super::{
-    Game, Hit, creatures::ProjectileHitter, dragon::FightWho, item_draw::owner_at, view_vector,
+    Game, Hit, api_values::TryIntoApi, creatures::ProjectileHitter, dragon::FightWho,
+    item_draw::owner_at, view_vector,
 };
 use horizon_assets::item_model::DisplayContext;
 use horizon_client::{
@@ -814,7 +815,7 @@ impl Game<'_> {
         }
         // `this.gameEvent(GameEvent.EXPLODE, this.getOwner())`, before the blast.
         self.rocket_explode_event(r.owner, r.guest, at);
-        if !r.explosions.is_empty() {
+        if !r.explosions.is_empty() && self.rocket_damage_allowed(r, at) {
             let damage = 5.0 + r.explosions.len() as f32 * 2.0;
             let from = r.position;
             let owner = self.rocket_owner(r);
@@ -900,6 +901,23 @@ impl Game<'_> {
             .fireworks(at, v, r.explosions.clone(), camera, !r.silent);
         self.native_firework_explode(r.id, at, r.explosions.len());
     }
+    fn rocket_damage_allowed(&mut self, rocket: &Rocket, pos: [f64; 3]) -> bool {
+        if !mod_api::__private::listened(mod_api::HookId::FireworkDamagePre) {
+            return true;
+        }
+        let Ok(item) = rocket.item.try_into_api() else {
+            return true;
+        };
+        let mut cancel = false;
+        self.native_firework_damage_pre(mod_api::__private::FireworkDamagePreCall {
+            entity: rocket.id,
+            pos,
+            item: &item,
+            cancel: &mut cancel,
+        });
+        !cancel
+    }
+
     /// `FireworkRocketEntity.explode`'s game event: EXPLODE at the rocket, from
     /// its owner (`Projectile.getOwner`), a guest's rocket as theirs.
     fn rocket_explode_event(&mut self, mut owner: Option<Who>, guest: Option<u32>, at: [f64; 3]) {
