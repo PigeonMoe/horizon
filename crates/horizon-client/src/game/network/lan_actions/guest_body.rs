@@ -52,6 +52,27 @@ pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool
 }
 
 impl Game<'_> {
+    fn motion_world_for_guest(
+        &mut self,
+        just_stopped_gliding: bool,
+    ) -> Option<MotionWorld<'_, '_, '_>> {
+        let player = self.player.as_mut()?;
+        Some(MotionWorld {
+            landing_equipment: acting_landing_equipment!(self, just_stopped_gliding),
+            entities: &[],
+            player,
+            scene: &mut self.world,
+            assets: &self.pack.assets,
+            collision_binding: self.collision,
+            resources: self.motion,
+            health: &self.health_resources,
+            loop_context: &self.loop_context,
+            damage_hooks: &self.damage_hooks,
+            tag_items: Some(world_items!(self)),
+            block_registries: Some(&self.pack.block_registries),
+        })
+    }
+
     /// The guest's body on the server each tick: ServerPlayer.tick's damage
     /// clock and Entity.baseTick's fluid phase (burning), then for each move
     /// ServerPlayer.doCheckFallDamage (the fall distance grows while they go
@@ -148,24 +169,10 @@ impl Game<'_> {
             let freeze_immune = game.wears_freeze_immune();
             let burn_immune = game.wears_burn_from_stepping_immunity();
             let boat = game.riding_boat_fluid_box();
-            let Some(player) = game.player.as_mut() else {
+            let Some(mut w) = game.motion_world_for_guest(just_stopped_gliding) else {
                 return (Vec::new(), None);
             };
-            player.fluids.boat = boat;
-            let mut w = MotionWorld {
-                landing_equipment: acting_landing_equipment!(game, just_stopped_gliding),
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: game.collision,
-                resources: game.motion,
-                health: &game.health_resources,
-                tag_items: Some(world_items!(game)),
-                loop_context: &game.loop_context,
-                damage_hooks: &game.damage_hooks,
-                block_registries: Some(&game.pack.block_registries),
-            };
+            w.player.fluids.boat = boat;
             w.player.health.advance_clock();
             let _ = w.fluid_base_tick();
             w.player.ground.on_ground = from_ground;
@@ -210,10 +217,14 @@ impl Game<'_> {
             for (moved, on_ground) in moves {
                 let movement = Vec3::new(moved[0], moved[1], moved[2]);
                 at = at.add_vector(movement);
+                let events_before = w.player.events.len();
                 let landed = (|| -> horizon_client::Result<()> {
                     w.set_on_ground_with_movement(on_ground, false, movement)?;
                     let pos = w.legacy_on_position()?;
                     let state = w.block_state(pos)?;
+                    if let Some(gear) = &mut w.landing_equipment {
+                        gear.set_fall_origin(at);
+                    }
                     w.check_fall_damage(moved[1], on_ground, state, pos)?;
                     // handlePlayerPositionChange: a move that goes up ends the fall
                     // (`resetFallDistance`), after that move's own fall check.
@@ -223,6 +234,15 @@ impl Game<'_> {
                     }
                     w.check_movement_statistics(movement)
                 })();
+                if let Some(reaction) =
+                    horizon_client::landing::take_fall_reaction(&mut w.player.events, events_before)
+                {
+                    game.apply_fall_reaction(reaction);
+                    let Some(motion) = game.motion_world_for_guest(just_stopped_gliding) else {
+                        return (Vec::new(), None);
+                    };
+                    w = motion;
+                }
                 if landed.is_err() {
                     break;
                 }

@@ -188,6 +188,50 @@ fn damage_admission_checks_the_player_responsible_for_the_actual_hit() {
 
 #[test]
 #[ignore = "daily"]
+fn a_player_damage_permission_query_does_not_damage_its_target() {
+    struct ProtectPig;
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectPig {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut mod_api::EntityDamageTargetPreEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.target_kind, "minecraft:pig");
+            assert!(event.alive_kind);
+            assert_eq!(event.player.map(|p| p.uuid), Some(225023));
+            if event.position[0] < 3.0 {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+
+    crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
+        let mods = vec![mod_api::ModEntry::new("protect-pig", Box::new(ProtectPig))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                game.build_registries();
+                survival_player(game, 225023);
+                let player = game.player(225023).unwrap();
+                for (id, x, permitted) in [(225024, 2.0, false), (225025, 4.0, true)] {
+                    let mut pig = mob(game, id, "minecraft:pig");
+                    pig.position.x = x;
+                    game.mobs.push(pig);
+                    let target = game.entity(id).unwrap();
+                    assert_eq!(target.allows_player_damage(game, player), Some(permitted));
+                    assert_eq!(game.mobs.last().unwrap().health, 10.0);
+                }
+            });
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn armor_stand_sweeps_and_sourced_damage_check_the_living_target() {
     use super::commands::Target;
     use super::mace::Spared;

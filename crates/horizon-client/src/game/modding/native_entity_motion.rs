@@ -146,20 +146,29 @@ impl Game<'_> {
         (steered && player).then_some(first)
     }
     /// Sets the entity's velocity (`Entity.setDeltaMovement`); clients see it
-    /// as they see the entity move. False for a player (its client moves
-    /// it), an entity Horizon doesn't simulate, a value that isn't finite,
-    /// or on a client. API 379.
+    /// as they see the entity move, including an immediate motion packet to
+    /// an online player's own client. False for an unavailable entity, a
+    /// value that isn't finite, or on a client. API 379.
     pub(super) fn entity_set_velocity(&mut self, entity: EntityRef, velocity: [f64; 3]) -> bool {
-        if self.remote.is_some()
-            || !velocity.iter().all(|v| v.is_finite())
-            || self.native_entity_target(entity).is_none()
-        {
+        if self.remote.is_some() || !velocity.iter().all(|v| v.is_finite()) {
             return false;
+        }
+        let Some(target) = self.native_entity_target(entity) else {
+            return false;
+        };
+        let [x, y, z] = velocity;
+        if target == Target::Player && self.lan_acting.is_none() {
+            return self.player.as_mut().is_some_and(|player| {
+                player.velocity = Vec3::new(x, y, z);
+                true
+            });
+        }
+        if matches!(target, Target::Player | Target::Guest(_)) {
+            return self.change_player_velocity(target, |_| Vec3::new(x, y, z));
         }
         let Some(h) = self.native_walk_entity(entity.id()) else {
             return false;
         };
-        let [x, y, z] = velocity;
         with_entity_mut!(self, h, e => *e.velocity_mut() = Vec3::new(x, y, z));
         if let EntityHandle::Mob(i) = h {
             self.mobs[i].needs_sync = true;

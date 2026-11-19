@@ -157,6 +157,11 @@ pub struct PendingHurt<U> {
     helmet: bool,
 }
 impl<U> PendingHurt<U> {
+    /// Damage after the incoming hook and before block, cooldown or equipment reductions.
+    pub fn damage_before_reductions(&self) -> f32 {
+        self.original
+    }
+
     /// What `hurtHelmet` is given, if the source damages a helmet and one is worn.
     pub fn helmet_damage(&self) -> Option<f32> {
         self.helmet.then_some(self.damage)

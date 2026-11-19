@@ -16,6 +16,8 @@ pub struct NativeClientHooks {
     pub farmland_trample: fn(&LoopContext, u32, [i32; 3], u32, f64, &mut bool),
     pub player_footwear_listened: fn() -> bool,
     pub player_footwear_reaction: PlayerFootwearHook,
+    pub player_fall_reaction_listened: fn() -> bool,
+    pub player_fall_reaction: PlayerFallReactionHook,
     pub player_gliding_impact_listened: fn() -> bool,
     pub player_gliding_impact: PlayerGlidingImpactHook,
     pub has_mods: fn() -> bool,
@@ -73,6 +75,40 @@ pub type PlayerGlidingImpactHook = fn(
     &mut (Option<String>, bool),
     &mut bool,
 );
+
+pub type PlayerFallReactionHook = fn(
+    &LoopContext,
+    (u128, mod_api::GameMode),
+    &mod_api::ItemStack,
+    Option<&horizon_core::nbt::Compound>,
+    f32,
+    &mut (u128, Option<(String, f32)>),
+    &mut bool,
+);
+
+pub(crate) fn player_fall_reaction_listened() -> bool {
+    HOOKS
+        .get()
+        .is_some_and(|hooks| (hooks.player_fall_reaction_listened)())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn player_fall_reaction(
+    context: &LoopContext,
+    actor: (u128, mod_api::GameMode),
+    boots: &mod_api::ItemStack,
+    persisted: Option<&horizon_core::nbt::Compound>,
+    damage: f32,
+    effect: &mut (u128, Option<(String, f32)>),
+    cancel: &mut bool,
+) {
+    if let Some(hooks) = HOOKS
+        .get()
+        .filter(|hooks| (hooks.player_fall_reaction_listened)())
+    {
+        (hooks.player_fall_reaction)(context, actor, boots, persisted, damage, effect, cancel);
+    }
+}
 
 pub(crate) fn player_gliding_impact_listened() -> bool {
     HOOKS

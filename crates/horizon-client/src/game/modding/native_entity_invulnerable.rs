@@ -8,7 +8,7 @@
 //! kind Horizon keeps no such state for.
 use super::{Game, commands::Target};
 use horizon_client::mobs::Damage;
-use mod_api::EntityRef;
+use mod_api::{EntityRef, PlayerRef};
 
 impl Game<'_> {
     /// Whether a named causing entity is a creative player.
@@ -282,6 +282,29 @@ impl Game<'_> {
         // pushes away from is the direct entity's.
         let from = direct.and_then(|t| self.target_position(t));
         Some(self.hurt_target(target, amount, damage_type, direct, causing, from))
+    }
+
+    pub(super) fn entity_allows_player_damage(
+        &mut self,
+        entity: EntityRef,
+        player: PlayerRef,
+    ) -> Option<bool> {
+        let target = self.native_entity_target(entity)?;
+        if self.player(player.uuid())? != player || self.target_level(target) != self.dim {
+            return None;
+        }
+        let actor = self.damage_player_by_uuid(player.uuid())?;
+        if actor.dimension != self.dim.id() {
+            return None;
+        }
+        if matches!(target, Target::Player | Target::Guest(_)) && !self.player_may_harm(None, None)
+        {
+            return Some(false);
+        }
+        let kind = self.entity_kind(entity)?.id(self);
+        let position = self.target_position(target)?;
+        let living = self.living(entity).is_some();
+        Some(self.entity_target_damage_allowed(&kind, position, living, Some(&actor)))
     }
 
     /// `Entity.isInvulnerableTo` for a source of `damage_type`: arismoko/horizon#842's own

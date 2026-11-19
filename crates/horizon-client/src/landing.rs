@@ -57,6 +57,22 @@ pub fn native_player_footwear_reaction(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn native_player_fall_reaction(
+    context: &LoopContext,
+    actor: (u128, GameMode),
+    boots: &ItemStack,
+    persisted: Option<&Compound>,
+    damage: f32,
+    effect: &mut (u128, Option<(String, f32)>),
+    cancel: &mut bool,
+) {
+    crate::native_client_hooks::player_fall_reaction(
+        context, actor, boots, persisted, damage, effect, cancel,
+    );
+}
+
 #[inline(never)]
 pub fn native_player_gliding_impact(
     context: &LoopContext,
@@ -88,7 +104,9 @@ impl<'a> PlayerFootwear<'a> {
         boots: Option<&'a crate::items::ItemStack>,
         saved: Option<&'a horizon_core::nbt::Tag>,
     ) -> Option<Self> {
-        if !crate::native_client_hooks::player_footwear_listened() {
+        if !crate::native_client_hooks::player_footwear_listened()
+            && !crate::native_client_hooks::player_fall_reaction_listened()
+        {
             return None;
         }
         let player = uuid?;
@@ -105,7 +123,9 @@ impl<'a> PlayerFootwear<'a> {
     /// A canceled action and its optional, registry-validated level sound.
     pub fn reaction(self, context: &LoopContext, action: &str) -> Option<Option<&'static str>> {
         use horizon_world::native_load_context::LoopSide;
-        if context.side() != LoopSide::Server {
+        if context.side() != LoopSide::Server
+            || !crate::native_client_hooks::player_footwear_listened()
+        {
             return None;
         }
         let mut sound = None;
@@ -121,6 +141,45 @@ impl<'a> PlayerFootwear<'a> {
             &mut cancel,
         );
         cancel.then(|| registered_sound(context, sound.as_deref()))
+    }
+
+    pub(crate) fn fall_reaction(
+        self,
+        context: &LoopContext,
+        damage: f32,
+    ) -> Option<LandingReaction> {
+        use horizon_world::native_load_context::LoopSide;
+        if context.side() != LoopSide::Server
+            || !crate::native_client_hooks::player_fall_reaction_listened()
+        {
+            return None;
+        }
+        let boots = crate::crafting::mod_kinds::to_api(self.boots)?;
+        let mut effect = (0, None);
+        let mut cancel = false;
+        native_player_fall_reaction(
+            context,
+            (self.player, self.mode),
+            &boots,
+            self.persisted,
+            damage,
+            &mut effect,
+            &mut cancel,
+        );
+        let (reaction, sound) = effect;
+        if !cancel || reaction == 0 {
+            return None;
+        }
+        let sound = sound.and_then(|(name, pitch)| {
+            pitch.is_finite().then_some(())?;
+            registered_sound(context, Some(&name)).map(|name| (name, pitch))
+        });
+        Some(LandingReaction::Effect {
+            player: self.player,
+            reaction,
+            damage,
+            sound,
+        })
     }
 }
 
@@ -148,6 +207,7 @@ fn registered_sound(context: &LoopContext, id: Option<&str>) -> Option<&'static 
 pub struct LandingEquipment<'a> {
     boots: Option<PlayerFootwear<'a>>,
     helmet: Option<FlightHelmet<'a>>,
+    origin: Option<Vec3>,
 }
 
 struct FlightHelmet<'a> {
@@ -174,6 +234,12 @@ pub enum LandingReaction {
         sound: Option<&'static str>,
         wear: bool,
     },
+    Effect {
+        player: u128,
+        reaction: u128,
+        damage: f32,
+        sound: Option<(&'static str, f32)>,
+    },
 }
 
 impl<'a> LandingEquipment<'a> {
@@ -196,7 +262,17 @@ impl<'a> LandingEquipment<'a> {
         } else {
             None
         };
-        (boots.is_some() || helmet.is_some()).then_some(Self { boots, helmet })
+        (boots.is_some() || helmet.is_some()).then_some(Self {
+            boots,
+            helmet,
+            origin: None,
+        })
+    }
+
+    /// Position at the end of the physical move being replayed. The authoritative
+    /// player's position can already be at the end of a later move in that batch.
+    pub fn set_fall_origin(&mut self, origin: Vec3) {
+        self.origin = Some(origin);
     }
 
     fn helmet_at_impact(&self, gliding: bool) -> Option<HelmetSource<'_>> {
@@ -388,6 +464,15 @@ pub enum FallEvent {
         eye: [f64; 3],
     },
     HelmetWorn,
+    EquipmentEffect {
+        player: u128,
+        reaction: u128,
+        origin: [f64; 3],
+        bounds: [[f64; 3]; 2],
+        eye: [f64; 3],
+        damage: f32,
+        sound: Option<(&'static str, f32)>,
+    },
     Broadcast(u8),
     Write {
         position: BlockPos,
@@ -415,6 +500,16 @@ pub enum FallEvent {
         data: i32,
     },
 }
+
+/// Consume the one equipment effect emitted by this call into the landing code.
+pub fn take_fall_reaction(events: &mut Vec<MotionEvent>, start: usize) -> Option<MotionEvent> {
+    let at = events
+        .get(start..)?
+        .iter()
+        .position(|event| matches!(event, MotionEvent::Fall(FallEvent::EquipmentEffect { .. })))?;
+    Some(events.remove(start + at))
+}
+
 impl FallEvent {
     /// Exact-bit diagnostic representation shared by the headless scene probe.
     pub fn trace(self) -> String {
@@ -477,6 +572,7 @@ impl FallEvent {
             Self::FootwearSound(name) => format!("footwear-sound {name}"),
             Self::HelmetSound { name, .. } => format!("helmet-sound {name}"),
             Self::HelmetWorn => "helmet-worn".into(),
+            Self::EquipmentEffect { .. } => "equipment-fall-reaction".into(),
             Self::Broadcast(event) => format!("broadcast {event}"),
             Self::Write {
                 position,
@@ -1009,6 +1105,37 @@ impl MotionWorld<'_, '_, '_> {
                 if wear {
                     self.wear_impact_helmet();
                 }
+            }
+            LandingReaction::Effect {
+                player,
+                reaction,
+                damage,
+                sound,
+            } => {
+                let at = self
+                    .landing_equipment
+                    .as_ref()
+                    .and_then(|gear| gear.origin)
+                    .unwrap_or(self.player.position);
+                let dimensions = self.player.dimensions;
+                let bounds = dimensions.bounds(at);
+                let axes = [
+                    horizon_core::geometry::Axis::X,
+                    horizon_core::geometry::Axis::Y,
+                    horizon_core::geometry::Axis::Z,
+                ];
+                self.fall_event(FallEvent::EquipmentEffect {
+                    player,
+                    reaction,
+                    origin: [at.x, at.y, at.z],
+                    bounds: [
+                        axes.map(|axis| bounds.min(axis)),
+                        axes.map(|axis| bounds.max(axis)),
+                    ],
+                    eye: [at.x, at.y + f64::from(dimensions.eye_height), at.z],
+                    damage,
+                    sound,
+                });
             }
             _ => {}
         }

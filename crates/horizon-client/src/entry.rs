@@ -285,6 +285,17 @@ pub(crate) fn install_client_hooks() {
                 &context, action, actor, boots, persisted, sound, cancel,
             );
         },
+        player_fall_reaction_listened: || {
+            mod_api::__private::listened(mod_api::HookId::PlayerFallReaction)
+                && mod_api::__private::listened(mod_api::HookId::PlayerFallReactionPost)
+        },
+        player_fall_reaction: |context, actor, boots, persisted, damage, effect, cancel| {
+            let reader = horizon_client_render::api_context::LoopReader(context);
+            let context = reader.context();
+            mod_api::dispatch_player_fall_reaction(
+                &context, actor, boots, persisted, damage, effect, cancel,
+            );
+        },
         player_gliding_impact_listened: || {
             mod_api::__private::listened(mod_api::HookId::PlayerGlidingImpact)
         },

@@ -297,6 +297,14 @@ impl<'a> DamageLevel<'a> {
         impact.reaction.set(reaction);
         true
     }
+
+    fn fall_equipment(&self) -> Option<LandingImpact<'a>> {
+        self.landing_impact.filter(|impact| {
+            impact.action == "fall_damage"
+                && impact.boots.is_some()
+                && crate::native_client_hooks::player_fall_reaction_listened()
+        })
+    }
     /// Runs `push` as the short entry of `LivingEntity.knockback` (power and direction), which
     /// delegates to the full entry: the knockback hook, fired once inside the full entry, tells
     /// its listener the push came in as [`mod_api::KnockbackEntry::Short`]. A direct call of the
@@ -1070,7 +1078,7 @@ impl PlayerMotion {
         causing: i32,
         creative_source: bool,
     ) -> Result<BlockOutcome> {
-        let hit = self.start_hurt(
+        let mut hit = self.start_hurt(
             level,
             resources,
             rules,
@@ -1084,6 +1092,32 @@ impl PlayerMotion {
             true,
             None,
         )?;
+        if let Some(impact) = level.fall_equipment()
+            && let Some(pending) = hit.pending.clone()
+        {
+            let damage = pending.damage_before_reductions();
+            // Bukkit's damage event is reached only after cooldown admission.
+            // Check the native decision without committing a hit that may cancel.
+            let admitted = self.in_combat(level, resources, rules, &mut hit, |combat, state| {
+                Ok(horizon_world::living_hurt::select_equipment_hurt(
+                    &mut state.clone(),
+                    combat,
+                    pending,
+                )?
+                .is_some())
+            })?;
+            if admitted
+                && let Some(reaction) = impact
+                    .boots
+                    .and_then(|boots| boots.fall_reaction(impact.context, damage))
+            {
+                impact.reaction.set(reaction);
+                return Ok(BlockOutcome {
+                    canceled: true,
+                    ..BlockOutcome::default()
+                });
+            }
+        }
         self.finish_hurt(level, resources, rules, hit)
     }
     /// `hurtServer` up to `hurtHelmet`, for a player who wears a `helmet`; the arguments are

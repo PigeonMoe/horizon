@@ -954,6 +954,7 @@ impl Game<'_> {
         let Some(player) = self.player.as_mut() else {
             return;
         };
+        let events_before = player.events.len();
         let _ = MotionWorld {
             landing_equipment: acting_landing_equipment!(self, false),
             entities: &[],
@@ -969,6 +970,14 @@ impl Game<'_> {
             block_registries: Some(&self.pack.block_registries),
         }
         .cause_mount_fall(distance, modifier);
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        if let Some(reaction) =
+            horizon_client::landing::take_fall_reaction(&mut player.events, events_before)
+        {
+            self.apply_fall_reaction(reaction);
+        }
     }
     /// `PlayerRideableJumping`: horses, camels and nautili (the dash).
     fn jumps(species: Species) -> bool {

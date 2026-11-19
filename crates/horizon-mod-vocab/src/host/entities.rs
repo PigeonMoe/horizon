@@ -635,10 +635,20 @@ pub trait EntitiesBackendMut {
         causing: Option<EntityRef>,
     ) -> Option<bool>;
     /// Side: server.
+    /// Checks a player's permission to damage `entity` through the PvP rule
+    /// for player targets and `entity_damage_target_pre`. Invokes protection
+    /// without inflicting damage, recording a hit, or changing its source.
+    /// None for an unavailable player or target, or a target outside the
+    /// player's resident level. A separate damage operation still runs its
+    /// own ordinary invulnerability and damage hooks.
+    #[access(WorldOnly)]
+    fn entity_allows_player_damage(&mut self, entity: EntityRef, player: PlayerRef)
+    -> Option<bool>;
+    /// Side: server.
     /// Sets the entity's velocity (`Entity.setDeltaMovement`); clients see it
-    /// as they see the entity move. False for a player (its client moves
-    /// it), an entity Horizon doesn't simulate, a value that isn't finite,
-    /// or on a client. API 379.
+    /// as they see the entity move, including an immediate motion packet to
+    /// an online player's own client. False for an unavailable entity, a
+    /// value that isn't finite, or on a client. API 379.
     #[access(WorldOnly)]
     fn entity_set_velocity(&mut self, entity: EntityRef, velocity: [f64; 3]) -> bool;
     /// Side: server.
