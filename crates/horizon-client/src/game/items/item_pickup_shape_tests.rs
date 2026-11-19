@@ -12,6 +12,61 @@ use std::sync::{Arc, Mutex};
 
 /// What `item_picked_up_post` heard: the original count and what remained.
 type Posts = Arc<Mutex<Vec<(u32, Option<u32>)>>>;
+
+struct PickupBoundary(Arc<Mutex<Vec<[i32; 3]>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for PickupBoundary {
+    fn item_picked_up(&self, host: &mut dyn ServerHost, event: &mut ItemPickedUpEvent<'_>) {
+        let pos = event
+            .item
+            .entity()
+            .block_position(host)
+            .expect("the original item must resolve at the point of pickup");
+        self.0.lock().unwrap().push(pos);
+        if pos[0] == 2 {
+            *event.can_pickup = mod_api::TriState::False;
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_lifted_item_is_visible_at_its_actual_block_before_pickup() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let guard = ModEntry::new("pickup_boundary", Box::new(PickupBoundary(seen.clone())));
+    with_mods(vec![guard].into(), || {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            game.streaming.forced.insert((0, 0));
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(1.5, 64.0, 1.5)).unwrap());
+            let accepted = ItemStack::new("minecraft:diamond", 3);
+            let protected = ItemStack::new("minecraft:emerald", 2);
+            game.spawn_item(accepted.clone(), [1.5, 64.25, 1.5], [0.0; 3], 0);
+            game.spawn_item(protected.clone(), [2.25, 64.25, 1.5], [0.0; 3], 0);
+            let denied_id = game.dropped[1].id;
+            let denied_join = game.dropped[1].join_seq();
+            assert_eq!(
+                game.entity(denied_id).unwrap().block_position(game),
+                Some([2, 64, 1])
+            );
+
+            game.tick_items();
+
+            assert_eq!(*seen.lock().unwrap(), [[1, 64, 1], [2, 64, 1]]);
+            assert_eq!(game.inventory.iter().flatten().next(), Some(&accepted));
+            assert_eq!(game.inventory.iter().flatten().count(), 1);
+            assert_eq!(game.dropped.len(), 1);
+            assert_eq!(game.dropped[0].id, denied_id);
+            assert_eq!(game.dropped[0].join_seq(), denied_join);
+            assert_eq!(game.dropped[0].stack, protected);
+            assert_eq!(game.dropped[0].pickup_delay, 10);
+        });
+    });
+}
+
 #[derive(Clone)]
 struct Pickups(
     Arc<Mutex<Vec<u32>>>,

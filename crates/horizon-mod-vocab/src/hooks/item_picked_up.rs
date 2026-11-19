@@ -10,9 +10,8 @@ pub trait Hooks {
     /// (a full inventory still leaves it), or `False` to leave it there: the
     /// fork sets a vanilla eligibility delay of at least 10 ticks. The hook
     /// still runs on each touch, and a later `True` overrides that delay. The last mod to set it
-    /// decides. The handle reads the whole stack on the ground; for the
-    /// window's own player of a world it ticks itself, whose pickup pass
-    /// lifts the items out of the level, it reads as unavailable. Server-side.
+    /// decides. The handle reads the live ground item, including its whole
+    /// stack and block position. Server-side.
     #[hook(
         side = "server",
         contract = "listen",

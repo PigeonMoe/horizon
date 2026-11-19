@@ -138,15 +138,30 @@ impl Game<'_> {
                 && b.max_position().y > min[1]
                 && b.min_position().z < max[2]
                 && b.max_position().z > min[2];
+            if !touching {
+                i += 1;
+                continue;
+            }
             // ItemEntity.playerTouch: `item_picked_up`, then vanilla's delay and target rule.
-            if !touching || !self.native_pickup_allowed(&mut items[i], own) {
+            let rows = items.len();
+            let (answer, removed) = if listened(mod_api::HookId::ItemPickedUp) {
+                let id = items[i].id;
+                self.with_pickup_item(items, i, |game| game.native_pickup_answer(id), |_| {})
+            } else {
+                (TriState::Default, false)
+            };
+            if removed {
+                i += usize::from(items.len() == rows);
+                continue;
+            }
+            let item = &mut items[i];
+            if !Self::pickup_decision(&mut item.pickup_delay, item.target, own, answer) {
                 i += 1;
                 continue;
             }
             let before = items[i].stack.count;
             let kind = items[i].stack.item.clone();
             let thrower = items[i].thrower;
-            let rows = items.len();
             // The entity holds the remainder while mods hear it, as on the guest path.
             let (left, removed) = match self.native_pickup_insert(&items[i].stack) {
                 Some(rest) if rest.count >= before => (Some(rest), None),
@@ -211,10 +226,8 @@ impl Game<'_> {
             .play("minecraft:entity.item.pickup", Some(feet), 0.2, pitch);
     }
 
-    /// `notice` with the lifted `items[i]` lent back to the level, holding
-    /// `during`, where mods reach it: the notice's answer, and the stack the
-    /// item held before when a mod removed it meanwhile. An item that is still
-    /// there goes back to its place in `items` holding that stack.
+    /// The post-pickup notice sees the remainder on the live entity. Restore
+    /// its original stack in the pass before applying the notice's answer.
     fn native_pickup_lent(
         &mut self,
         items: &mut JoinList<ItemEntity>,
@@ -222,22 +235,39 @@ impl Game<'_> {
         during: ItemStack,
         notice: impl FnOnce(&mut Self, &ItemStack) -> Option<ItemStack>,
     ) -> (Option<ItemStack>, Option<ItemStack>) {
+        let original = std::mem::replace(&mut items[i].stack, during);
+        let (answer, removed) = self.with_pickup_item(
+            items,
+            i,
+            |game| notice(game, &original),
+            |item| item.stack = original.clone(),
+        );
+        (answer, removed.then_some(original))
+    }
+
+    /// Return the lifted item to its real level while a hook reads or edits it.
+    /// Preserve its identity, order and any removal when returning it to the pass.
+    fn with_pickup_item<R>(
+        &mut self,
+        items: &mut JoinList<ItemEntity>,
+        i: usize,
+        notice: impl FnOnce(&mut Self) -> R,
+        restore: impl FnOnce(&mut ItemEntity),
+    ) -> (R, bool) {
         use crate::game::commands::Target;
         use horizon_client::join_seq::Joined;
         let join = items[i].join_seq();
-        let mut lent = items.extract(join).expect("in its pass");
-        let (id, original) = (lent.id, std::mem::replace(&mut lent.stack, during));
+        let lent = items.extract(join).expect("in its pass");
+        let id = lent.id;
         self.dropped.put_back(self.dropped.len(), lent);
-        let answer = notice(self, &original);
+        let answer = notice(self);
         let removed = self.persist.removals.contains(&Target::Item(id));
         if let Some(mut back) = self.dropped.extract(join) {
-            back.stack = original.clone();
+            restore(&mut back);
             items.put_back(i, back);
-            if !removed {
-                return (answer, None);
-            }
+            return (answer, removed);
         }
-        (answer, Some(original))
+        (answer, true)
     }
 
     /// `item_picked_up` for the acting player touching the item entity
@@ -253,23 +283,11 @@ impl Game<'_> {
         can_pickup
     }
 
-    /// The item entity `id` as the hooks name it. It need not be in the
-    /// level: a canceled toss and the host player's pickup hand out one the
-    /// handle reads cannot find.
+    /// The item entity `id` as the hooks name it. A canceled toss can name
+    /// an item that never entered the level.
     pub(in crate::game) fn native_item_handle(&self, id: u32) -> Option<ItemEntityRef> {
         let epoch = self.native_lifecycle.epoch()?;
         Some(ItemEntityRef::new(EntityRef::new(epoch, id)))
-    }
-
-    /// Whether the acting player, `player`, takes the ground `item` they
-    /// touch (`ItemEntity.playerTouch`).
-    pub(in crate::game) fn native_pickup_allowed(
-        &mut self,
-        item: &mut ItemEntity,
-        player: [i32; 4],
-    ) -> bool {
-        let answer = self.native_pickup_answer(item.id);
-        Self::pickup_decision(&mut item.pickup_delay, item.target, player, answer)
     }
 
     /// `ItemEntity.playerTouch`'s rule for `player`: no pickup delay, and no
