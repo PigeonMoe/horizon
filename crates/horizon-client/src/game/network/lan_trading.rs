@@ -3,12 +3,15 @@
 //! with vanilla's packets: OpenScreen (`minecraft:merchant`), MerchantOffers,
 //! the select trade packet, container clicks and the content sync after each.
 use super::{
-    Game, lan_actions::guest_within_entity_range, stations::Kind as StationKind,
+    Game,
+    lan_actions::guest_within_entity_range,
+    lan_crafting::{DropMenu, DropPose, GuestMenuClick},
+    stations::Kind as StationKind,
     trading::MerchantState,
 };
 use horizon_client::{
     items::ItemStack,
-    menu::{Env, Input, Kind, Menu},
+    menu::{Env, Kind, Menu},
     merchant,
 };
 use horizon_protocol::packets::play::{self, Clientbound as C};
@@ -253,6 +256,20 @@ impl Game<'_> {
         refresh_offers: bool,
         op: impl FnOnce(&mut Menu, &Env),
     ) -> bool {
+        self.try_lan_merchant_op(conn, window, refresh_offers, None, |menu, env| {
+            op(menu, env);
+            Ok(())
+        })
+    }
+
+    fn try_lan_merchant_op(
+        &mut self,
+        conn: u32,
+        window: Option<i32>,
+        refresh_offers: bool,
+        drop_pose: Option<DropPose>,
+        op: impl FnOnce(&mut Menu, &Env) -> Result<(), ()>,
+    ) -> bool {
         let Some(mut gm) = self
             .lan
             .as_mut()
@@ -329,7 +346,12 @@ impl Game<'_> {
             menu.set_slot(&env, i, s.clone());
         }
         menu.merchant = Some(session);
-        op(&mut menu, &env);
+        if op(&mut menu, &env).is_err() {
+            if let Some(host) = self.lan.as_mut() {
+                host.play.entry(conn).or_default().merchant = Some(gm);
+            }
+            return true;
+        }
         let made = maps.made.take();
         self.guest_bundle_sounds(gi, std::mem::take(&mut menu.player_sounds));
         let session = menu.merchant.take().expect("attached");
@@ -391,7 +413,11 @@ impl Game<'_> {
             });
         }
         gm.merchant.session = session;
-        self.drop_guest_items(gi, dropped);
+        if let Some((at, rotation)) = drop_pose {
+            self.drop_guest_items_at(at, rotation, dropped);
+        } else {
+            self.drop_guest_items(gi, dropped);
+        }
         if refresh_offers || offers_refreshed {
             self.lan_send_offers(conn, &mut gm, true);
         }
@@ -433,20 +459,29 @@ impl Game<'_> {
     }
 
     /// A container click on the guest's trading window.
-    pub(super) fn lan_merchant_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
-        let input = match p.input {
-            0 => Input::Pickup,
-            1 => Input::QuickMove,
-            2 => Input::Swap,
-            3 => Input::Clone,
-            4 => Input::Throw,
-            5 => Input::QuickCraft,
-            _ => Input::PickupAll,
+    pub(super) fn lan_merchant_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        self.try_lan_merchant_op(
+            conn,
+            Some(click.packet.container),
+            false,
+            click.drop_pose,
+            |menu, env| click.apply(menu, env, DropMenu::Merchant),
+        )
+    }
+
+    pub(super) fn lan_resync_merchant(&mut self, conn: u32, window: i32) {
+        let Some(mut gm) = self
+            .lan
+            .as_mut()
+            .and_then(|host| host.play.get_mut(&conn))
+            .and_then(|play| play.merchant.take_if(|gm| gm.window == window))
+        else {
+            return;
         };
-        let (slot, button) = (i32::from(p.slot), i32::from(p.button));
-        self.lan_merchant_op(conn, Some(p.container), false, |menu, env| {
-            let _ = menu.click(env, slot, button, input);
-        })
+        self.lan_send_merchant_content(conn, &mut gm);
+        if let Some(host) = self.lan.as_mut() {
+            host.play.entry(conn).or_default().merchant = Some(gm);
+        }
     }
     /// ServerboundSelectTradePacket: the selection hint, then tryMoveItems.
     pub(super) fn lan_select_trade(&mut self, conn: u32, index: i32) {

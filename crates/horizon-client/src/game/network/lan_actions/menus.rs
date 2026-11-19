@@ -589,7 +589,7 @@ impl Game<'_> {
     /// window with it, so the click lands on nothing
     /// (`ServerGamePacketListenerImpl.handleContainerClick` and the others
     /// ask `stillValid` first).
-    pub(super) fn guest_validate_menu(&mut self, conn: u32) {
+    pub(in crate::game) fn guest_validate_menu(&mut self, conn: u32) {
         if self.guest_menu_still_valid(conn) {
             return;
         }

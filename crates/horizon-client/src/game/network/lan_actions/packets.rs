@@ -633,13 +633,7 @@ impl Game<'_> {
             }
             // AbstractContainerMenu.quickMoveStack of a mod container: the mods first.
             S::ContainerClick(p) if self.lan_mod_quick_move(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_merchant_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_inventory_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_crafting_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_machine_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_station_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_lectern_click(conn, &p) => {}
-            S::ContainerClick(p) if self.lan_mount_click(conn, &p) => {}
+            S::ContainerClick(p) if self.lan_owned_menu_click(conn, &p) => {}
             // ServerboundPlayerCommandPacket OPEN_INVENTORY: the ridden
             // mount's inventory (`HasCustomInventoryScreen`).
             S::PlayerCommand(p) if p.action == 5 => {

@@ -6,7 +6,7 @@
 //! the inventory when the menu closes (`AbstractContainerMenu.clearContainer`).
 use super::{
     Game,
-    lan_crafting::input,
+    lan_crafting::{DropMenu, DropPose, GuestMenuClick},
     stations::{Kind as StationKind, Station},
 };
 use horizon_client::{
@@ -132,6 +132,19 @@ impl Game<'_> {
         window: Option<i32>,
         op: impl FnOnce(&mut Menu, &horizon_client::menu::Env),
     ) -> bool {
+        self.try_lan_station_op(conn, window, None, |menu, env| {
+            op(menu, env);
+            Ok(())
+        })
+    }
+
+    fn try_lan_station_op(
+        &mut self,
+        conn: u32,
+        window: Option<i32>,
+        drop_pose: Option<DropPose>,
+        op: impl FnOnce(&mut Menu, &horizon_client::menu::Env) -> Result<(), ()>,
+    ) -> bool {
         let Some(mut gs) = self
             .lan
             .as_mut()
@@ -171,10 +184,16 @@ impl Game<'_> {
             });
             let mut undo = None;
             let hook = gs.menu.anvil_hook;
-            self.guest_menu_op(gi, &mut gs.menu, |menu, env| {
+            let result = self.try_guest_menu_op(gi, &mut gs.menu, drop_pose, |menu, env| {
                 undo = hook.then(|| menu.anvil_undo());
-                op(menu, env);
+                op(menu, env)
             });
+            if result == Some(Err(())) {
+                if let Some(host) = self.lan.as_mut() {
+                    *host.menus.entry(conn).or_default().station = Some(gs);
+                }
+                return true;
+            }
             // AnvilCraftEvent.Pre: the taken result's onTake waits for the mods.
             let mut anvil_craft = gs.menu.anvil_craft.take();
             let mut cancelled = false;
@@ -199,7 +218,11 @@ impl Game<'_> {
                 } else {
                     gs.menu.anvil_take(&self.menu_env());
                     let dropped = std::mem::take(&mut gs.menu.dropped);
-                    self.drop_guest_items(gi, dropped);
+                    if let Some((at, rotation)) = drop_pose {
+                        self.drop_guest_items_at(at, rotation, dropped);
+                    } else {
+                        self.drop_guest_items(gi, dropped);
+                    }
                 }
             }
             // GrindstoneEvent.OnTakeItem: the taken result's onTake waits for the mods.
@@ -338,7 +361,7 @@ impl Game<'_> {
 
     /// The lectern's book and page for the client: everything (`all`), or
     /// what changed since it was last sent.
-    fn lan_send_lectern(&mut self, conn: u32, all: bool) {
+    pub(super) fn lan_send_lectern(&mut self, conn: u32, all: bool) {
         let Some((key, window, sent)) = self
             .lan
             .as_ref()
@@ -407,6 +430,19 @@ impl Game<'_> {
         window: i32,
         op: impl FnOnce(&mut Menu, &horizon_client::menu::Env),
     ) -> bool {
+        self.try_lan_lectern_op(conn, window, None, |menu, env| {
+            op(menu, env);
+            Ok(())
+        })
+    }
+
+    fn try_lan_lectern_op(
+        &mut self,
+        conn: u32,
+        window: i32,
+        drop_pose: Option<DropPose>,
+        op: impl FnOnce(&mut Menu, &horizon_client::menu::Env) -> Result<(), ()>,
+    ) -> bool {
         let Some(key) = self
             .lan
             .as_ref()
@@ -435,10 +471,13 @@ impl Game<'_> {
                 .lan
                 .as_ref()
                 .is_some_and(|host| matches!(host.hub.guests[gi].game_mode, 0 | 1));
-            self.guest_menu_op(gi, &mut menu, |menu, env| {
+            let result = self.try_guest_menu_op(gi, &mut menu, drop_pose, |menu, env| {
                 menu.may_build = may_build;
-                op(menu, env);
+                op(menu, env)
             });
+            if result == Some(Err(())) {
+                return true;
+            }
             self.lectern_menu_done(key, &menu);
         }
         self.lan_send_lectern(conn, true);
@@ -446,10 +485,13 @@ impl Game<'_> {
     }
 
     /// A click on the guest's lectern window; false for other windows.
-    pub(super) fn lan_lectern_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
-        self.lan_lectern_op(conn, p.container, |menu, env| {
-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
-        })
+    pub(super) fn lan_lectern_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        self.try_lan_lectern_op(
+            conn,
+            click.packet.container,
+            click.drop_pose,
+            |menu, env| click.apply(menu, env, DropMenu::Lectern),
+        )
     }
 
     /// The rest of a taken anvil or smithing result's `onTake`: the guest
@@ -698,10 +740,13 @@ impl Game<'_> {
     }
 
     /// A click on the guest's station window; false for other windows.
-    pub(super) fn lan_station_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
-        self.lan_station_op(conn, Some(p.container), |menu, env| {
-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
-        })
+    pub(super) fn lan_station_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        self.try_lan_station_op(
+            conn,
+            Some(click.packet.container),
+            click.drop_pose,
+            |menu, env| click.apply(menu, env, DropMenu::Station),
+        )
     }
 
     /// `ServerGamePacketListenerImpl.handleContainerButtonClick`:
@@ -788,7 +833,7 @@ impl Game<'_> {
 
     /// The whole station menu and its changed data slots for the client
     /// (`sendAllDataToRemote` / `broadcastChanges`).
-    fn lan_send_station(&mut self, conn: u32) {
+    pub(super) fn lan_send_station(&mut self, conn: u32) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };

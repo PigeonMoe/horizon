@@ -6,7 +6,11 @@
 //! (`Kind::Mount`) with the mount's saddle, body item and chest copied in and
 //! written back, and the slots go to the client after each change, as
 //! `broadcastChanges` does.
-use super::{Game, lan_actions::guest_within_entity_range, lan_crafting::input};
+use super::{
+    Game,
+    lan_actions::guest_within_entity_range,
+    lan_crafting::{DropMenu, GuestMenuClick},
+};
 use horizon_client::{
     items::ItemStack,
     menu::{Kind, Menu},
@@ -120,7 +124,8 @@ impl Game<'_> {
     }
 
     /// A click on the guest's mount window; false for other windows.
-    pub(super) fn lan_mount_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
+    pub(super) fn lan_mount_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        let p = click.packet;
         let Some(host) = self.lan.as_ref() else {
             return false;
         };
@@ -142,14 +147,22 @@ impl Game<'_> {
             && let Some(index) = self.mobs.iter().position(|m| m.id == mob)
         {
             let mut menu = self.mount_engine_menu(index, columns);
-            self.guest_menu_op(gi, &mut menu, |menu, env| {
-                let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
+            let result = self.try_guest_menu_op(gi, &mut menu, click.drop_pose, |menu, env| {
+                click.apply(menu, env, DropMenu::Mount)
             });
+            if result == Some(Err(())) {
+                return true;
+            }
             self.lan_mount_store(index, columns, &menu);
         }
         // The client is told what the server has, whatever it predicted.
+        self.lan_resync_mount(conn);
+        true
+    }
+
+    pub(super) fn lan_resync_mount(&mut self, conn: u32) {
         let Some(host) = self.lan.as_mut() else {
-            return true;
+            return;
         };
         if let Some(gm) = host
             .play
@@ -159,7 +172,6 @@ impl Game<'_> {
             gm.sent = None;
         }
         self.lan_send_mount(conn);
-        true
     }
 
     /// The engine menu's mount slots back on mount `index`.

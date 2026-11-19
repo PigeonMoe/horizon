@@ -94,24 +94,35 @@ mod tests {
     use horizon_client::lan::{Out, PlayerSender, menu::input};
     use horizon_protocol::packets::play::{self, Clientbound as C, Serverbound as S};
     use mod_api::{Flow, Hooks, ModEntry, PlayerDropPreEvent, ServerHost};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
 
     type DropPosition = (u128, String, [f64; 3]);
 
-    struct DenyDrops(Arc<Mutex<Vec<DropPosition>>>);
+    struct DropPolicy {
+        seen: Arc<Mutex<Vec<DropPosition>>>,
+        allow: Arc<AtomicBool>,
+    }
 
     #[mod_api::__subscriptions]
-    impl Hooks for DenyDrops {
+    impl Hooks for DropPolicy {
         fn player_drop_pre(
             &self,
             _: &mut dyn ServerHost,
             event: &mut PlayerDropPreEvent<'_>,
         ) -> Flow {
-            self.0
+            self.seen
                 .lock()
                 .unwrap()
                 .push((event.player, event.dimension.into(), event.position));
-            Flow::Cancel
+            if self.allow.load(Ordering::Relaxed) {
+                Flow::Continue
+            } else {
+                Flow::Cancel
+            }
         }
     }
 
@@ -147,7 +158,10 @@ mod tests {
         mod_platform::testing::with_mods(
             vec![ModEntry::new(
                 "deny_drops",
-                Box::new(DenyDrops(seen.clone())),
+                Box::new(DropPolicy {
+                    seen: seen.clone(),
+                    allow: Arc::default(),
+                }),
             )]
             .into(),
             || {
@@ -226,5 +240,135 @@ mod tests {
                 })
             },
         );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn specialized_windows_check_drop_permission_before_a_slot_or_cursor_changes() {
+        use horizon_core::position::ChunkPos;
+
+        crate::entry::install_client_hooks();
+        let allow = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![ModEntry::new(
+            "drop_policy",
+            Box::new(DropPolicy {
+                seen: seen.clone(),
+                allow: allow.clone(),
+            }),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.build_registries();
+                game.set_allow_commands(true);
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                game.block_ticks
+                    .add_empty_chunk(ChunkPos::new(0, 0))
+                    .unwrap();
+                assert!(game.run_command("fill 0 199 0 15 199 15 stone"));
+                crate::game::native_player_death::tests::add_guest(game);
+                let (tx, rx) = mpsc::channel();
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.sender = PlayerSender::new(tx, Arc::default());
+                    guest.position = [8.5, 200.0, 8.5];
+                    guest.loaded = true;
+                });
+                let stack = Some(ItemStack::new("minecraft:stone", 3));
+                let expected = (
+                    123,
+                    game.dim.id().to_owned(),
+                    Game::player_drop_origin(game.lan.as_ref().unwrap().hub.guests[0].eye()),
+                );
+                for (index, block, slot) in [
+                    (0, "crafting_table", 37),
+                    (1, "furnace", 30),
+                    (2, "anvil", 30),
+                ] {
+                    allow.store(false, Ordering::Relaxed);
+                    let drops_before = game.dropped.len();
+                    let z = 7 + index;
+                    assert!(game.run_command(&format!("setblock 10 200 {z} {block}")));
+                    game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                        guest.inventory[0] = stack.clone();
+                    });
+                    game.lan_guest_packet(
+                        1,
+                        S::UseItemOn(play::UseItemOn {
+                            hand: 0,
+                            pos: [10, 200, z],
+                            face: 1,
+                            cursor: [0.5, 1.0, 0.5],
+                            inside: false,
+                            world_border: false,
+                            sequence: index + 1,
+                        }),
+                    );
+                    let window = rx
+                        .try_iter()
+                        .flat_map(|out| match out {
+                            Out::Packet(bytes) => vec![bytes],
+                            Out::Packets(packets) => packets,
+                            Out::Disconnect(_) => panic!("guest disconnected"),
+                        })
+                        .find_map(|body| {
+                            let mut read = horizon_protocol::buf::Reader::new(&body);
+                            let id = read.varint().unwrap();
+                            match C::decode(id, read.rest()).unwrap() {
+                                C::OpenScreen(screen) => Some(screen.container),
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or_else(|| panic!("{block} did not open"));
+                    for _ in rx.try_iter() {}
+
+                    game.lan_guest_packet(1, click(window, slot, input::THROW));
+                    assert!(menu_resynced(&rx, window), "{block} throw");
+                    assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].inventory[0], stack);
+                    assert_eq!(game.dropped.len(), drops_before);
+
+                    game.lan_guest_packet(1, click(window, slot, input::PICKUP));
+                    for _ in rx.try_iter() {}
+                    game.lan_guest_packet(1, click(window, -999, input::PICKUP));
+                    assert!(menu_resynced(&rx, window), "{block} cursor");
+                    assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].carried, stack);
+                    assert_eq!(game.dropped.len(), drops_before);
+
+                    allow.store(true, Ordering::Relaxed);
+                    game.lan_guest_packet(1, click(window, -999, input::PICKUP));
+                    assert!(game.lan.as_ref().unwrap().hub.guests[0].carried.is_none());
+                    assert_eq!(game.dropped.len(), drops_before + 1, "{block} allowed drop");
+                    assert_eq!(game.dropped[drops_before].stack.count, 3);
+                    let position = game.dropped[drops_before].position;
+                    assert_eq!([position.x, position.y, position.z], expected.2);
+
+                    game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                        guest.inventory[0] = stack.clone();
+                    });
+                    game.lan_guest_packet(1, click(window, slot, input::THROW));
+                    assert_eq!(
+                        game.lan.as_ref().unwrap().hub.guests[0].inventory[0]
+                            .as_ref()
+                            .unwrap()
+                            .count,
+                        2
+                    );
+                    assert_eq!(
+                        game.dropped.len(),
+                        drops_before + 2,
+                        "{block} allowed slot drop"
+                    );
+                    assert_eq!(game.dropped[drops_before + 1].stack.count, 1);
+                    game.lan_guest_packet(
+                        1,
+                        S::ContainerClose(play::ContainerClose { container: window }),
+                    );
+                    for _ in rx.try_iter() {}
+                }
+                assert_eq!(*seen.lock().unwrap(), vec![expected; 12]);
+            });
+        });
     }
 }

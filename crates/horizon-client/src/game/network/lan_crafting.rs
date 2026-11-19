@@ -45,6 +45,38 @@ pub(super) struct GuestCrafting {
 
 pub(super) type OpenCraftingTable = (i32, i32, Box<Menu>, Option<[i32; 3]>);
 
+#[derive(Clone, Copy)]
+pub(super) enum DropMenu {
+    Table,
+    Machine,
+    Station,
+    Lectern,
+    Mount,
+    Merchant,
+}
+
+pub(super) type DropPose = ([f64; 3], [f32; 2]);
+
+pub(super) struct GuestMenuClick<'a> {
+    pub(super) packet: &'a play::ContainerClick,
+    check_drop: bool,
+    deferred: Option<DropMenu>,
+    pub(super) drop_pose: Option<DropPose>,
+}
+
+impl GuestMenuClick<'_> {
+    pub(super) fn apply(&mut self, menu: &mut Menu, env: &Env, owner: DropMenu) -> Result<(), ()> {
+        let (slot, button) = (i32::from(self.packet.slot), i32::from(self.packet.button));
+        let action = input(self.packet.input);
+        if self.check_drop && menu.would_drop_from_click(env, slot, button, action) {
+            self.deferred = Some(owner);
+            return Err(());
+        }
+        let _ = menu.click(env, slot, button, action);
+        Ok(())
+    }
+}
+
 /// The most containers `native_recipe_sources` adds to one placement.
 const MAX_RECIPE_SOURCES: usize = 64;
 /// `GuestPlay::recipe_checks`: what one viewer check adds, and from what the
@@ -139,6 +171,66 @@ fn place_back(menu: &mut Menu, env: &Env, stacks: Vec<ItemStack>) {
 }
 
 impl Game<'_> {
+    pub(super) fn lan_owned_menu_click(
+        &mut self,
+        conn: u32,
+        packet: &play::ContainerClick,
+    ) -> bool {
+        let action = input(packet.input);
+        let mut click = GuestMenuClick {
+            packet,
+            check_drop: (action == Input::Throw
+                || (packet.slot == -999 && matches!(action, Input::Pickup | Input::QuickMove)))
+                && self.native_authoritative()
+                && mod_api::__private::listened(mod_api::HookId::PlayerDropPre),
+            deferred: None,
+            drop_pose: None,
+        };
+        let handled = self.lan_owned_menu_click_once(conn, &mut click);
+        let Some(owner) = click.deferred else {
+            return handled;
+        };
+        // Each route put its menu back without running the click. The hook can
+        // now see the actual open window, and a retry reads the latest slots.
+        if self.player_drop_allowed(Some(conn)) {
+            self.guest_validate_menu(conn);
+            click.check_drop = false;
+            click.drop_pose = self.lan.as_ref().and_then(|host| {
+                host.hub.guest(conn).map(|guest| {
+                    (
+                        Self::player_drop_origin(guest.eye()),
+                        [guest.yaw, guest.pitch],
+                    )
+                })
+            });
+            self.lan_owned_menu_click_once(conn, &mut click);
+        } else {
+            match owner {
+                DropMenu::Table => self.lan_send_table_content(conn),
+                DropMenu::Machine => {
+                    if let Some(host) = self.lan.as_mut() {
+                        host.hub.resend_menu(conn, packet.container, &self.world);
+                    }
+                }
+                DropMenu::Station => self.lan_send_station(conn),
+                DropMenu::Lectern => self.lan_send_lectern(conn, true),
+                DropMenu::Mount => self.lan_resync_mount(conn),
+                DropMenu::Merchant => self.lan_resync_merchant(conn, packet.container),
+            }
+        }
+        true
+    }
+
+    fn lan_owned_menu_click_once(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        self.lan_merchant_click(conn, click)
+            || self.lan_inventory_click(conn, click.packet)
+            || self.lan_crafting_click(conn, click)
+            || self.lan_machine_click(conn, click)
+            || self.lan_station_click(conn, click)
+            || self.lan_lectern_click(conn, click)
+            || self.lan_mount_click(conn, click)
+    }
+
     /// `LocalPlayer.doLimitedCrafting`: whether limited crafting is active.
     pub fn limited_crafting(&self) -> bool {
         self.remote.as_ref().map_or_else(
@@ -182,6 +274,17 @@ impl Game<'_> {
         menu: &mut Menu,
         op: impl FnOnce(&mut Menu, &Env) -> R,
     ) -> Option<R> {
+        self.try_guest_menu_op(gi, menu, None, |menu, env| Ok(op(menu, env)))?
+            .ok()
+    }
+
+    pub(super) fn try_guest_menu_op<R>(
+        &mut self,
+        gi: usize,
+        menu: &mut Menu,
+        drop_pose: Option<DropPose>,
+        op: impl FnOnce(&mut Menu, &Env) -> Result<R, ()>,
+    ) -> Option<Result<R, ()>> {
         self.lan.as_ref()?;
         // Crafting and cartography read and derive this level's saved maps.
         let maps = matches!(
@@ -234,7 +337,9 @@ impl Game<'_> {
         load_player(menu, &host.hub.guests[gi]);
         menu.brewed_potion_hook = !mod_api::__private::mods().is_empty();
         menu.item_smelted_hook = menu.brewed_potion_hook;
-        let result = op(menu, &env);
+        let Ok(result) = op(menu, &env) else {
+            return Some(Err(()));
+        };
         drop(parts);
         self.guest_bundle_sounds(gi, std::mem::take(&mut menu.player_sounds));
         if let Some(maps) = maps {
@@ -303,8 +408,12 @@ impl Game<'_> {
                 }
             });
         }
-        self.drop_guest_items(gi, dropped);
-        Some(result)
+        if let Some((at, rotation)) = drop_pose {
+            self.drop_guest_items_at(at, rotation, dropped);
+        } else {
+            self.drop_guest_items(gi, dropped);
+        }
+        Some(Ok(result))
     }
 
     /// `InventoryMenu.slotsChanged` for guest `uuid`'s crafting grid written outside a click
@@ -502,7 +611,8 @@ impl Game<'_> {
     /// recipe and fuel), `BrewingStandMenu` (one bottle per slot, ingredient and
     /// blaze powder slots) or a content mod's menu type (`Kind::Mod`) over the
     /// block entity's slots. False for other windows.
-    pub(super) fn lan_machine_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
+    fn lan_machine_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        let p = click.packet;
         let Some(host) = self.lan.as_mut() else {
             return false;
         };
@@ -586,7 +696,7 @@ impl Game<'_> {
         // A crafting grid's result is what the guest was shown, the mods' say
         // included, while the grid is as it was then.
         let shown = Self::lan_mod_craft_shown(self.lan.as_ref().unwrap(), gi, &items);
-        let Some(mut changed) = self.guest_menu_op(gi, &mut menu, |menu, env| {
+        let Some(changed) = self.try_guest_menu_op(gi, &mut menu, click.drop_pose, |menu, env| {
             if matches!(kind, Kind::Mod(_)) {
                 menu.load_container(env, &items);
                 if let Some((slot, result)) = shown {
@@ -607,11 +717,17 @@ impl Game<'_> {
             let before: Vec<_> = (0..menu.slot_count())
                 .map(|s| menu.slot(s).cloned())
                 .collect();
-            let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
-            (0..menu.slot_count())
+            click.apply(menu, env, DropMenu::Machine)?;
+            Ok((0..menu.slot_count())
                 .filter(|&s| menu.slot(s) != before[s].as_ref())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         }) else {
+            return true;
+        };
+        let Ok(mut changed) = changed else {
+            if let Some(host) = self.lan.as_mut() {
+                *host.menus.entry(conn).or_default().crafting.machine = Some((p.container, menu));
+            }
             return true;
         };
         let mut linked_after = Vec::new();
@@ -1158,7 +1274,8 @@ impl Game<'_> {
     }
 
     /// A click on the guest's crafting table window; false for other windows.
-    pub(super) fn lan_crafting_click(&mut self, conn: u32, p: &play::ContainerClick) -> bool {
+    fn lan_crafting_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        let p = click.packet;
         let Some(host) = self.lan.as_mut() else {
             return false;
         };
@@ -1185,15 +1302,24 @@ impl Game<'_> {
             && !host.hub.guests[gi].spectator()
             && self.lan_table_valid(&host.hub.guests[gi], pos)
         {
-            let Some(mut changed) = self.guest_menu_op(gi, &mut menu, |menu, env| {
-                let before: Vec<_> = (0..menu.slot_count())
-                    .map(|s| menu.slot(s).cloned())
-                    .collect();
-                let _ = menu.click(env, i32::from(p.slot), i32::from(p.button), input(p.input));
-                (0..menu.slot_count())
-                    .filter(|&s| menu.slot(s) != before[s].as_ref())
-                    .collect::<Vec<_>>()
-            }) else {
+            let Some(changed) =
+                self.try_guest_menu_op(gi, &mut menu, click.drop_pose, |menu, env| {
+                    let before: Vec<_> = (0..menu.slot_count())
+                        .map(|s| menu.slot(s).cloned())
+                        .collect();
+                    click.apply(menu, env, DropMenu::Table)?;
+                    Ok((0..menu.slot_count())
+                        .filter(|&s| menu.slot(s) != before[s].as_ref())
+                        .collect::<Vec<_>>())
+                })
+            else {
+                return true;
+            };
+            let Ok(mut changed) = changed else {
+                if let Some(host) = self.lan.as_mut() {
+                    *host.menus.entry(conn).or_default().crafting.table =
+                        Some((window, state, menu, pos));
+                }
                 return true;
             };
             let Some(guest) = self.lan.as_ref().map(|host| &host.hub.guests[gi]) else {

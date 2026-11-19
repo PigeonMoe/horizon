@@ -6025,7 +6025,7 @@ mod merchant_packet_tests {
                 changed: Vec::new(),
                 carried: None,
             };
-            assert!(game.lan_merchant_click(1, &click));
+            assert!(game.lan_owned_menu_click(1, &click));
             let state = &game.lan.as_ref().unwrap().play[&1]
                 .merchant
                 .as_ref()
@@ -6047,7 +6047,7 @@ mod merchant_packet_tests {
                 state: content.state,
                 ..click
             };
-            assert!(game.lan_merchant_click(1, &second));
+            assert!(game.lan_owned_menu_click(1, &second));
             let (offers, contents) = packets(&rx);
             assert!(offers.is_empty(), "the second take also keeps the snapshot");
             let content = contents.last().expect("second take sends contents");
@@ -6127,7 +6127,7 @@ mod merchant_packet_tests {
                 state: 0,
                 ..second
             };
-            assert!(game.lan_merchant_click(1, &click));
+            assert!(game.lan_owned_menu_click(1, &click));
             let (offers, contents) = packets(&rx);
             assert_eq!(offers.len(), 1, "level-up price refresh sends new offers");
             assert_eq!(offers[0].level, 3);
