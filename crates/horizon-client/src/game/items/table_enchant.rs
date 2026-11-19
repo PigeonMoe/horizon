@@ -1,8 +1,8 @@
 //! The enchanting table's result (`EnchantmentMenu.clickMenuButton`), with
 //! `ItemPart::apply_enchantments` (`IItemExtension.applyEnchantments`) asked for it.
 use super::*;
+use crate::game::TryIntoApi;
 use horizon_items::item_data::Levels;
-use mod_api::TryIntoApi;
 
 /// Says once per item that its `apply_enchantments` parts answered a count other than the
 /// input's, which the table can't hold.
