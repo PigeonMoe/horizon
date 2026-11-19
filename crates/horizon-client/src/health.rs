@@ -1477,6 +1477,22 @@ pub struct PausedHurt {
     dealt: f32,
 }
 impl PausedHurt {
+    /// The incoming damage after the cooldown admitted the hit, before armor.
+    pub fn selected_damage(&self) -> Option<f32> {
+        if self.inner != Some(false) {
+            return None;
+        }
+        self.selected.as_ref().map(|selected| selected.damage)
+    }
+
+    /// Zero the damage of an admitted hit and retain its ordinary continuation.
+    pub fn suppress_selected_damage(&mut self, state: &mut State) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.suppress_damage();
+            state.last_hurt = 0.0;
+        }
+    }
+
     /// What `hurtHelmet` is given, if this hit wears the helmet.
     pub fn helmet_damage(&self) -> Option<f32> {
         self.pending.as_ref()?.helmet_damage()

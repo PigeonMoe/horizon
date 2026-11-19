@@ -28,6 +28,7 @@ impl Game<'_> {
             attack,
             armor_weapon,
             None,
+            None,
         )
     }
 
@@ -44,6 +45,7 @@ impl Game<'_> {
         attack: &horizon_client::health::Attack,
         armor_weapon: Option<horizon_client::health::ArmorWeapon>,
         footwear_action: Option<&'static str>,
+        bee_sting: Option<mod_api::EntityRef>,
     ) -> horizon_client::Result<horizon_client::health::BlockOutcome> {
         let rules = self.world.health_rules;
         let helmet = self.armor[0]
@@ -94,7 +96,23 @@ impl Game<'_> {
                 rules,
                 &mut hit,
             )?;
-        if let Some(damage) = armor_damage {
+        let mut suppress_damage = false;
+        if let Some(bee) = bee_sting
+            && let Some(player) = self.native_acting_player()
+            && let Some(damage) = hit.selected_damage()
+        {
+            self.native_player_bee_sting(mod_api::__private::PlayerBeeStingCall {
+                player,
+                bee,
+                damage,
+                suppress_damage: &mut suppress_damage,
+            });
+        }
+        if suppress_damage {
+            let player = self.player.as_mut().ok_or("missing damage target")?;
+            hit.suppress_selected_damage(&mut player.health.hurt);
+            self.refresh_armor_protection();
+        } else if let Some(damage) = armor_damage {
             let hit_source = hit.source(attack);
             self.hurt_armor(&hit_source, damage);
             self.refresh_armor_protection();

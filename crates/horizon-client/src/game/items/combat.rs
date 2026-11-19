@@ -990,9 +990,7 @@ impl Game<'_> {
             _ => None,
         };
         let landed = match target {
-            Who::Player => {
-                self.hurt_player_from(amount, Some(from), "minecraft:mob_attack", Some(mob), false)
-            }
+            Who::Player => self.hurt_player_from_sting(amount, from, mob),
             Who::Mob(id) => self.mob_attacks_mob(id, amount, source),
         };
         self.combat.hit_landed = landed;

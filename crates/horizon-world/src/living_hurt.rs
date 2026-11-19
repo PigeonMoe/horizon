@@ -247,6 +247,16 @@ pub struct SelectedHurt<U> {
     fresh: bool,
     cooldown: i32,
 }
+impl<U> SelectedHurt<U> {
+    /// Zero the damage without undoing the cooldown's admission of this hit.
+    pub fn suppress_damage(&mut self) {
+        self.damage = 0.0;
+        self.hit.damage = 0.0;
+        self.hit.original = 0.0;
+        self.hit.container.set_new_damage(0.0);
+    }
+}
+
 pub fn select_equipment_hurt<W: HurtWorld>(
     s: &mut HurtState<W::Source>,
     w: &mut W,

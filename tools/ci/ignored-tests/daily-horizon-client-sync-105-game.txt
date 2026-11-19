@@ -11,6 +11,7 @@ horizon-client game::buckets::filled_bucket_stat_tests::washing_a_shulker_box_is
 horizon-client game::cat_spawner::cat_spawner_tests::a_cat_spawner_cat_faces_south_without_a_level_draw lib daily resources
 horizon-client game::cauldron_underwater_tests::a_cauldron_under_water_swallows_a_lava_or_powder_snow_bucket lib daily resources
 horizon-client game::combat::bee_sting_tests::a_landed_sting_sets_the_stinger_and_poisons_on_normal_and_hard lib daily resources
+horizon-client game::combat::bee_sting_tests::a_player_armor_response_keeps_an_admitted_sting_and_its_poison lib daily resources
 horizon-client game::combat::bee_sting_tests::a_refused_sting_leaves_the_bee_alone lib daily resources
 horizon-client game::commands::execute::score_condition_tests::an_unknown_source_objective_drops_a_forked_condition_silently lib daily resources
 horizon-client game::commands::execute::score_condition_tests::an_unknown_source_objective_fails_a_terminal_condition lib daily resources

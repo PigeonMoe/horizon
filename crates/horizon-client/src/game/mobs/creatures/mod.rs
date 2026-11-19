@@ -4105,6 +4105,42 @@ impl Game<'_> {
         known: Option<Option<u32>>,
         by_creative_player: bool,
     ) -> bool {
+        self.hurt_player_from_source(amount, from, damage_type, known, by_creative_player, None)
+    }
+
+    pub(super) fn hurt_player_from_sting(
+        &mut self,
+        amount: f32,
+        from: [f64; 3],
+        mob: Option<u32>,
+    ) -> bool {
+        let bee = if mod_api::__private::listened(mod_api::HookId::PlayerBeeSting) {
+            mob.and_then(|id| self.entity(id)).filter(|bee| {
+                bee.kind(self)
+                    .is_some_and(|kind| kind.id(self) == "minecraft:bee")
+            })
+        } else {
+            None
+        };
+        self.hurt_player_from_source(
+            amount,
+            Some(from),
+            "minecraft:mob_attack",
+            Some(mob),
+            false,
+            bee,
+        )
+    }
+
+    fn hurt_player_from_source(
+        &mut self,
+        amount: f32,
+        from: Option<[f64; 3]>,
+        damage_type: &str,
+        known: Option<Option<u32>>,
+        by_creative_player: bool,
+        bee_sting: Option<mod_api::EntityRef>,
+    ) -> bool {
         let post_attack_if_alive = std::mem::take(&mut self.combat.post_attack_if_alive);
         let rocket = std::mem::take(&mut self.combat.rocket_hit);
         let pierce = std::mem::take(&mut self.combat.piercing_hit);
@@ -4183,7 +4219,7 @@ impl Game<'_> {
         let events_before = self.player.as_ref().map_or(0, |p| p.events.len());
         let damage_outcome = if let Some(id) = self.health_resources.damage.id(damage_type) {
             let weapon = self.player_armor_weapon(attacker, projectile);
-            self.hurt_player_equipment(
+            self.hurt_player_equipment_for(
                 id,
                 amount,
                 blocking,
@@ -4192,6 +4228,8 @@ impl Game<'_> {
                 by_creative_player,
                 &attack,
                 weapon,
+                None,
+                bee_sting,
             )
         } else {
             Ok(Default::default())
@@ -4346,7 +4384,7 @@ impl Game<'_> {
         if self.player.is_some()
             && let Some(id) = self.health_resources.damage.id(damage_type)
             && let Ok(o) = self.hurt_player_equipment_for(
-                id, amount, None, false, 0, false, &attack, None, footwear,
+                id, amount, None, false, 0, false, &attack, None, footwear, None,
             )
         {
             canceled = o.canceled;

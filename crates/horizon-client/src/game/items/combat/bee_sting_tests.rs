@@ -137,3 +137,77 @@ fn a_landed_sting_sets_the_stinger_and_poisons_on_normal_and_hard() {
         );
     }
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_player_armor_response_keeps_an_admitted_sting_and_its_poison() {
+    use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player, with_game};
+    use mod_api::{Flow, Hooks, ModEntry, PlayerBeeStingEvent, ServerHost};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct GearProbe(Arc<AtomicUsize>);
+    #[mod_api::__subscriptions]
+    impl Hooks for GearProbe {
+        fn player_bee_sting(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerBeeStingEvent,
+        ) -> Flow {
+            assert_eq!(event.player.uuid(), 7);
+            assert_eq!(event.bee.kind(host).unwrap().id(host), "minecraft:bee");
+            assert!(event.damage > 0.0);
+            let (slot, mut helmet) = event.player.inventory_slots(host).unwrap().remove(0);
+            assert_eq!(slot, 39);
+            helmet.set_damage(1);
+            event
+                .player
+                .set_inventory_slot(host, slot, Some(helmet))
+                .unwrap();
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Flow::Cancel
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mods = vec![ModEntry::new(
+        "bee-armor-proof",
+        Box::new(GearProbe(calls.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            game.world.health_rules.difficulty = Difficulty::Normal;
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.lan_acting = Some(12);
+            game.lan_acting_uuid = Some(7);
+            game.lan_acting_name = Some("BeeArmor".into());
+            game.lan_acting_permission = Some(0);
+            game.lan_acting_entity = Some(2);
+            bind_local_player(game, 2, 7);
+            bind_acting_guest(game);
+            game.armor[0] = Some(ItemStack::new("minecraft:leather_helmet", 1));
+            let bee = spawn(game, 41, "minecraft:bee", Vec3::new(1.5, 64.0, 0.5));
+            let p = game.player.as_mut().unwrap();
+            let health = p.health.health();
+            p.health.hurt.cooldown = 15;
+            p.health.hurt.last_hurt = 100.0;
+            sting(game, bee, Who::Player);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(game.combat.stuck.stingers, 0);
+
+            game.player.as_mut().unwrap().health.hurt.cooldown = 0;
+            sting(game, bee, Who::Player);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let p = game.player.as_ref().unwrap();
+            assert_eq!(p.health.health(), health);
+            assert_eq!(p.health.hurt.last_hurt, 0.0);
+            assert_eq!(game.armor[0].as_ref().unwrap().damage, 1);
+            assert_eq!(game.combat.stuck.stingers, 1);
+            assert_eq!(game.potions.effects.get("poison").unwrap().duration, 200);
+            let bee_mob = game.mobs.iter().find(|m| m.id == bee).unwrap();
+            assert!(bee::has_stung(bee_mob));
+        });
+    });
+}
