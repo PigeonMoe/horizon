@@ -1492,10 +1492,14 @@ impl Game<'_> {
             }
         }
     }
-    /// Where a container is in the world for the mods: its block, or the block a chest
-    /// boat or minecart is in (its view sits under a placeholder key).
+    /// The inventory's location in a transfer event. A double chest uses the
+    /// floored midpoint of its two adjacent block coordinates, independent of
+    /// the slot order. A vehicle's view sits under a placeholder key.
     fn container_world_pos(&self, view: &View) -> [i32; 3] {
         let (x, y, z) = view.parts[0].0;
+        if let Some(&((other_x, other_y, other_z), _)) = view.parts.get(1) {
+            return [x.min(other_x), y.min(other_y), z.min(other_z)];
+        }
         if x == i32::MAX - 15 && y == super::minecarts::CART_KEY_Y {
             let id = z as u32;
             let at = self
@@ -3190,6 +3194,135 @@ mod dispenser_selection_tests {
                 );
                 assert_eq!(game.dropped.len(), 2);
                 assert_eq!(game.containers().get(&view, SLOT).unwrap().count, 2);
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+mod double_chest_transfer_tests {
+    use super::*;
+    use mod_api::{Flow, Hooks, Host, InventoryMoveItemEvent, ModEntry};
+    use std::sync::{Arc, Mutex};
+
+    type Endpoints = ([i32; 3], [i32; 3]);
+
+    struct Boundary(Arc<Mutex<Vec<Endpoints>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Boundary {
+        fn inventory_move_item(
+            &self,
+            _: &dyn Host,
+            event: &mut InventoryMoveItemEvent<'_>,
+        ) -> Flow {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.source, event.destination));
+            if (event.source[0] >= -1) != (event.destination[0] >= -1) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn hopper_push_and_pull_use_the_double_chest_midpoint_across_a_boundary() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let guard = ModEntry::new("double_chest_boundary", Box::new(Boundary(seen.clone())));
+        mod_platform::testing::with_mods(vec![guard].into(), || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.world.chunks.insert(
+                    (-1, 0),
+                    Arc::new(horizon_client::chunk::Chunk::empty(-1, 0)),
+                );
+                let put = |game: &mut Game<'_>,
+                           (x, y, z),
+                           block,
+                           properties: &[(&str, &str)],
+                           size,
+                           stack| {
+                    let registry = game.pack.assets.registry;
+                    let mut state = registry.default_state(block).unwrap();
+                    for &(property, value) in properties {
+                        state = crate::game::native_hooks::with_property(
+                            registry, state, property, value,
+                        )
+                        .unwrap();
+                    }
+                    game.world.set(x, y, z, state).unwrap();
+                    let mut slots = vec![None; size];
+                    slots[0] = stack;
+                    game.world
+                        .block_entities
+                        .insert((x, y, z), BlockEntity::Chest(slots));
+                };
+                let left = (-2, 65, 8);
+                let right = (-1, 65, 8);
+                let pull_inside = (-1, 64, 8);
+                let pull_outside = (-2, 64, 8);
+                let push_inside = (-1, 65, 7);
+                let push_outside = (-2, 65, 7);
+                let stone = |count| Some(ItemStack::new("minecraft:stone", count));
+                put(
+                    game,
+                    left,
+                    "minecraft:chest",
+                    &[("facing", "north"), ("type", "left")],
+                    27,
+                    None,
+                );
+                put(
+                    game,
+                    right,
+                    "minecraft:chest",
+                    &[("facing", "north"), ("type", "right")],
+                    27,
+                    stone(2),
+                );
+                for (pos, facing, stack) in [
+                    (pull_inside, "down", None),
+                    (pull_outside, "down", None),
+                    (push_inside, "south", stone(2)),
+                    (push_outside, "south", stone(2)),
+                ] {
+                    put(
+                        game,
+                        pos,
+                        "minecraft:hopper",
+                        &[("facing", facing), ("enabled", "true")],
+                        5,
+                        stack,
+                    );
+                }
+                let slot = |game: &Game<'_>, pos| {
+                    game.world.block_entities.get(&pos).unwrap().slots()[0].clone()
+                };
+                game.tick_hopper(pull_inside);
+                assert_eq!(slot(game, right), stone(2));
+                assert_eq!(slot(game, pull_inside), None);
+                game.tick_hopper(pull_outside);
+                assert_eq!(slot(game, right), stone(1));
+                assert_eq!(slot(game, pull_outside), stone(1));
+                game.tick_hopper(push_inside);
+                assert_eq!(slot(game, right), stone(1));
+                assert_eq!(slot(game, push_inside), stone(2));
+                game.tick_hopper(push_outside);
+                assert_eq!(slot(game, right), stone(2));
+                assert_eq!(slot(game, push_outside), stone(1));
+                assert_eq!(slot(game, left), None);
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    [
+                        ([-2, 65, 8], [-1, 64, 8]),
+                        ([-2, 65, 8], [-2, 64, 8]),
+                        ([-1, 65, 7], [-2, 65, 8]),
+                        ([-2, 65, 7], [-2, 65, 8]),
+                    ]
+                );
             });
         });
     }
