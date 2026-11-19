@@ -132,6 +132,7 @@ pub struct Env<'a> {
 }
 
 impl Env<'_> {
+    /// Whether the server's listeners allow this player's recipe result.
     pub fn recipe_result_allowed(
         &self,
         menu: &str,
@@ -1722,6 +1723,16 @@ impl Menu {
                         &self.state.containers[MAIN][..3],
                         result,
                     )
+                })
+            }
+            Role::GrindResult | Role::CartoResult => {
+                let menu = if self.state.kind == Kind::Grindstone {
+                    "minecraft:grindstone"
+                } else {
+                    "minecraft:cartography_table"
+                };
+                self.slot(s).is_none_or(|result| {
+                    env.recipe_result_allowed(menu, &self.state.containers[MAIN][..2], result)
                 })
             }
             Role::MerchantResult => self
@@ -3870,14 +3881,14 @@ pub(crate) mod tests {
                 inputs: &[Option<ItemStack>],
                 _: &ItemStack,
             ) -> bool {
-                assert_eq!(
-                    menu,
-                    if inputs.len() == 3 {
-                        "minecraft:smithing"
-                    } else {
-                        "minecraft:crafting"
+                match menu {
+                    "minecraft:crafting" => assert!(matches!(inputs.len(), 4 | 9)),
+                    "minecraft:smithing" => assert_eq!(inputs.len(), 3),
+                    "minecraft:grindstone" | "minecraft:cartography_table" => {
+                        assert_eq!(inputs.len(), 2);
                     }
-                );
+                    other => panic!("Unexpected result menu {other}"),
+                }
                 !inputs.iter().flatten().any(|stack| stack.damage == 1)
             }
         }
@@ -3919,6 +3930,33 @@ pub(crate) mod tests {
                     .unwrap();
                 let remaining = menu.slot(input_slot).map_or(0, |stack| stack.count);
                 assert_eq!(remaining, u32::from(kind == Kind::Smithing));
+            });
+        }
+        for (kind, first, second, output) in [
+            (Kind::Grindstone, "iron_sword", "iron_sword", "iron_sword"),
+            (Kind::Cartography, "filled_map", "paper", "filled_map"),
+        ] {
+            bare_env(|base| {
+                let mut menu = Menu::new(kind);
+                let env = Env {
+                    slot_rules: Some(&TaggedIngredients),
+                    ..*base
+                };
+                let first = stack(first, 1);
+                let mut second = stack(second, 1).unwrap();
+                second.damage = 1;
+                menu.set_slot(&env, 0, first.clone());
+                menu.set_slot(&env, 1, Some(second.clone()));
+                let preview = stack(output, 1);
+                menu.load_slot(2, preview.clone());
+                for input in [Input::Pickup, Input::QuickMove] {
+                    menu.click(&env, 2, 0, input).unwrap();
+                    assert_eq!(menu.slot(0), first.as_ref());
+                    assert_eq!(menu.slot(1), Some(&second));
+                    assert_eq!(menu.slot(2), preview.as_ref());
+                    assert!(menu.carried.is_none());
+                    assert!(menu.containers[PLAYER].iter().all(Option::is_none));
+                }
             });
         }
     }
