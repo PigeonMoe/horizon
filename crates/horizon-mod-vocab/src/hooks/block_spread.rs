@@ -3,10 +3,10 @@
 
 pub trait Hooks {
     /// On an authoritative server, `kind` identifies fluid flow (`fluid`),
-    /// fire spread or burning (`fire`), or propagation by vegetation, buds
-    /// or sculk (`growth`). `from` is the original source block.
-    /// Set `canceled` to leave the block at `to` as it is. Fluids ask on
-    /// every flow: answer fast.
+    /// fire spread or burning (`fire`), propagation by vegetation, buds or
+    /// sculk (`growth`), or dragon egg teleportation (`dragon_egg`). `from` is
+    /// the original source block. Set `canceled` to refuse the interaction.
+    /// Fluids ask on every flow: answer fast.
     #[hook(
         side = "server",
         contract = "cancel",

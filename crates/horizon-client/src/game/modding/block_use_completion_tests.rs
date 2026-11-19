@@ -1,8 +1,8 @@
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 thread_local! {
@@ -40,6 +40,142 @@ impl Drop for Recording {
         CAPTURE.set(false);
         SEEN.with_borrow_mut(Vec::clear);
     }
+}
+
+#[test]
+#[ignore = "daily"]
+fn dragon_egg_clicks_stop_on_the_first_refused_destination() {
+    use horizon_client::chunk::Chunk;
+    use horizon_core::random::LegacyRandom;
+    use horizon_protocol::packets::play::{PlayerAction, Serverbound, UseItemOn};
+
+    const SOURCE: [i32; 3] = [3, 65, 4];
+
+    #[derive(Default)]
+    struct Probe {
+        denied: AtomicBool,
+        destinations: Mutex<Vec<[i32; 3]>>,
+    }
+
+    struct Listener(Arc<Probe>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for Listener {
+        fn block_spread(
+            &self,
+            _: &dyn mod_api::LevelHost,
+            event: &mut mod_api::BlockSpreadEvent<'_>,
+        ) -> mod_api::Flow {
+            if event.kind != "dragon_egg" {
+                return mod_api::Flow::Continue;
+            }
+            assert!(matches!(
+                event.dimension,
+                mod_api::LevelDimension::Overworld
+            ));
+            assert_eq!([event.from.x, event.from.y, event.from.z], SOURCE);
+            self.0
+                .destinations
+                .lock()
+                .unwrap()
+                .push([event.to.x, event.to.y, event.to.z]);
+            if self.0.denied.load(Ordering::Relaxed) {
+                mod_api::Flow::Cancel
+            } else {
+                mod_api::Flow::Continue
+            }
+        }
+    }
+
+    let probe = Arc::new(Probe::default());
+    mod_platform::__private::install(Arc::from([mod_api::ModEntry::new(
+        "dragon-egg-spread-test",
+        Box::new(Listener(probe.clone())),
+    )]));
+    crate::game::native_guest_turn_tests::with_guests(|game| {
+        game.build_registries();
+        for z in [0, 1] {
+            game.world
+                .chunks
+                .insert((0, z), Arc::new(Chunk::empty(0, z)));
+        }
+        let registry = &game.pack.assets.registry;
+        let egg = registry.default_state("minecraft:dragon_egg").unwrap();
+        let stone = registry.default_state("minecraft:stone").unwrap();
+        let air = registry.default_state("minecraft:air").unwrap();
+        for x in 0..16 {
+            for z in 0..32 {
+                game.world.set(x, 64, z, stone).unwrap();
+            }
+        }
+        let click = |game: &mut Game<'_>, right, sequence| {
+            let packet = if right {
+                Serverbound::UseItemOn(UseItemOn {
+                    hand: 0,
+                    pos: SOURCE,
+                    face: 1,
+                    cursor: [0.5, 1.0, 0.5],
+                    inside: false,
+                    world_border: false,
+                    sequence,
+                })
+            } else {
+                Serverbound::PlayerAction(PlayerAction {
+                    action: 0,
+                    pos: SOURCE,
+                    direction: 1,
+                    sequence,
+                })
+            };
+            *game.world.random = LegacyRandom::new(12345);
+            game.lan_guest_packet(12, packet);
+        };
+
+        // The first pick lands in the adjacent chunk when it is loaded.
+        let first = [0, 65, 17];
+        game.world
+            .set(SOURCE[0], SOURCE[1], SOURCE[2], egg)
+            .unwrap();
+        click(game, true, 1);
+        assert_eq!(
+            std::mem::take(&mut *probe.destinations.lock().unwrap()),
+            [first]
+        );
+        assert_eq!(game.world.block(first[0], first[1], first[2]), egg);
+        assert_eq!(game.world.block(SOURCE[0], SOURCE[1], SOURCE[2]), air);
+        assert!(game.world.chunks.remove(&(0, 1)).is_some());
+
+        // With that chunk gone, both real click packets select the next valid site.
+        // Denial ends the attempt, although the same seed has further valid sites.
+        let target = [5, 65, 0];
+        for (sequence, right, denied) in [
+            (2, false, true),
+            (3, true, true),
+            (4, false, false),
+            (5, true, false),
+        ] {
+            probe.denied.store(denied, Ordering::Relaxed);
+            game.world
+                .set(SOURCE[0], SOURCE[1], SOURCE[2], egg)
+                .unwrap();
+            game.world
+                .set(target[0], target[1], target[2], air)
+                .unwrap();
+            click(game, right, sequence);
+            assert_eq!(
+                std::mem::take(&mut *probe.destinations.lock().unwrap()),
+                [target],
+                "right={right}, denied={denied}",
+            );
+            assert_eq!(
+                game.world.block(SOURCE[0], SOURCE[1], SOURCE[2]),
+                if denied { egg } else { air },
+            );
+            assert_eq!(
+                game.world.block(target[0], target[1], target[2]),
+                if denied { air } else { egg },
+            );
+        }
+    });
 }
 
 #[test]

@@ -145,8 +145,8 @@ impl GameLevel<'_> {
         self.fire_neighbor_changed(ticks, dimension, pos, state, changed, moved);
     }
 
-    /// Check a fluid flow, fire spread or propagation by vegetation, buds or
-    /// sculk before changing the destination block.
+    /// Check fluid, fire, block growth or a dragon egg move before changing
+    /// the destination block.
     #[inline(always)]
     pub(in crate::game) fn native_block_spread(
         &self,

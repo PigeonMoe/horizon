@@ -1,6 +1,8 @@
 //! `BlockBehaviour.useWithoutItem` (right-click with an empty hand or an item
 //! that does not handle the block itself).
-use super::{Behaviours, LevelAccess, LevelEvent, Sim, Ticks, classes::Class, update::below};
+use super::{
+    Behaviours, LevelAccess, LevelEvent, Sim, Spread, Ticks, classes::Class, update::below,
+};
 use crate::registry::BlockStateId;
 use horizon_core::{
     geometry::{BlockHit, Direction, Vec3},
@@ -598,6 +600,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
 
     /// `DragonEggBlock.teleport`.
     fn dragon_egg_teleport(&mut self, pos: BlockPos, state: BlockStateId) {
+        if !self.level.is_loaded(pos) {
+            return;
+        }
         let b = self.b;
         for _ in 0..1000 {
             let dx = self.random().next_int_bound(16).unwrap_or(0)
@@ -607,11 +612,17 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             let dz = self.random().next_int_bound(16).unwrap_or(0)
                 - self.random().next_int_bound(16).unwrap_or(0);
             let test = pos.offset(dx, dy, dz);
-            if b.is_air(self.state(test))
+            if self.level.is_loaded(test)
+                && b.is_air(self.state(test))
                 && !b.is_air(self.below_state(test))
                 && self.level.within_world_border(test)
                 && self.is_inside_build_height(test.y)
             {
+                // Paper's BlockFromToEvent can cancel the selected destination.
+                // Cancellation finishes this interaction before its writes or particles.
+                if !self.level.allow_spread(Spread::DragonEgg, pos, test) {
+                    return;
+                }
                 // BlockUtil.packDifferenceInPosition(pos, test, 16, 8, 16)
                 let packed = ((dx + 16) << 16) | ((dy + 8) << 8) | (dz + 16);
                 self.level_event(2015, pos, packed);

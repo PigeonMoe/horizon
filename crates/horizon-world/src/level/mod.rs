@@ -450,6 +450,8 @@ pub enum Spread {
     Fire,
     /// Existing vegetation, buds or sculk propagate into a target block.
     Growth,
+    /// A dragon egg moves to the first valid destination on interaction.
+    DragonEgg,
 }
 
 mod block_entity_neighbors;

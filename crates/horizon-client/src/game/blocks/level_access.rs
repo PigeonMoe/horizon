@@ -123,6 +123,7 @@ impl LevelAccess for GameLevel<'_> {
                 horizon_world::level::Spread::Fluid => "fluid",
                 horizon_world::level::Spread::Fire => "fire",
                 horizon_world::level::Spread::Growth => "growth",
+                horizon_world::level::Spread::DragonEgg => "dragon_egg",
             };
             self.native_block_spread(self.dimension, kind, from, to, &mut canceled);
         }
