@@ -100,6 +100,9 @@ pub trait BlockLandingWorld: BlockPushWorld {
     ) -> bool {
         false
     }
+    fn allow_turtle_egg_trample(&self, _position: BlockPos) -> bool {
+        true
+    }
     fn suppressing_bounce(&mut self) -> Result<bool, Self::Error>;
     fn damage_source(
         &mut self,
@@ -310,7 +313,10 @@ impl BlockLandingRegistry {
         } else {
             entity.living() && world.mob_griefing().map_err(LandingError::World)?
         };
-        if allowed && world.random_int(randomness).map_err(LandingError::World)? == 0 {
+        if allowed
+            && world.random_int(randomness).map_err(LandingError::World)? == 0
+            && world.allow_turtle_egg_trample(position)
+        {
             let sound = world.known_sound(LandingSound::TurtleEggBreak);
             let pitch = 0.9f32 + world.random_float().map_err(LandingError::World)? * 0.2f32;
             world

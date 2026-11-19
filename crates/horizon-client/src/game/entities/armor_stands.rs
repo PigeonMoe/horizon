@@ -1360,6 +1360,7 @@ impl Game<'_> {
             .iter()
             .any(|t| tags.get(*t).is_some_and(|s| s.contains(&**name)))
         });
+        let stand_id = stand.id;
         for chance in [landed.then_some(3), Some(100)].into_iter().flatten() {
             let egg = self
                 .pack
@@ -1373,6 +1374,7 @@ impl Game<'_> {
                     .rules
                     .bool_at(horizon_client::gamerules::vanilla::MOB_GRIEFING)
                 && self.world.random.next_int_bound(chance).unwrap_or(1) == 0
+                && self.allow_non_player_block_trigger(p, stand_id)
             {
                 self.crack_turtle_egg([p.x, p.y, p.z])?;
             }
@@ -2783,7 +2785,11 @@ mod stand_ridden_move_tests {
         }
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let mods = vec![ModEntry::new("stand-move-claim", Box::new(Claim(calls.clone())))].into();
+        let mods = vec![ModEntry::new(
+            "stand-move-claim",
+            Box::new(Claim(calls.clone())),
+        )]
+        .into();
         mod_platform::testing::with_mods(mods, || {
             with_guests(|game| {
                 game.build_registries();
@@ -2814,6 +2820,71 @@ mod stand_ridden_move_tests {
             });
         });
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[cfg(test)]
+mod turtle_egg_trample_tests {
+    use crate::game::{native_entity_refs::tests::with_game, *};
+    use horizon_core::random::{LegacyRandom, LevelRandom, RandomSource};
+    use mod_api::{BlockTriggerEntityPreEvent, Flow, Hooks, LevelHost, ModEntry, Mods};
+    use std::sync::{Arc, Mutex};
+
+    struct Claim(Arc<Mutex<Vec<u32>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Claim {
+        fn block_trigger_entity_pre(
+            &self,
+            level: &dyn LevelHost,
+            event: &mut BlockTriggerEntityPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!([event.pos.x, event.pos.y, event.pos.z], [8, 64, 8]);
+            assert_eq!(event.player, None);
+            let state = level.block_state([8, 64, 8]).unwrap();
+            assert_eq!(level.state_block(state), Some("minecraft:turtle_egg"));
+            self.0.lock().unwrap().push(event.entity);
+            if event.entity == 10 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_stands_turtle_egg_trample_uses_the_real_entity_and_current_block() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new("egg-claim", Box::new(Claim(heard.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let seed = (0..1000)
+                    .find(|seed| LegacyRandom::new(*seed).next_int_bound(100).unwrap() == 0)
+                    .unwrap();
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let registry = game.pack.assets.registry;
+                let egg = registry.default_state("minecraft:turtle_egg").unwrap();
+                let air = registry.default_state("minecraft:air").unwrap();
+                game.world.set(8, 64, 8, egg).unwrap();
+                for (entity, expected) in [(10, egg), (11, air)] {
+                    let mut stand = horizon_client::entities::ArmorStand::new(
+                        entity,
+                        Vec3::new(8.5, 64.4375, 8.5),
+                        0.0,
+                    );
+                    stand.on_ground = true;
+                    let index = game.armor_stands.len();
+                    game.armor_stands.push(stand);
+                    game.world.random = LevelRandom::for_level(LegacyRandom::new(seed));
+                    game.armor_stand_turtle_eggs(index, false).unwrap();
+                    assert_eq!(game.world.block(8, 64, 8), expected);
+                }
+            });
+        });
+        assert_eq!(*heard.lock().unwrap(), [10, 11]);
     }
 }
 

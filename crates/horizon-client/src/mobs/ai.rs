@@ -1358,6 +1358,7 @@ pub(crate) fn effects_from_blocks(
             && !matches!(m.species(), Species::Turtle | Species::Bat)
             && w.can_grief(m.id)
             && level.random().next_int_bound(100).unwrap_or(1) == 0
+            && w.allow_block_trigger(m.id, [x, y, z])
         {
             events.push(MobEvent::CrackTurtleEgg { pos: [x, y, z] });
         }

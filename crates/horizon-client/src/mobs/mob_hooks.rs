@@ -34,6 +34,10 @@ pub trait MobHooks {
     fn may_change_block(&self, _mob: &Mob, _pos: [i32; 3]) -> bool {
         true
     }
+    /// Paper's physical interaction at a block a non-player would affect.
+    fn allow_block_trigger(&self, _mob: u32, _pos: [i32; 3]) -> bool {
+        true
+    }
     /// `LivingVisibilityEvent`: `visibility`, the player's visibility
     /// percent as mob `looking` targets it, as mods scale it.
     fn living_visibility(&self, player: &PlayerView, looking: u32, visibility: f64) -> f64;
@@ -65,6 +69,10 @@ impl MobWorld<'_> {
         self.mob_hooks
             .is_none_or(|hooks| hooks.may_change_block(mob, pos))
     }
+    pub fn allow_block_trigger(&self, mob: u32, pos: [i32; 3]) -> bool {
+        self.mob_hooks
+            .is_none_or(|hooks| hooks.allow_block_trigger(mob, pos))
+    }
     /// `IBlockExtension.canEntityDestroy` of the block at `pos` for mob `mob`:
     /// `vanilla`, the mob's own rule (`WitherBoss.canDestroy`), or what the
     /// block's parts answer (`native_can_entity_destroy`).
@@ -91,6 +99,9 @@ impl MobHooks for BlockChangeGuard<'_> {
         false
     }
     fn may_change_block(&self, _: &Mob, pos: [i32; 3]) -> bool {
+        !self.0.contains(&pos)
+    }
+    fn allow_block_trigger(&self, _: u32, pos: [i32; 3]) -> bool {
         !self.0.contains(&pos)
     }
     fn living_visibility(&self, _: &PlayerView, _: u32, visibility: f64) -> f64 {

@@ -93,6 +93,9 @@ impl horizon_client::mobs::MobHooks for Game<'_> {
     fn may_change_block(&self, mob: &Mob, pos: [i32; 3]) -> bool {
         self.mob_block_change_allowed(mob.id, &mob.kind.id, pos)
     }
+    fn allow_block_trigger(&self, mob: u32, [x, y, z]: [i32; 3]) -> bool {
+        self.allow_non_player_block_trigger(BlockPos::new(x, y, z), mob)
+    }
     fn can_entity_destroy(&self, mob: u32, pos: [i32; 3], vanilla: bool) -> bool {
         self.entity_may_destroy(mob, pos, vanilla)
     }

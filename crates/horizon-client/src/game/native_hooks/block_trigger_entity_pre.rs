@@ -1,5 +1,5 @@
 use crate::game::{
-    BlockTriggerPlayer, GameLevel,
+    BlockTriggerPlayer, Game, GameLevel,
     entity::{Entity as _, for_each_entity},
 };
 use horizon_core::{
@@ -7,6 +7,39 @@ use horizon_core::{
     position::BlockPos,
 };
 use horizon_world::level::{BlockTriggerCount, EntityQuery};
+
+impl Game<'_> {
+    pub(in crate::game) fn allow_non_player_block_trigger(
+        &self,
+        pos: BlockPos,
+        entity: u32,
+    ) -> bool {
+        if !self.native_authoritative()
+            || !mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+        {
+            return true;
+        }
+        let Some(epoch) = self.native_lifecycle.epoch() else {
+            return true;
+        };
+        let level = self.level_ref(epoch, self.dim.key());
+        let view = crate::game::native_level_signals::ReadLevel { game: self, level };
+        let mut cancel = false;
+        mod_api::dispatch_block_trigger_entity_pre(
+            &view,
+            mod_api::__private::BlockTriggerEntityPreCall {
+                dimension: self.dim.level(),
+                pos,
+                entity,
+                player: None,
+                name: "",
+                permission_level: 0,
+                cancel: &mut cancel,
+            },
+        );
+        !cancel
+    }
+}
 
 impl GameLevel<'_> {
     pub(in crate::game) fn native_block_trigger_entity_pre(

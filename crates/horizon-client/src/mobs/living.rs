@@ -3617,6 +3617,84 @@ mod tests {
         assert!(ran, "vanilla data is missing");
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn a_mob_asks_before_cracking_turtle_eggs_on_step_or_landing() {
+        use crate::mobs::mob_hooks::BlockChangeGuard;
+        use horizon_core::random::{EntityRandom, LegacyRandom, RandomSource};
+
+        let at = [1, 63, 1];
+        let ran = crate::mobs::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                world.chunks.insert(
+                    (0, 0),
+                    std::sync::Arc::new(crate::chunk::Chunk::empty(0, 0)),
+                );
+                let egg = registry.default_state("minecraft:turtle_egg").unwrap();
+                world.set(at[0], at[1], at[2], egg).unwrap();
+            },
+            |w, types| {
+                let kind = std::sync::Arc::new(types.types["minecraft:pig"].clone());
+                let step_seed = (0..1000)
+                    .find(|seed| LegacyRandom::new(*seed).next_int_bound(100).unwrap() == 0)
+                    .unwrap();
+                let fall_seed = (0..1000)
+                    .find(|seed| LegacyRandom::new(*seed).next_int_bound(3).unwrap() == 0)
+                    .unwrap();
+                let cells = [at];
+                let guard = BlockChangeGuard(&cells);
+                for protected in [false, true] {
+                    let mut view = w.clone();
+                    if protected {
+                        view.mob_hooks = Some(&guard);
+                    }
+                    let mut mob = Mob::new(1, kind.clone(), Vec3::new(1.5, 64.0, 1.5), 0.0);
+                    mob.on_ground = true;
+                    assert_eq!(mob.block_on_legacy(&view), at);
+                    let mut lr = crate::health::TestLevel::new(step_seed);
+                    let mut events = Vec::new();
+                    crate::mobs::ai::effects_from_blocks(
+                        &mut mob,
+                        &view,
+                        &mut lr.level(),
+                        &mut events,
+                    );
+                    assert_eq!(
+                        events.iter().any(|event| matches!(
+                            event, MobEvent::CrackTurtleEgg { pos } if *pos == at
+                        )),
+                        !protected,
+                    );
+
+                    events.clear();
+                    mob.random = EntityRandom::own(LegacyRandom::new(fall_seed));
+                    mob.fall_distance = 6.0;
+                    let before = mob.health;
+                    mob.fall_on_block(&view, &mut lr.level(), &mut events);
+                    assert!(
+                        mob.health < before,
+                        "the egg veto never cancels fall damage"
+                    );
+                    assert_eq!(
+                        events.iter().any(|event| matches!(
+                            event, MobEvent::SetBlock { pos, .. } if *pos == at
+                        )),
+                        !protected,
+                    );
+                    assert_eq!(
+                        events.iter().any(|event| matches!(
+                            event,
+                            MobEvent::Sound("entity.turtle.egg_break", ..)
+                        )),
+                        !protected,
+                    );
+                }
+            },
+        );
+        assert!(ran, "vanilla data is missing");
+    }
+
     /// `Entity.applyMovementEmissionAndPlaySound` asks `getMovementEmission`:
     /// a squid, a glow squid and a bat answer `EVENTS`, so a beached squid
     /// flopping across stone sends the `minecraft:step` game event and no

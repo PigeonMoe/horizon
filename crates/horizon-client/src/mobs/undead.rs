@@ -1316,7 +1316,7 @@ impl Goal for AttackTurtleEgg {
                 ));
             }
         }
-        if self.since_reached > 60 {
+        if self.since_reached > 60 && cx.w.allow_block_trigger(m.id, eat) {
             cx.events.push(MobEvent::BreakBlock {
                 pos: eat,
                 drop: false,
@@ -1601,7 +1601,7 @@ mod turtle_egg_tests {
     /// tick it breaks the egg, and the level random's next draw afterwards,
     /// with the level random seeded `level_seed`. `None` without the extracted
     /// data.
-    fn break_tick(level_seed: i64) -> Option<(f32, f32)> {
+    fn break_tick(level_seed: i64, protected: bool) -> Option<(f32, f32)> {
         let build = |world: &mut crate::world::World,
                      registry: &horizon_world::registry::BlockRegistry| {
             world
@@ -1621,12 +1621,31 @@ mod turtle_egg_tests {
             goal.since_reached = 61;
             let mut lr = crate::health::TestLevel::new(level_seed);
             let mut events = Vec::new();
+            let cells = [[0, 63, 0]];
+            let guard = crate::mobs::mob_hooks::BlockChangeGuard(&cells);
+            let mut view = w.clone();
+            if protected {
+                view.mob_hooks = Some(&guard);
+            }
             let mut cx = Cx {
-                w,
+                w: &view,
                 level: &mut lr.level(),
                 events: &mut events,
             };
             goal.tick(&mut m, &mut cx);
+            assert_eq!(goal.since_reached, 62);
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, MobEvent::BreakBlock { .. })),
+                !protected,
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, MobEvent::LevelParticles { kind: "poof", .. })),
+                !protected,
+            );
             out = events
                 .iter()
                 .find_map(|e| match e {
@@ -1651,13 +1670,14 @@ mod turtle_egg_tests {
         // java.util.Random(seed)'s first nextFloat, from an independent
         // implementation: 0.7306990027427673 for 7, 0.0978928804397583 for
         // 4096, so the pitches are 0.9 + f * 0.2 in f32.
-        let Some((pitch, next)) = break_tick(7) else {
+        let Some((pitch, next)) = break_tick(7, false) else {
             return;
         };
         assert_eq!(pitch, 1.046_139_7);
         // Exactly one draw: the seed's second float is what comes next.
         assert_eq!(next, 0.638_537_65);
-        assert_eq!(break_tick(4096), Some((0.919_578_55, 0.875_477_85)));
+        assert_eq!(break_tick(4096, false), Some((0.919_578_55, 0.875_477_85)));
+        assert_eq!(break_tick(7, true), None);
     }
 }
 

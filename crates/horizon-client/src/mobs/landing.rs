@@ -116,6 +116,10 @@ impl BlockLandingWorld for MobLanding<'_, '_, '_> {
         );
         cancel
     }
+    fn allow_turtle_egg_trample(&self, position: BlockPos) -> bool {
+        self.w
+            .allow_block_trigger(self.mob.id, [position.x, position.y, position.z])
+    }
     // A mob never sneaks, so nothing suppresses a slime block's bounce.
     fn suppressing_bounce(&mut self) -> Result<bool, String> {
         Ok(false)
