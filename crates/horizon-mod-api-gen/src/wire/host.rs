@@ -156,7 +156,22 @@ fn frame(surface: &mut super::Surface<'_>) -> Result<String, String> {
             }
             let expr = choices.join(".or_else(|| ");
             let expr = format!("{expr}{}", ")".repeat(choices.len().saturating_sub(1)));
-            writeln!(methods, "pub unsafe fn {name}{suffix}(&self) -> Result<&'static {m}dyn {path}, ServeError> {{ {expr}.ok_or(ServeError::Missing(\"{name}\")) }}", suffix=if mutable {"_mut"} else {""}, m=if mutable {"mut "} else {""}).unwrap();
+            let body = if *owner == "Tags" && !mutable {
+                // Loot callbacks lend Tags directly. Other hooks can borrow the
+                // service from their host without a separate wire call.
+                format!(
+                    "if let Some(tags) = {expr} {{ return Ok(tags); }}
+                    if !mod_api::__private::access_allowed(\"tags\", mod_api::__private::LoadAccess::Metadata) {{
+                        return Err(ServeError::Phase {{ operation: \"tags\", phase: mod_api::__private::current_phase() }});
+                    }}
+                    unsafe {{ self.level_host() }}.map(|host| host.tags())
+                        .or_else(|_| unsafe {{ self.host() }}.map(|host| host.tags()))
+                        .map_err(|_| missing(\"tags\"))"
+                )
+            } else {
+                format!("{expr}.ok_or(ServeError::Missing(\"{name}\"))")
+            };
+            writeln!(methods, "pub unsafe fn {name}{suffix}(&self) -> Result<&'static {m}dyn {path}, ServeError> {{ {body} }}", suffix=if mutable {"_mut"} else {""}, m=if mutable {"mut "} else {""}).unwrap();
         }
     }
     Ok(format!(

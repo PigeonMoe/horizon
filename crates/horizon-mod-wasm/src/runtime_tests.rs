@@ -252,6 +252,94 @@ fn nested_handler_decodes_in_scope_and_remains_callable_after_return() {
 }
 
 #[test]
+fn guest_can_read_tags_from_server_and_level_frames() {
+    use mod_api::{BlockKey, Identifier, LevelHost, TagKey, Tags};
+
+    #[derive(Default)]
+    struct TagRead {
+        block_reads: Cell<usize>,
+    }
+
+    impl Tags for TagRead {
+        fn key(&self, id: &Identifier) -> Option<TagKey> {
+            mod_api::__private::tag_key(id)
+        }
+
+        fn blocks(&self, tag: TagKey) -> Option<Vec<BlockKey>> {
+            mod_api::__private::with_tag_name(tag, |id| assert_eq!(id, Some("minecraft:logs")));
+            self.block_reads.set(self.block_reads.get() + 1);
+            Some(Vec::new())
+        }
+    }
+
+    impl LevelHost for TagRead {
+        fn tags(&self) -> &dyn Tags {
+            self
+        }
+    }
+
+    struct World(TagRead);
+    impl mod_api::Host for World {}
+    mod_api::impl_host_areas!(World, except(tags));
+    impl mod_api::prelude::TagsHost for World {
+        fn tags(&self) -> &dyn Tags {
+            &self.0
+        }
+    }
+    impl mod_api::ServerHost for World {}
+    mod_api::impl_server_host_areas!(World);
+
+    crate::test_stack::on_guest_stack(|| {
+        mod_api::__private::initialize().unwrap();
+        let _phase = mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
+        let key = crate::boundary::import_id("Tags", "key").unwrap();
+        let blocks = crate::boundary::import_id("Tags", "blocks").unwrap();
+        let module = module(&format!(
+            r#"
+            i32.const {key} local.get 1 local.get 2 i32.const 1024 i32.const 8 call $host
+            i32.const 5 i32.ne if unreachable end
+            i32.const 1024 i32.load8_u i32.const 1 i32.ne if unreachable end
+            i32.const {blocks} i32.const 1025 i32.const 4 i32.const 2048 i32.const 32 call $host
+            i64.extend_i32_u i64.const {} i64.or
+            "#,
+            2048_u64 << 32
+        ));
+        let id = Identifier::parse("minecraft:logs").unwrap();
+        let mut host = World(TagRead::default());
+        let level = TagRead::default();
+        let loot_tags = TagRead::default();
+        for (has_host, has_level, has_tags) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            let mut frame = Frame::default();
+            if has_host {
+                frame.set_server_host_mut(&mut host);
+            }
+            if has_level {
+                frame.set_level_host(&level);
+            }
+            if has_tags {
+                frame.set_tags(&loot_tags);
+            }
+            assert_eq!(
+                module.call(CallClass::Hook, frame, 0, None, |w| w.put(&id), |r| {
+                    r.take::<Option<Vec<BlockKey>>>()
+                }),
+                Some(Some(Vec::new())),
+                "server host: {has_host}, level host: {has_level}, explicit tags: {has_tags}"
+            );
+        }
+        assert_eq!(host.0.block_reads.get(), 1);
+        assert_eq!(level.block_reads.get(), 2);
+        assert_eq!(loot_tags.block_reads.get(), 2);
+    });
+}
+
+#[test]
 fn imports_inherit_the_root_borrow_token_and_expire_with_the_call() {
     crate::test_stack::on_guest_stack(|| {
         let id = crate::boundary::import_id("StructureRandom", "next_long").unwrap();
