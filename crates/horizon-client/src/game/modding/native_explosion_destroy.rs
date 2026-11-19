@@ -9,6 +9,15 @@ use std::collections::HashSet;
 /// Below this radius the reference tells no detonate listener (`ServerExplosion.explode`).
 const DETONATE_RADIUS: f32 = 1.0e-5;
 
+fn listed_positions(positions: &[[i32; 3]]) -> Vec<[i32; 3]> {
+    let mut seen = HashSet::with_capacity(positions.len());
+    positions
+        .iter()
+        .copied()
+        .filter(|p| seen.insert(*p))
+        .collect()
+}
+
 impl Game<'_> {
     /// Destroys the blocks at `positions` as the blast `level.explode(source, center, radius, fire,
     /// interaction)` would: `explosion_start` (which may cancel it), `explosion_detonate` with the
@@ -56,6 +65,51 @@ impl Game<'_> {
         Ok(destroyed)
     }
 
+    pub(super) fn level_filter_block_explosion(
+        &mut self,
+        level: LevelRef,
+        origin: [i32; 3],
+        positions: &[[i32; 3]],
+    ) -> Result<Vec<[i32; 3]>, ExplosionDestroyError> {
+        if positions.len() as u64 > ExplosionDestroyError::MAX_POSITIONS {
+            return Err(ExplosionDestroyError::TooMany(positions.len() as u64));
+        }
+        if !self.level_in_place(level)
+            || (self.serving.is_none() && self.options.dedicated.is_none())
+            || !self.world.loaded(origin[0], origin[2])
+            || !self.world.shape.contains_y(origin[1])
+        {
+            return Err(ExplosionDestroyError::Unavailable);
+        }
+        let center = origin.map(f64::from);
+        // This is a synthetic block event, with no live source to inherit.
+        let outer = self.take_blast_state();
+        let start = self.explosion_start(
+            center,
+            0.0,
+            super::explosion::BlockInteraction::Destroy,
+            false,
+            super::creatures::damage_type(DamageKind::Explosion, false),
+        );
+        let allowed = if self.explosion_start_cancelled(&start) {
+            Vec::new()
+        } else {
+            let mut targets = listed_positions(positions);
+            self.filter_explosion_targets(center, &mut targets);
+            targets
+        };
+        self.restore_blast_state(outer);
+        Ok(allowed)
+    }
+
+    fn filter_explosion_targets(&mut self, center: [f64; 3], targets: &mut Vec<[i32; 3]>) {
+        // The block-only event has no entity victims. Only original positions may remain.
+        let mut told = targets.clone();
+        self.native_explosion_detonate(self.dim.id(), center, &mut told, &mut Vec::new());
+        let kept: HashSet<[i32; 3]> = told.into_iter().collect();
+        targets.retain(|p| kept.contains(p));
+    }
+
     /// The hooks and the block step of `level_explosion_destroy_blocks`, with the blast's state
     /// in place.
     fn destroy_listed_blocks(
@@ -72,20 +126,9 @@ impl Game<'_> {
         if self.explosion_start_cancelled(&start) {
             return 0;
         }
-        // The positions in the order given, a repeated one once.
-        let mut seen = HashSet::with_capacity(positions.len());
-        let mut targets: Vec<[i32; 3]> = positions
-            .iter()
-            .copied()
-            .filter(|p| seen.insert(*p))
-            .collect();
+        let mut targets = listed_positions(positions);
         if radius >= DETONATE_RADIUS {
-            // A listener only spares: what it takes out stays, what it adds is ignored.
-            let mut told = targets.clone();
-            // This block-only phase has no entity victims.
-            self.native_explosion_detonate(self.dim.id(), center, &mut told, &mut Vec::new());
-            let kept: HashSet<[i32; 3]> = told.into_iter().collect();
-            targets.retain(|p| kept.contains(p));
+            self.filter_explosion_targets(center, &mut targets);
         }
         // Unlike the reference's rays, a mod's list never loads terrain.
         let (min_y, max_y) = (self.world.bottom_y(), self.world.top_y());

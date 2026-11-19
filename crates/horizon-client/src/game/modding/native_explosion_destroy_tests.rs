@@ -416,3 +416,48 @@ fn a_cancelled_start_destroys_nothing() {
         assert!(watch.detonated.lock().unwrap().is_empty(), "{via:?}");
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_synthetic_zero_radius_filter_only_removes_from_the_list() {
+    each_target(|game, via, watch| {
+        let origin = [5, 80, 5];
+        let first = [1, 80, 1];
+        let second = [2, 80, 2];
+        set(game, first, "tnt");
+        set(game, second, "dirt");
+        let level = game.level("minecraft:overworld").unwrap();
+        let positions = [second, first, second];
+        let rng = game.world.random.state();
+        let check = |game: &mut Game<'_>, expected: Vec<[i32; 3]>| match via {
+            Via::Native => assert_eq!(
+                level.filter_block_explosion(game, origin, &positions),
+                Ok(expected)
+            ),
+            Via::Wasm => {
+                let mut input = Writer::new();
+                input.put(&level);
+                input.put(&origin);
+                input.put(&positions.to_vec());
+                wasm_answer(
+                    game,
+                    level,
+                    "level_filter_block_explosion",
+                    input,
+                    &Ok::<_, ExplosionDestroyError>(expected),
+                );
+            }
+        };
+        watch.edit.store(true, Ordering::Relaxed);
+        check(game, vec![second]);
+        assert_eq!(*watch.detonated.lock().unwrap(), [vec![second, first]]);
+        watch.cancel.store(true, Ordering::Relaxed);
+        check(game, Vec::new());
+        assert_eq!(watch.detonated.lock().unwrap().len(), 1);
+        assert_eq!(name(game, first), "minecraft:tnt");
+        assert_eq!(name(game, second), "minecraft:dirt");
+        assert!(game.dropped.is_empty() && game.orbs.is_empty() && game.tnts.is_empty());
+        assert!(watch.exploded.lock().unwrap().is_empty());
+        assert_eq!(game.world.random.state(), rng);
+    });
+}

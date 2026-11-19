@@ -90,6 +90,7 @@ horizon-client game::native_entity_selectors::tests::synced_selector_tokens_surv
 horizon-client game::native_explosion_destroy_tests::a_cancelled_start_destroys_nothing lib daily resources
 horizon-client game::native_explosion_destroy_tests::a_detonate_listener_spares_a_position_and_adds_none lib daily resources
 horizon-client game::native_explosion_destroy_tests::a_part_hears_its_block_exploded_once lib daily resources
+horizon-client game::native_explosion_destroy_tests::a_synthetic_zero_radius_filter_only_removes_from_the_list lib daily resources
 horizon-client game::native_explosion_destroy_tests::a_thousand_stone_blocks_turn_to_air_with_drops_decayed_by_the_rule lib daily resources
 horizon-client game::native_explosion_destroy_tests::an_unloaded_position_is_skipped_and_not_counted lib daily resources
 horizon-client game::native_explosion_destroy_tests::drops_of_one_item_merge_at_the_first_blocks_position lib daily resources

@@ -1454,6 +1454,22 @@ pub trait LevelsBackendMut {
         interaction: ExplosionInteraction,
     ) -> Result<u32, ExplosionDestroyError>;
     /// Side: server.
+    /// Ask the explosion listeners which cells a scripted block explosion
+    /// may affect, without exploding the level. Sends a sourceless block
+    /// `explosion_start` at radius zero, then `explosion_detonate` with the
+    /// listed positions and no entity victims. A canceled start returns an
+    /// empty list. A detonate listener may remove positions. Its additions
+    /// and reordering do not expand or change the supplied order. Duplicate
+    /// input positions are visited once. The call does not load chunks,
+    /// send sounds or particles, advance the blast RNG, or destroy anything.
+    #[access(WorldOnly)]
+    fn level_filter_block_explosion(
+        &mut self,
+        level: LevelRef,
+        origin: [i32; 3],
+        positions: &[[i32; 3]],
+    ) -> Result<Vec<[i32; 3]>, ExplosionDestroyError>;
+    /// Side: server.
     /// Strikes lightning at `at`, as summoning a `minecraft:lightning_bolt`
     /// does: it sets fire, hurts and converts what it hits (a pig to a
     /// zombified piglin...) and every player hears the thunder. With
