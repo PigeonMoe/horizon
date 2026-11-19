@@ -12,7 +12,7 @@ use super::{
     splash_water::thrown_block_hit,
 };
 use horizon_assets::item_model::DisplayContext;
-use horizon_client::health::DamageLevel;
+use horizon_client::health::{Attack, DamageLevel, NO_ATTACK};
 use horizon_client::{
     block_entity_render::vertex_light,
     brewing,
@@ -403,7 +403,7 @@ impl Game<'_> {
             (&[], &[], 0.25),
             at,
             &source,
-            (None, None),
+            (None, None, &NO_ATTACK),
         );
     }
 }
@@ -1104,6 +1104,10 @@ impl Game<'_> {
         }
     }
     pub(super) fn apply_effect_action(&mut self, action: EffectAction) {
+        self.apply_effect_action_from(action, 0);
+    }
+
+    fn apply_effect_action_from(&mut self, action: EffectAction, causing: i32) {
         let action = match action {
             EffectAction::Heal(mut amount) => {
                 if let Some(player) = self.player.as_ref() {
@@ -1138,13 +1142,16 @@ impl Game<'_> {
             EffectAction::Hurt(source, amount) => {
                 let mut canceled = false;
                 if let Some(id) = self.motion.health.damage.id(source)
-                    && let Ok(o) = p.hurt_blocking(
+                    && let Ok(o) = p.hurt_caused_by(
                         crate::game::entity::damage_level_of!(self, scoped),
                         &self.motion.health,
                         rules,
                         id,
                         amount,
                         None,
+                        false,
+                        causing,
+                        false,
                     )
                 {
                     canceled = o.canceled;
@@ -2042,6 +2049,23 @@ impl Game<'_> {
         }
         let effects = potion.effects.clone();
         let player_source = self.harmful_potion_source(potion.owner, potion.guest, &effects);
+        let attacker = match (potion.owner, potion.guest) {
+            (Some(Who::Mob(id)), _) if self.mob_object(id).is_some() => id as i32,
+            (Some(Who::Player), Some(conn)) => self
+                .guest_identity(conn)
+                .map_or(0, |(_, entity)| entity as i32),
+            (Some(Who::Player), None) => self.own_entity_id(),
+            _ => 0,
+        };
+        let owner = (attacker != 0).then_some(potion.owner).flatten();
+        // Resolve the owner before swapping to any of the player victims.
+        let mut attack = self.attack_of(attacker);
+        // A cloud's responsible player is its own source player.
+        if owner != Some(Who::Player) {
+            attack.policy_player = None;
+        }
+        attack.direct = Some(c.id as i32);
+        attack.position = Some(c.at);
         // Only mobs that at least one of the cloud's effects can affect are
         // taken (`allEffects.stream().anyMatch(entity::canBeAffected)`), so
         // the others neither become victims nor use up its radius.
@@ -2081,7 +2105,7 @@ impl Game<'_> {
                 ),
                 c.at,
                 &potion.source,
-                (potion.owner, potion.guest),
+                (owner, potion.guest, &attack),
             );
             if potion.settings.radius_on_use != 0.0 {
                 c.radius += potion.settings.radius_on_use;
@@ -2147,10 +2171,9 @@ impl Game<'_> {
         (hidden, ambient, duration_scale): (&[&'static str], &[&'static str], f32),
         at: [f64; 3],
         source: &Text,
-        (owner, guest): (Option<Who>, Option<u32>),
+        (owner, guest, attack): (Option<Who>, Option<u32>, &Attack),
     ) {
-        // `indirectMagic(cloud, owner)` names the cloud in the death message
-        // (it gives no kill credit).
+        // The cloud remains the direct entity even when it has no owner.
         let cloud_owner = PotionOwner {
             name: Some(source.clone()),
             ..Default::default()
@@ -2166,7 +2189,9 @@ impl Game<'_> {
                     };
                     if e.instant {
                         if let Some(a) = horizon_client::effects::instant(id, *amp, 0.5) {
-                            g.apply_indirect_effect_action(a, &cloud_owner);
+                            g.with_attack(attack.clone(), |g| {
+                                g.apply_indirect_effect_action(a, &cloud_owner, attack.attacker);
+                            });
                         }
                     } else {
                         let mut instance = EffectInstance::new(e.id, scaled(*duration), *amp);
@@ -2200,7 +2225,7 @@ impl Game<'_> {
                                 // HealOrHarmMobEffect.applyInstantaneousEffect: indirectMagic(cloud, owner).
                                 let source = Damage::indirect_magic(owner, at);
                                 if m.damage_by(
-                                    crate::game::entity::damage_level_of!(self, scoped),
+                                    crate::game::entity::damage_level_of!(self, attack),
                                     amount(6),
                                     source,
                                     "minecraft:area_effect_cloud",
@@ -2356,7 +2381,7 @@ impl Game<'_> {
     /// `HealOrHarmMobEffect.applyInstantaneousEffect` with a source (a
     /// potion or a cloud): indirectMagic, not plain magic, credited to the
     /// mob that threw it when there is one.
-    fn apply_indirect_effect_action(&mut self, a: EffectAction, owner: &PotionOwner) {
+    fn apply_indirect_effect_action(&mut self, a: EffectAction, owner: &PotionOwner, causing: i32) {
         let a = match a {
             EffectAction::Hurt("minecraft:magic", amount) => {
                 match (owner.attacker, &owner.name) {
@@ -2374,7 +2399,7 @@ impl Game<'_> {
             }
             a => a,
         };
-        self.apply_effect_action(a);
+        self.apply_effect_action_from(a, causing);
     }
     /// A splash potion's effects on the player in place, by their distance,
     /// for the stack's `potion_duration_scale`.
@@ -2412,7 +2437,7 @@ impl Game<'_> {
                     let instant = brewing::effect(id).is_some_and(|e| e.instant);
                     if instant {
                         if let Some(a) = horizon_client::effects::instant(id, *amp, intensity) {
-                            self.apply_indirect_effect_action(a, owner);
+                            self.apply_indirect_effect_action(a, owner, 0);
                         }
                     } else {
                         let d = (intensity * f64::from(*duration) * duration_scale + 0.5) as i32;
@@ -4753,3 +4778,7 @@ mod arrow_contents {
         std::fs::write(output, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "potions/cloud_damage_tests.rs"]
+mod cloud_damage_tests;
