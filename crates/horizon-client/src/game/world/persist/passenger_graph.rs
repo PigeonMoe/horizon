@@ -40,7 +40,7 @@ impl Game<'_> {
             || self.passenger_present(id)
     }
 
-    pub(super) fn passenger_object_vehicle(&self, id: u32) -> Option<u32> {
+    pub(in crate::game) fn passenger_object_vehicle(&self, id: u32) -> Option<u32> {
         if let Some(mob) = self.mob_object(id) {
             return (!mob.removed)
                 .then_some(mob.extra.mount)

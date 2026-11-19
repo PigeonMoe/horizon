@@ -95,6 +95,64 @@ impl Game<'_> {
             prototype.get(component)?,
         ))
     }
+    /// Item.getName, as exposed by Paper in its dedicated server locale.
+    pub(super) fn item_default_english_name(&self, stack: &ItemStack) -> Option<String> {
+        use horizon_protocol::text;
+
+        let prototype = self
+            .pack
+            .item_renderer
+            .models
+            .prototypes
+            .get(stack.item.as_ref())?;
+        let names = &self.pack.names;
+        if let Some(key) = horizon_client::brewing::contents_name_key(stack) {
+            return names.plain_english(&text::translatable(&key, &[]));
+        }
+        if stack.item.as_ref() == "minecraft:player_head"
+            && let Some(owner) = stack.profile_name()
+        {
+            return names.plain_english(&text::translatable(
+                "block.minecraft.player_head.named",
+                &[&owner],
+            ));
+        }
+        if stack.item.as_ref() == "minecraft:compass"
+            && stack.carries_component(self.items().get(&stack.item), "minecraft:lodestone_tracker")
+        {
+            return names
+                .plain_english(&text::translatable("item.minecraft.lodestone_compass", &[]));
+        }
+        let data = stack.data();
+        if stack.item.as_ref() == "minecraft:shield"
+            && !data.is_some_and(|data| data.other("!minecraft:base_color").is_some())
+            && let Some(color) = data
+                .and_then(|data| data.base_color.as_deref())
+                .or_else(|| prototype.get("minecraft:base_color")?.as_str())
+        {
+            return names.plain_english(&text::translatable(
+                &format!("item.minecraft.shield.{color}"),
+                &[],
+            ));
+        }
+        if let Some(data) = data {
+            if let Some(name) = data.other("minecraft:item_name") {
+                return names.plain_english(name);
+            }
+            if data.other("!minecraft:item_name").is_some() {
+                return Some(String::new());
+            }
+            if data.ominous_banner {
+                return names
+                    .plain_english(&text::translatable("block.minecraft.ominous_banner", &[]));
+            }
+        }
+        prototype
+            .get("minecraft:item_name")
+            .map_or(Some(String::new()), |name| {
+                names.plain_english(&horizon_client::scoreboard::json_to_tag(name))
+            })
+    }
     /// Item `item`'s cooking-fuel burn time in ticks (`FuelValues.burnDuration` of its `cooking_fuel`
     /// component, the data pack's context int provider resolved), None where it is no fuel. API
     /// @API:item_components@.
@@ -488,6 +546,142 @@ mod equippable_slot_tests {
             assert_eq!(slot("minecraft:iron_helmet").as_deref(), Some("head"));
             assert_eq!(slot("minecraft:iron_boots").as_deref(), Some("feet"));
             assert_eq!(slot("minecraft:dirt"), None);
+        });
+    }
+}
+
+#[cfg(test)]
+mod english_name_tests {
+    use super::ItemStack;
+    use crate::game::api_values::test_snapshot;
+    use crate::game::native_entity_refs::tests::with_game;
+    use horizon_core::nbt::{Tag, parse_snbt};
+    use mod_api::HostTransaction;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_default_english_name_uses_the_effective_prototype_and_ignores_the_hover_name() {
+        with_game(|game| {
+            let host: &dyn mod_api::ServerHost = game;
+            let name = |snbt: &str| {
+                let (Tag::Compound(tag), _) = parse_snbt(snbt).unwrap() else {
+                    panic!("expected stack compound");
+                };
+                let stack = ItemStack::from_nbt(&tag).unwrap();
+                host.item_default_english_name(&test_snapshot(&stack))
+            };
+            assert_eq!(
+                name(r#"{id:"minecraft:diamond_pickaxe",components:{"minecraft:custom_name":"Special"}}"#)
+                    .as_deref(),
+                Some("Diamond Pickaxe")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:written_book",components:{"minecraft:written_book_content":{title:"Special",author:"Alex",pages:[]}}}"#)
+                    .as_deref(),
+                Some("Written Book")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:tipped_arrow",components:{"minecraft:potion_contents":{potion:"minecraft:strong_poison"}}}"#)
+                    .as_deref(),
+                Some("Arrow of Poison")
+            );
+            assert_eq!(
+                name(
+                    r#"{id:"minecraft:player_head",components:{"minecraft:profile":{name:"Alex"}}}"#
+                )
+                .as_deref(),
+                Some("Alex's Head")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:compass",components:{"minecraft:lodestone_tracker":{tracked:0b}}}"#).as_deref(),
+                Some("Lodestone Compass")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:shield",components:{"minecraft:base_color":"red"}}"#)
+                    .as_deref(),
+                Some("Red Shield")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:stone",components:{"minecraft:item_name":{translate:"item.minecraft.stick"}}}"#)
+                    .as_deref(),
+                Some("Stick")
+            );
+            assert_eq!(
+                name(r#"{id:"minecraft:stone",components:{"!minecraft:item_name":{}}}"#).as_deref(),
+                Some("")
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_saved_marker_and_item_passenger_keep_their_names_and_rollback_together() {
+        with_game(|game| {
+            game.build_registries();
+            game.set_allow_commands(true);
+            assert!(game.run_command(concat!(
+                r#"summon armor_stand 4.5 201.2 4.5 {UUID:[I;42,17,1,1],Invisible:1b,Silent:1b,Marker:1b,NoGravity:1b,NoBasePlate:1b,"#,
+                r#"CustomName:{text:"",extra:[{text:"ALTAR ",color:"light_purple"},{text:"Probe - ",color:"dark_aqua"},{text:"-178899",color:"yellow"}]},"#,
+                r#"Passengers:[{id:"minecraft:item",UUID:[I;42,17,1,2],PickupDelay:32767s,Invulnerable:1b,CustomNameVisible:1b,CustomName:"Diamond Pickaxe","#,
+                r#"Item:{id:"minecraft:diamond_pickaxe",count:1,components:{"minecraft:damage":14,"minecraft:custom_name":"ALTAR Probe - -178899","minecraft:custom_data":{PublicBukkitValues:{"slimefun:example":1b}}}}}]}"#
+            )));
+            game.sync_riders();
+            let level = game.level("minecraft:overworld").unwrap();
+            let host: &mut dyn mod_api::ServerHost = game;
+            let stand = level
+                .entities_in(host, [4.0, 200.7, 4.0], [5.0, 201.7, 5.0])
+                .unwrap()
+                .into_iter()
+                .find(|entity| entity.name(host).as_deref() == Some("ALTAR Probe - -178899"))
+                .unwrap();
+            let passengers = stand.passengers(host).unwrap();
+            let [item] = passengers.as_slice() else {
+                panic!("expected exactly one item passenger");
+            };
+            assert_eq!(item.vehicle(host), Some(stand));
+            assert_eq!(item.root_vehicle(host), Some(stand));
+            assert_eq!(item.is_passenger(host), Some(true));
+            assert_eq!(stand.indirect_passengers(host), Some(vec![*item]));
+            assert_eq!(stand.is_vehicle(host), Some(true));
+            let displayed = host.item_entity(*item).unwrap();
+            assert_eq!(displayed.pickup_delay(host), Some(32767));
+            let stack = displayed.stack(host).unwrap();
+            assert_eq!(stack.damage(), 14);
+            assert_eq!(
+                host.item_default_english_name(&stack).as_deref(),
+                Some("Diamond Pickaxe")
+            );
+            let saved_item = item.nbt(host).unwrap();
+            assert_eq!(
+                saved_item.get(&"CustomName".into()),
+                Some(&Tag::String("Diamond Pickaxe".into()))
+            );
+            assert_eq!(saved_item.get(&"Invulnerable".into()), Some(&Tag::Byte(1)));
+            let saved_stand = stand.nbt(host).unwrap();
+            let Some(Tag::List(saved_passengers)) = saved_stand.get(&"Passengers".into()) else {
+                panic!("expected stored passengers");
+            };
+            let [saved_passenger] = saved_passengers.as_slice() else {
+                panic!("expected one stored passenger");
+            };
+            assert_eq!(saved_passenger.get("UUID"), saved_item.get(&"UUID".into()));
+            assert_eq!(saved_stand.get(&"Silent".into()), Some(&Tag::Byte(1)));
+
+            let aborted: Result<(), _> = host.transaction(|host, _| {
+                assert!(item.discard(host));
+                assert!(stand.discard(host));
+                Err("cannot save replacement")
+            });
+            assert!(aborted.is_err());
+            assert_eq!(stand.passengers(host), Some(vec![*item]));
+            host.transaction(|host, _| {
+                assert!(item.discard(host));
+                assert!(stand.discard(host));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert!(item.nbt(host).is_none());
+            assert!(stand.nbt(host).is_none());
         });
     }
 }

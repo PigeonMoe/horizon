@@ -196,6 +196,9 @@ impl Names {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.map.get(key).map(String::as_str)
     }
+    pub fn plain_english(&self, component: &horizon_core::nbt::Tag) -> Option<String> {
+        (!self.map.is_empty()).then(|| horizon_protocol::text::plain(component, &self.map))
+    }
 }
 
 /// `CreativeModeTabs`' key for an exported tab id (`itemGroup.*`); the

@@ -3,7 +3,7 @@
 //! rides, who rides it, getting off, and who holds its lead. Players ride
 //! boats, minecarts and mounts; mobs ride mobs, boats and minecarts. Reads
 //! return `None` for a stale handle or on a client.
-use super::{Game, commands::Target, mounts::steering_item};
+use super::{Game, commands::Target, mounts::steering_item, native_entities::target_id};
 use horizon_client::{
     lan::playerdata::ints_uuid,
     mobs::{Mob, Species, equine, happy_ghast, leash::Holder, nautilus},
@@ -63,7 +63,11 @@ impl Game<'_> {
         match t {
             Target::Player => self.riding,
             Target::Guest(conn) => self.command_guest(conn)?.vehicle,
-            Target::Mob(id) => self.mob_object(id).filter(|m| !m.removed)?.extra.mount,
+            Target::Mob(id) => self
+                .mob_object(id)
+                .filter(|mob| !mob.removed)
+                .and_then(|mob| mob.extra.mount)
+                .or_else(|| self.passenger_object_vehicle(id)),
             // A general row rides the row its tree loaded with; a row queued
             // for removal rides nothing, as a removed mob does not.
             Target::General(id) => self
@@ -73,7 +77,7 @@ impl Game<'_> {
                 .iter()
                 .find(|row| row.id == id && !self.persist.removals.contains(&Target::General(id)))
                 .and_then(|row| row.mount),
-            _ => None,
+            _ => target_id(t).and_then(|id| self.passenger_object_vehicle(id)),
         }
     }
     /// The entity's vehicle as a handle, if it rides one in this level.
@@ -101,13 +105,16 @@ impl Game<'_> {
         self.entity(self.native_root_vehicle_id(entity.id(), target)?)
     }
 
-    /// Follow full object links, returning no root for a cycle. Only mobs can
-    /// be intermediate vehicles. Their object count plus the non-Mob endpoints
-    /// bounds the walk without truncating valid trees or allocating a visited set.
+    /// Follow full object links, returning no root for a cycle. Live and retained mob
+    /// mounts and any saved vehicle rows bound this walk without a visited set.
     pub(super) fn native_root_vehicle_id(&self, id: u32, target: Target) -> Option<u32> {
         let mut root = id;
         let mut next = self.native_vehicle_id(target);
-        for _ in 0..=self.mobs.len() + self.persist.off_level.len() + 1 {
+        for _ in 0..=self.mobs.len()
+            + self.persist.off_level.len()
+            + self.persist.passenger_slots.len()
+            + 1
+        {
             let Some(vehicle) = next else {
                 return Some(root);
             };
@@ -118,7 +125,11 @@ impl Game<'_> {
     }
     /// Does the passenger's immediate seat belong to this moving vehicle?
     pub(in crate::game) fn vehicle_carries_seat(&self, vehicle: u32, mut seat: u32) -> bool {
-        for _ in 0..=self.mobs.len() + self.persist.off_level.len() + 1 {
+        for _ in 0..=self.mobs.len()
+            + self.persist.off_level.len()
+            + self.persist.passenger_slots.len()
+            + 1
+        {
             if seat == vehicle {
                 return true;
             }
@@ -141,13 +152,38 @@ impl Game<'_> {
     /// The entities riding this one (`Entity.getPassengers`), in `addPassenger`'s order.
     pub(super) fn entity_passengers(&self, entity: EntityRef) -> Option<Vec<EntityRef>> {
         self.native_entity_target(entity)?;
-        let seats = self.seated_passengers(entity.id()).into_iter();
-        Some(seats.filter_map(|(_, id, _)| self.entity(id)).collect())
+        Some(
+            self.native_passenger_ids(entity.id())
+                .into_iter()
+                .filter_map(|id| self.entity(id))
+                .collect(),
+        )
     }
     /// Whether any object rides the entity, including retained off-level passengers.
     pub(super) fn entity_is_vehicle(&self, entity: EntityRef) -> Option<bool> {
         self.native_entity_target(entity)?;
-        Some(!self.seated_passengers(entity.id()).is_empty())
+        Some(!self.native_passenger_ids(entity.id()).is_empty())
+    }
+
+    /// Saved non-mob riders share the vehicle graph, but have no live seat-order field.
+    /// Insert them before their next rider from the save order while retaining seat order.
+    fn native_passenger_ids(&self, vehicle: u32) -> Vec<u32> {
+        let mut ids: Vec<_> = self
+            .seated_passengers(vehicle)
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect();
+        if self.persist.passenger_slots.contains_key(&vehicle) {
+            let mut before = ids.len();
+            for id in self.ordered_live_passengers(vehicle).into_iter().rev() {
+                if let Some(index) = ids.iter().position(|rider| *rider == id) {
+                    before = index;
+                } else {
+                    ids.insert(before, id);
+                }
+            }
+        }
+        ids
     }
     /// Every entity riding this one, at any depth (`Entity.getIndirectPassengers`): each
     /// passenger in boarding order, followed by those riding it. Traverse off-level
@@ -158,12 +194,8 @@ impl Game<'_> {
         // This vector allocates only when a retained, unrepresentable object is
         // actually encountered; ordinary resident-only trees keep two buffers.
         let mut visited_off_level = Vec::new();
-        let mut next: Vec<u32> = self
-            .seated_passengers(entity.id())
-            .into_iter()
-            .rev()
-            .map(|(_, id, _)| id)
-            .collect();
+        let mut next = self.native_passenger_ids(entity.id());
+        next.reverse();
         while let Some(passenger) = next.pop() {
             if passenger == entity.id()
                 || all.iter().any(|r| r.id() == passenger)
@@ -176,12 +208,7 @@ impl Game<'_> {
             } else {
                 visited_off_level.push(passenger);
             }
-            next.extend(
-                self.seated_passengers(passenger)
-                    .into_iter()
-                    .rev()
-                    .map(|(_, id, _)| id),
-            );
+            next.extend(self.native_passenger_ids(passenger).into_iter().rev());
         }
         Some(all)
     }

@@ -75,6 +75,13 @@ pub trait ItemsHost {
 #[horizon_mod_api_macros::host_area]
 pub trait ItemsServerHost {
     /// Side: server.
+    /// Plain default English name (`Item.getName(stack).getString()`), including
+    /// the stack's effective item name, potion contents or player head profile.
+    /// Returns none when the item prototype or English resource table is unavailable.
+    #[access(WorldOnly)]
+    fn item_default_english_name(&self, stack: &ItemStack) -> Option<String>;
+
+    /// Side: server.
     /// Decode a saved component-based item stack, applying the vanilla item-stack datafixes
     /// from `data_version`. Each entry is a component id and one complete SNBT value.
     /// Returns None for invalid versions, ids, counts, duplicate components, invalid SNBT,
