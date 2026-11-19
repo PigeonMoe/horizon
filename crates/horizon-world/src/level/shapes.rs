@@ -367,13 +367,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
             }
             Class::ConcretePowder => {
-                if self.concrete_touches_liquid(pos) {
-                    b.data(state)
-                        .link
-                        .map_or(state, |concrete| b.default_of(concrete))
-                } else {
-                    sup!()
+                if self.concrete_touches_liquid(pos)
+                    && let Some(concrete) = b.data(state).link.map(|block| b.default_of(block))
+                    && self.level.allow_block_form(pos, state, concrete)
+                {
+                    return Some(concrete);
                 }
+                sup!()
             }
             Class::Coral => {
                 if !self.coral_scan_for_water(pos) {

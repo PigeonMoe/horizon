@@ -1611,6 +1611,68 @@ fn sand_falls_and_concrete_solidifies() {
 }
 
 #[test]
+fn concrete_formation_is_checked_for_placement_neighbor_updates_and_landings() {
+    let pos = BlockPos::new(0, 1, 0);
+    let ground = pos.offset(0, -1, 0);
+    let adjacent = pos.offset(1, 0, 0);
+    for allowed in [false, true] {
+        let mut w = world!();
+        let air = w.b().air();
+        let stone = w.id("stone", &[]);
+        let water = w.id("water", &[]);
+        let powder = w.id("white_concrete_powder", &[]);
+        let concrete = w.id("white_concrete", &[]);
+        let expected = if allowed { concrete } else { powder };
+        w.put(ground, stone);
+        w.put(adjacent, water);
+        w.put(adjacent.offset(0, -1, 0), stone);
+        if !allowed {
+            w.level.guarded.insert(pos);
+        }
+
+        let context = PlaceContext {
+            clicked_pos: ground,
+            face: Direction::Up,
+            hit: horizon_core::geometry::Vec3::new(0.5, 1.0, 0.5),
+            inside: false,
+            yaw: 0.0,
+            pitch: 90.0,
+            sneaking: false,
+            item: "minecraft:white_concrete_powder".into(),
+            can_use_game_master_blocks: false,
+        };
+        let preview = w
+            .b()
+            .placement_preview(&mut w.level, &mut w.ticks, &context);
+        assert_eq!(preview.unwrap().state, concrete);
+        assert!(w.level.form_checks.take().is_empty());
+        assert_eq!(w.get(pos), air);
+        assert_eq!(
+            w.b().place_block(&mut w.level, &mut w.ticks, &context),
+            PlaceOutcome::Placed {
+                pos,
+                state: expected
+            }
+        );
+        assert_eq!(w.level.form_checks.take(), [(pos, air, concrete)]);
+
+        w.put(pos, powder);
+        w.put(adjacent, air);
+        w.set(adjacent, water);
+        assert_eq!(w.get(pos), expected);
+        assert_eq!(w.level.form_checks.take(), [(pos, powder, concrete)]);
+
+        w.put(pos, air);
+        assert_eq!(
+            w.b()
+                .falling_block_landed(&mut w.level, &mut w.ticks, pos, powder, false),
+            falling::Landing::Placed(expected)
+        );
+        assert_eq!(w.level.form_checks.take(), [(pos, powder, concrete)]);
+    }
+}
+
+#[test]
 fn water_keeps_spreading_over_waterlogged_scaffolding() {
     // `FlowingFluid.canPassThroughWall` reads `getCollisionShape(level, pos)`,
     // where scaffolding is the stable shape: a full top face, so the water above

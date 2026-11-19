@@ -310,6 +310,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         &mut self,
         block: BlockId,
         ctx: &PlacementContext,
+        check_formation: bool,
     ) -> Option<BlockStateId> {
         let default = self.b.default_of(block);
         let fluid = self.fluid_at(ctx.pos);
@@ -330,7 +331,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             Some(None) => return None,
             _ => {}
         }
-        self.placement_at(block, 0, ctx)
+        self.placement_at(block, 0, ctx, check_formation)
     }
 
     fn placement_at(
@@ -338,11 +339,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         block: BlockId,
         depth: usize,
         ctx: &PlacementContext,
+        check_formation: bool,
     ) -> Option<BlockStateId> {
         let b = self.b;
         let chain = &b.block_data(block).chain;
         for (index, class) in chain.iter().copied().enumerate().skip(depth) {
-            if let Some(result) = self.placement_class(class, index, block, ctx) {
+            if let Some(result) = self.placement_class(class, index, block, ctx, check_formation) {
                 return result;
             }
         }
@@ -356,6 +358,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         depth: usize,
         block: BlockId,
         ctx: &PlacementContext,
+        check_formation: bool,
     ) -> Option<Option<BlockStateId>> {
         let b = self.b;
         let p = b.props;
@@ -368,7 +371,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let wl = |state: BlockStateId| table.set_bool(state, p.waterlogged, water_source);
         macro_rules! sup {
             () => {
-                self.placement_at(block, depth + 1, ctx)
+                self.placement_at(block, depth + 1, ctx, check_formation)
             };
         }
         let horizontal = ctx.horizontal_direction();
@@ -796,11 +799,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             Class::Pipe if depth == 0 => Some(self.pipe_with_connections(pos, default)),
             Class::ConcretePowder => {
                 let replaced = self.state(pos);
-                if b.is_water_fluid(b.fluid(replaced).kind()) || self.concrete_touches_liquid(pos) {
-                    Some(b.data(default).link.map_or(default, |c| b.default_of(c)))
-                } else {
-                    sup!()
+                if (b.is_water_fluid(b.fluid(replaced).kind()) || self.concrete_touches_liquid(pos))
+                    && let Some(concrete) = b.data(default).link.map(|block| b.default_of(block))
+                    && (!check_formation || self.level.allow_block_form(pos, replaced, concrete))
+                {
+                    return Some(Some(concrete));
                 }
+                sup!()
             }
             Class::CopperGolemStatue | Class::EnderChest | Class::Shelf => {
                 let mut state = wl(table.set_dir(default, p.facing, horizontal.opposite()));
@@ -1618,6 +1623,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub(crate) fn placement(
         &mut self,
         input: &PlaceContext,
+        check_formation: bool,
     ) -> Option<(PlacementContext, super::data::ItemBinding, BlockStateId)> {
         let b = self.b;
         let binding = b.item_binding(&input.item).cloned()?;
@@ -1650,7 +1656,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             ItemKind::StandingAndWall | ItemKind::HangingSign => {
                 let wall = binding
                     .wall_block
-                    .and_then(|wall| self.state_for_placement(wall, &ctx));
+                    .and_then(|wall| self.state_for_placement(wall, &ctx, check_formation));
                 let attachment = binding.attachment.unwrap_or(Direction::Down);
                 let mut chosen = None;
                 for direction in ctx.nearest_looking_directions() {
@@ -1658,7 +1664,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         continue;
                     }
                     let candidate = if direction == attachment {
-                        self.state_for_placement(binding.block, &ctx)
+                        self.state_for_placement(binding.block, &ctx, check_formation)
                     } else {
                         wall
                     };
@@ -1676,7 +1682,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
             _ => {
                 let must_survive = binding.kind != ItemKind::Scaffolding;
-                self.state_for_placement(binding.block, &ctx)
+                self.state_for_placement(binding.block, &ctx, check_formation)
                     .filter(|state| {
                         (!must_survive || self.can_survive(*state, ctx.pos))
                             && self.level.is_unobstructed(ctx.pos, *state)
@@ -1689,7 +1695,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `BlockItem.place` (and its subclasses' overrides).
     pub(crate) fn place(&mut self, input: &PlaceContext) -> PlaceOutcome {
         let b = self.b;
-        let Some((ctx, binding, state)) = self.placement(input) else {
+        let Some((ctx, binding, state)) = self.placement(input, true) else {
             return PlaceOutcome::Failed;
         };
         if !self.is_in_valid_bounds(ctx.pos) {
@@ -1850,7 +1856,7 @@ impl Behaviours {
         ctx: &PlaceContext,
     ) -> Option<PlacementPreview> {
         let mut sim = self.sim(level, ticks);
-        let (placement, _, state) = sim.placement(ctx)?;
+        let (placement, _, state) = sim.placement(ctx, false)?;
         let companion = sim.placed_companion(placement.pos, state);
         Some(PlacementPreview {
             pos: placement.pos,
@@ -1885,7 +1891,7 @@ impl Behaviours {
         if !ctx.replace_clicked {
             ctx.pos = rel(input.clicked_pos, input.face);
         }
-        sim.state_for_placement(block, &ctx)
+        sim.state_for_placement(block, &ctx, false)
     }
 }
 
