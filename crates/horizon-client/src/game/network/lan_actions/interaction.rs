@@ -492,12 +492,24 @@ impl Game<'_> {
         } else {
             return Err(ActionRefused::InvalidTarget);
         }
-        // LeashFenceKnotEntity.interact: a knot has no entity here, only its fence.
+        // The server's coordinate-specific interaction can veto the knot's
+        // own use before it transfers or cuts any of its attached leads.
         if let Some(knot) = self.knot_at_id(id) {
             let used = self
                 .as_guest_at(gi, conn, |g| {
                     let swings = g.swings_started;
-                    let consumed = g.with_hand(hand, |g| g.use_knot(knot, true));
+                    let consumed = g.with_hand(hand, |g| {
+                        let stack = g.held().cloned();
+                        let mut claimed = false;
+                        g.native_entity_interact_specific(
+                            id,
+                            "minecraft:leash_knot",
+                            stack.as_ref(),
+                            location,
+                            &mut claimed,
+                        );
+                        !claimed && g.use_knot(knot, true)
+                    });
                     reset_use_attack_strength(&mut g.attack_ticks, swings, g.swings_started);
                     (g.swings_started != swings, consumed)
                 })

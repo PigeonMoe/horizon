@@ -272,3 +272,123 @@ fn walking_then_still_tick_end_preserves_the_accepted_displacement() {
     assert_eq!(still.position, walking.position);
     assert!(!still.moved);
 }
+
+#[test]
+#[ignore = "daily"]
+fn a_leash_knot_click_checks_the_fence_before_transferring_the_leash() {
+    use crate::game::commands::Target;
+    use crate::game::native_entity_refs::tests::run_on_guest_stack;
+    use horizon_client::mobs::leash::Holder;
+    use mod_api::{
+        EntityInteractEvent, EntityInteractSpecificEvent, Flow, Hooks, HostSide, InteractionResult,
+        ModEntry, ServerHost,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const FENCE: [i32; 3] = [1, 100, 2];
+    const HIT: [f64; 3] = [0.0, 0.25, -0.1];
+
+    struct Probe {
+        deny: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn entity_interact_specific(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut EntityInteractSpecificEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.kind, "minecraft:leash_knot");
+            assert_eq!(event.location, HIT);
+            assert!(event.stack.is_none());
+            let knot = host.entity(event.entity.cast_unsigned()).unwrap();
+            assert_eq!(knot.block_position(host), Some(FENCE));
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.deny.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn entity_interact(
+            &self,
+            _: HostSide,
+            event: &mut EntityInteractEvent<'_>,
+        ) -> Option<InteractionResult> {
+            assert_ne!(event.kind, "minecraft:leash_knot");
+            None
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let deny = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mods = [ModEntry::new(
+            "claim-knot-test",
+            Box::new(Probe {
+                deny: deny.clone(),
+                calls: calls.clone(),
+            }),
+        )];
+        mod_platform::testing::with_mods(mods.into(), || {
+            let mut resources = None;
+            let (mut game, _out) = scene(&mut resources);
+            let fence_state = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:oak_fence")
+                .unwrap();
+            game.world
+                .set(FENCE[0], FENCE[1], FENCE[2], fence_state)
+                .unwrap();
+            assert!(game.run_command("summon sheep 2.5 100 2.5 {NoAI:1b}"));
+            let sheep = game.mobs.last().unwrap().id;
+            assert!(game.set_leash(Target::Mob(sheep), Holder::Knot(FENCE), None));
+            game.tie_knot(FENCE);
+            let id = game.knot_ids[&FENCE] as i32;
+            let packet = || {
+                S::Interact(play::Interact {
+                    id,
+                    hand: 0,
+                    location: HIT,
+                    secondary: false,
+                })
+            };
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .guests
+                .update(0, |guest| guest.inventory[0] = None);
+            for (index, expected) in [Holder::Knot(FENCE), Holder::Player]
+                .into_iter()
+                .enumerate()
+            {
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest
+                        .inbox
+                        .push_back(horizon_client::lan::guest::InboxItem::Packet(
+                            packet(),
+                            None,
+                        ));
+                });
+                game.tick_lan_packets();
+                assert!(game.lan.as_ref().unwrap().hub.guests[0].inbox.is_empty());
+                assert_eq!(calls.load(Ordering::Relaxed), index + 1);
+                let sheep = game.mobs.iter().find(|mob| mob.id == sheep).unwrap();
+                assert_eq!(sheep.extra.leash, Some(expected));
+                assert_eq!(
+                    sheep.extra.leash_player,
+                    (index == 1).then_some([0, 0, 0, 1])
+                );
+                assert!(game.lan.as_ref().unwrap().hub.guests[0].inventory[0].is_none());
+                deny.store(false, Ordering::Relaxed);
+                game.tick_lan(false);
+            }
+        });
+    });
+}
