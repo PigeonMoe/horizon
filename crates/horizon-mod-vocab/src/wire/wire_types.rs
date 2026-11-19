@@ -713,7 +713,17 @@ impl Wire for crate::TicketController {
         out.put(&self.slot());
     }
     fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
-        Self::from_slot(input.take()?).ok_or(WireError::Invalid("unknown ticket controller"))
+        let slot = input.take()?;
+        // The registrar and ticket callbacks pass an opaque host token to a WASM guest.
+        // The controller table is installed in the host process only.
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(Self { slot })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::from_slot(slot).ok_or(WireError::Invalid("unknown ticket controller"))
+        }
     }
 }
 
