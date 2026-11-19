@@ -1,7 +1,7 @@
 //! Mob handles for native server mods.
 use super::{Game, commands::Target};
 use horizon_client::mobs::{self, Mob, Species, Who, ai::brain_target};
-use mod_api::{EntityRef, LivingRef, MobRef};
+use mod_api::{EntityRef, EntityUuid, LivingRef, MobRef};
 
 /// What decides whether a player can be a mob's target.
 pub(super) struct PlayerFacts {
@@ -504,6 +504,33 @@ impl Game<'_> {
             .find(|m| m.id == id && !m.removed)
             .map(|m| m.no_ai = no_ai)
             .is_some()
+    }
+
+    pub(super) fn mob_start_zombie_villager_cure(
+        &mut self,
+        mob: MobRef,
+        ticks: u32,
+        starter: Option<EntityUuid>,
+    ) -> bool {
+        let Some(Target::Mob(id)) = self.native_entity_target(mob.entity()) else {
+            return false;
+        };
+        let Ok(ticks) = i32::try_from(ticks) else {
+            return false;
+        };
+        if ticks == 0 {
+            return false;
+        }
+        let Some(mob) = self.mobs.iter_mut().find(|mob| {
+            mob.id == id && mob.species() == Species::ZombieVillager && mob.alive() && !mob.removed
+        }) else {
+            return false;
+        };
+        let starter = starter.map(|uuid| horizon_client::lan::playerdata::uuid_ints(uuid.0));
+        let mut events = Vec::new();
+        mobs::zombie_villager::start_converting(mob, starter, ticks, &mut events);
+        let _ = self.handle_mob_events(events);
+        true
     }
 
     /// `LivingEntity.getNoActionTime`: the ticks since the mob last had a
@@ -1844,6 +1871,40 @@ mod tests {
             assert_eq!(
                 game.mob_is_within_restriction(mob, [46_340, 0, 0]),
                 Some(false)
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn mob_cure_uses_the_vanilla_timer_and_preserves_villager_data() {
+        use horizon_core::nbt::Tag;
+        use mobs::zombie_villager;
+
+        with_game(|game| {
+            let villager = add_mob(game, 12, "minecraft:zombie_villager");
+            let cow = add_mob(game, 13, "minecraft:cow");
+            let starter = EntityUuid(0xcc776655_44332211_8899aabb_ccddeeff);
+            let zombie = game.mobs.iter_mut().find(|mob| mob.id == 12).unwrap();
+            zombie.add_effect("minecraft:weakness", 120, 0);
+            zombie.extra.villager_level = 3;
+            assert!(!cow.start_zombie_villager_cure(game, 1, Some(starter)));
+            assert!(!villager.start_zombie_villager_cure(game, 0, Some(starter)));
+            assert!(villager.start_zombie_villager_cure(game, 50, None));
+            assert!(villager.start_zombie_villager_cure(game, 1, Some(starter)));
+            let zombie = game.mobs.iter().find(|mob| mob.id == 12).unwrap();
+            let cure = zombie_villager::cure(zombie).unwrap();
+            let words = horizon_client::lan::playerdata::uuid_ints(starter.0);
+            assert_eq!((cure.time, cure.starter), (1, Some(words)));
+            assert!(!zombie.has_effect("minecraft:weakness"));
+            assert!(zombie.has_effect("minecraft:strength"));
+            assert_eq!(zombie.extra.villager_level, 3);
+            let saved =
+                horizon_client::entity_nbt::mob_to_nbt(zombie, [0; 4], None, None, |_| None);
+            assert_eq!(saved.get("ConversionTime"), Some(&Tag::Int(1)));
+            assert_eq!(
+                saved.get("ConversionPlayer"),
+                Some(&Tag::IntArray(words.to_vec()))
             );
         });
     }

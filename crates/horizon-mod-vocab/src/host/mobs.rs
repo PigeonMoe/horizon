@@ -527,6 +527,19 @@ pub trait MobsBackendMut {
     #[access(WorldOnly)]
     fn mob_set_no_action_time(&mut self, mob: MobRef, ticks: i32) -> bool;
     /// Side: server.
+    /// Begins the vanilla zombie villager cure, with its conversion effects
+    /// and entity event. `starter` is the UUID eligible for the cured-villager
+    /// advancement and reputation when the timer expires. Replaces an
+    /// existing cure. False for unavailable or dead mobs, other species, or
+    /// a duration outside 1..=i32::MAX ticks.
+    #[access(WorldOnly)]
+    fn mob_start_zombie_villager_cure(
+        &mut self,
+        mob: MobRef,
+        ticks: u32,
+        starter: Option<EntityUuid>,
+    ) -> bool;
+    /// Side: server.
     /// `Brain.setMemory(ATTACK_TARGET, target)`, or `eraseMemory` for None:
     /// the target a brain-driven mob — an axolotl, a breeze, a creaking, a
     /// hoglin, a piglin or piglin brute, a warden or a zoglin — reads instead
