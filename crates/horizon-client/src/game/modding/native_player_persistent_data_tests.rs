@@ -179,3 +179,143 @@ fn a_respawn_keeps_only_player_persisted() {
         assert_eq!(outside, None, "a key outside PlayerPersisted is lost");
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn saved_flags_are_scoped_and_preserve_the_live_and_archived_donor_distinction() {
+    use horizon_client::{lan::playerdata, save::write_dat};
+    use mod_api::{
+        Identifier, PlayerFlagReadError as Error,
+        content::crash::{ModCall, enter_native_mod},
+    };
+    use std::fs;
+
+    fn record(uuid: u128, entries: impl IntoIterator<Item = (&'static str, Tag)>) -> Tag {
+        Tag::compound([
+            ("UUID", Tag::IntArray(playerdata::uuid_ints(uuid).to_vec())),
+            (
+                "NeoForgeData",
+                Tag::compound([("PlayerPersisted", Tag::compound(entries))]),
+            ),
+        ])
+    }
+
+    with_guests(|game| {
+        game.world_root = game.save.root.clone();
+        let online = game.players().server_players()[1].uuid();
+        let offline = 0x7ab8b15dd1204725ab3c992723100f4b;
+        let unknown = 0xbeef;
+        let path = playerdata::path(&game.world_root, offline);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let flag = |key: &str| Identifier::parse(key).unwrap();
+        let keys = [
+            flag("slimefun:one"),
+            flag("slimefun:two"),
+            flag("slimefun:wrong_type"),
+        ];
+
+        let host: &dyn mod_api::ServerHost = game;
+        assert_eq!(
+            host.player_saved_true_flags(unknown, &keys),
+            Err(Error::NotOwned)
+        );
+        let _scope = enter_native_mod(ModCall {
+            id: "slimefun",
+            hook: "saved_flags_test",
+            part: None,
+        });
+        let host: &dyn mod_api::ServerHost = game;
+        assert_eq!(host.player_saved_true_flags(unknown, &keys), Ok(None));
+        assert_eq!(
+            host.player_saved_true_flags(offline, &[flag("other:private")]),
+            Err(Error::NotOwned)
+        );
+        assert_eq!(
+            host.player_saved_true_flags(offline, &[]),
+            Err(Error::KeyCount)
+        );
+
+        write_dat(
+            &path,
+            record(
+                offline,
+                [
+                    ("slimefun:two", Tag::Byte(1)),
+                    ("slimefun:wrong_type", Tag::Int(1)),
+                    ("other:private", Tag::Byte(1)),
+                ],
+            ),
+        )
+        .unwrap();
+        write_dat(
+            &path.with_extension("dat_old"),
+            record(offline, [("slimefun:one", Tag::Byte(1))]),
+        )
+        .unwrap();
+        write_dat(
+            &playerdata::path(&game.world_root, online).with_extension("dat_old"),
+            record(online, [("slimefun:two", Tag::Byte(1))]),
+        )
+        .unwrap();
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update_connection(13, |guest| {
+                guest.saved = Some(record(
+                    online,
+                    [
+                        ("slimefun:one", Tag::Byte(1)),
+                        ("slimefun:two", Tag::Byte(0)),
+                    ],
+                ));
+            })
+            .unwrap();
+
+        let host: &dyn mod_api::ServerHost = game;
+        assert_eq!(
+            host.player_saved_true_flags(online, &keys),
+            Ok(Some(vec![keys[0].clone()]))
+        );
+        assert_eq!(
+            host.player_saved_true_flags(offline, &keys),
+            Ok(Some(vec![keys[1].clone()]))
+        );
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            host.player_saved_true_flags(offline, &[keys[0].clone()]),
+            Ok(Some(vec![]))
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        fs::write(&path, b"damaged").unwrap();
+        assert_eq!(
+            host.player_saved_true_flags(offline, &keys),
+            Ok(Some(vec![keys[0].clone()]))
+        );
+        fs::remove_file(path.with_extension("dat_old")).unwrap();
+        assert_eq!(
+            host.player_saved_true_flags(offline, &keys),
+            Err(Error::Corrupt)
+        );
+
+        // A copied or symlinked file cannot supply a different profile's flags.
+        write_dat(&path, record(unknown, [("slimefun:one", Tag::Byte(1))])).unwrap();
+        assert_eq!(
+            host.player_saved_true_flags(offline, &keys),
+            Err(Error::Corrupt)
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_file(&path).unwrap();
+            let hidden = path.with_extension("private");
+            write_dat(&hidden, record(offline, [("slimefun:one", Tag::Byte(1))])).unwrap();
+            std::os::unix::fs::symlink(&hidden, &path).unwrap();
+            assert_eq!(
+                host.player_saved_true_flags(offline, &keys),
+                Err(Error::Corrupt)
+            );
+        }
+    });
+}

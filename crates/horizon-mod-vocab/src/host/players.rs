@@ -20,6 +20,20 @@ pub trait PlayersHost {
 /// The server host's methods of the `players` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait PlayersServerHost {
+    /// Side: server. Select which of the requested `PlayerPersisted` byte
+    /// flags are exactly 1. Every key must belong to the calling package's
+    /// namespace. The returned keys follow the request order.
+    /// An admitted online player's live values win. Otherwise the world's
+    /// own UUID-keyed player file is read, including the regular `.dat_old`
+    /// fallback. No player data beyond the matching keys is returned or written.
+    /// `Ok(None)` means no saved player, while a valid empty selection is
+    /// `Ok(Some(vec![]))`. A malformed or unreadable record reports `Corrupt`.
+    #[access(WorldOnly)]
+    fn player_saved_true_flags(
+        &self,
+        uuid: u128,
+        keys: &[Identifier],
+    ) -> Result<Option<Vec<Identifier>>, PlayerFlagReadError>;
     /// Side: server.
     /// Create or retrieve a connectionless player for the level currently in place.
     #[access(WorldOnly)]

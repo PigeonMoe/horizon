@@ -37,3 +37,23 @@ impl crate::NoBackend for PlayerDataRefusal {
         Self::Stale
     }
 }
+
+/// Why a server could not read a player's selected, mod-owned saved flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum PlayerFlagReadError {
+    /// No live record is available in this call's world, or on this side.
+    Unavailable,
+    /// The call is outside a mod's package scope or requests another namespace.
+    NotOwned,
+    /// The request did not contain between one and 512 keys.
+    KeyCount,
+    /// The archived record or its flag container cannot be read safely.
+    Corrupt,
+}
+
+impl crate::NoBackend for PlayerFlagReadError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}

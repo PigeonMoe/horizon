@@ -1,8 +1,14 @@
 //! The compound mods keep on a server player (NeoForge's `Entity.getPersistentData`), read and
 //! replaced whole, for mods that carry a player between servers.
 use super::{Game, native_server::PlayerRead};
-use horizon_core::nbt::{Compound, Tag};
-use mod_api::{Identifier, PlayerDataRefusal, PlayerRef};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
+use horizon_core::nbt::{Compound, Limits, Tag};
+use mod_api::{Identifier, PlayerDataRefusal, PlayerFlagReadError, PlayerRef};
+use std::{
+    io::{ErrorKind, Read},
+    path::Path,
+};
 
 /// The key of the mods' compound in a player's saved data (NeoForge's `Entity.PERSISTED_NBT_TAG`).
 const PERSISTENT_DATA: &str = "NeoForgeData";
@@ -43,6 +49,44 @@ impl Game<'_> {
             PlayerRead::Acting { .. } => persistent_data(self.level.player_extra.as_ref()),
             PlayerRead::Guest(g) => persistent_data(g.saved.as_ref()),
         })
+    }
+
+    pub(super) fn player_saved_true_flags(
+        &self,
+        uuid: u128,
+        keys: &[Identifier],
+    ) -> Result<Option<Vec<Identifier>>, PlayerFlagReadError> {
+        use PlayerFlagReadError as Error;
+        if !self.is_logical_server() || self.native_lifecycle.epoch().is_none() {
+            return Err(Error::Unavailable);
+        }
+        let owner = mod_api::content::crash::current_native_mod().ok_or(Error::NotOwned)?;
+        if !(1..=512).contains(&keys.len()) {
+            return Err(Error::KeyCount);
+        }
+        if keys.iter().any(|key| key.namespace() != owner) {
+            return Err(Error::NotOwned);
+        }
+
+        if let Some(player) = self.player(uuid) {
+            let saved = match self.player_handle_read(player).ok_or(Error::Unavailable)? {
+                PlayerRead::Acting { .. } => self.level.player_extra.as_ref(),
+                PlayerRead::Guest(guest) => guest.saved.as_ref(),
+            };
+            return true_flags(saved, keys).map(Some);
+        }
+        // A loading, displaced or transferring player must not be read from an
+        // older disk checkpoint in place of their live body.
+        if self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.guests.iter().any(|g| g.uuid == uuid))
+        {
+            return Err(Error::Unavailable);
+        }
+        read_archived_player(&self.world_root, uuid)?
+            .map(|saved| true_flags(Some(&saved), keys))
+            .transpose()
     }
 
     pub(super) fn player_paper_persistent_value(
@@ -96,6 +140,99 @@ impl Game<'_> {
                 .guests
                 .update_connection(conn, |g| keep_player_persisted(&mut g.saved));
         }
+    }
+}
+
+fn true_flags(
+    saved: Option<&Tag>,
+    keys: &[Identifier],
+) -> Result<Vec<Identifier>, PlayerFlagReadError> {
+    use PlayerFlagReadError::Corrupt;
+    let Some(saved) = saved else {
+        return Ok(Vec::new());
+    };
+    if !matches!(saved, Tag::Compound(_)) {
+        return Err(Corrupt);
+    }
+    let Some(data) = saved.get(PERSISTENT_DATA) else {
+        return Ok(Vec::new());
+    };
+    if !matches!(data, Tag::Compound(_)) {
+        return Err(Corrupt);
+    }
+    let Some(flags) = data.get(PLAYER_PERSISTED) else {
+        return Ok(Vec::new());
+    };
+    let Tag::Compound(flags) = flags else {
+        return Err(Corrupt);
+    };
+    Ok(keys
+        .iter()
+        .filter(|key| flags.get(&key.to_string().as_str().into()) == Some(&Tag::Byte(1)))
+        .cloned()
+        .collect())
+}
+
+fn read_archived_player(world: &Path, uuid: u128) -> Result<Option<Tag>, PlayerFlagReadError> {
+    use PlayerFlagReadError as Error;
+    let root = Dir::open_ambient_dir(world, cap_std::ambient_authority())
+        .map_err(|_| Error::Unavailable)?;
+    let descend = |parent: &Dir, name: &str| match parent.open_dir_nofollow(name) {
+        Ok(next) => Ok(Some(next)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Error::Corrupt),
+    };
+    let Some(players) = descend(&root, "players")? else {
+        return Ok(None);
+    };
+    let Some(directory) = descend(&players, "data")? else {
+        return Ok(None);
+    };
+    let name = horizon_protocol::crypto::uuid_string(uuid);
+    let read = |extension: &str| {
+        let name = format!("{name}.{extension}");
+        let meta = match directory.symlink_metadata(&name) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Error::Corrupt),
+        };
+        let max = Limits::saved().max_bytes as u64;
+        if !meta.is_file() || meta.len() > max {
+            return Err(Error::Corrupt);
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = directory
+            .open_with(&name, &options)
+            .map_err(|_| Error::Corrupt)?;
+        if !file.metadata().map_err(|_| Error::Corrupt)?.is_file() {
+            return Err(Error::Corrupt);
+        }
+        let mut bytes = Vec::new();
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Corrupt)?;
+        if bytes.len() as u64 > max {
+            return Err(Error::Corrupt);
+        }
+        let tag = horizon_client::save::decode_dat(bytes).map_err(|_| Error::Corrupt)?;
+        if !matches!(tag, Tag::Compound(_)) {
+            return Err(Error::Corrupt);
+        }
+        if let Some(found) = tag.get("UUID")
+            && !matches!(found, Tag::IntArray(ints) if ints.as_slice() == horizon_client::lan::playerdata::uuid_ints(uuid))
+        {
+            return Err(Error::Corrupt);
+        }
+        Ok(Some(tag))
+    };
+    let current = read("dat");
+    match current {
+        Ok(Some(_)) => current,
+        _ => match read("dat_old") {
+            Ok(None) => current,
+            fallback => fallback,
+        },
     }
 }
 

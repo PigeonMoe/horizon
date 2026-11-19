@@ -2977,6 +2977,11 @@ fn try_read_dat(path: &Path) -> std::result::Result<Tag, DatIssue> {
         std::io::ErrorKind::NotFound => DatIssue::Missing,
         _ => DatIssue::Unreadable(e.to_string()),
     })?;
+    decode_dat(bytes)
+}
+
+/// Decodes a file already opened through a saved-world directory handle.
+pub fn decode_dat(bytes: Vec<u8>) -> std::result::Result<Tag, DatIssue> {
     let raw = match Compression::Gzip.decode(&bytes, Limits::saved().max_bytes) {
         Ok(raw) => raw,
         Err(_) => bytes,
