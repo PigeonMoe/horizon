@@ -771,6 +771,13 @@ pub trait LevelsBackend {
     /// `device_placement_pre` policy. False for a stale or inactive level.
     #[access(WorldOnly)]
     fn level_allow_device_placement(&self, level: LevelRef, owner: u128, pos: [i32; 3]) -> bool;
+    /// Side: server.
+    /// Ask whether a device's saved `owner` may break a block at this loaded position.
+    /// Works for offline owners and enforces build height, the world's hard coordinate limits,
+    /// spawn protection and `device_break_pre`. False for a stale or inactive level.
+    /// Does not load chunks, inspect the block's breakability, or change the world.
+    #[access(WorldOnly)]
+    fn level_allow_device_breaking(&self, level: LevelRef, owner: u128, pos: [i32; 3]) -> bool;
 }
 /// The handles' writes of the `levels` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

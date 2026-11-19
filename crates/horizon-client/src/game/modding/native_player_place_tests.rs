@@ -91,6 +91,84 @@ fn device_placement_can_authorize_an_offline_owner_without_writing() {
     );
 }
 
+#[test]
+#[ignore = "daily"]
+fn device_breaking_checks_the_offline_owner_and_its_distinct_policy() {
+    use mod_api::{
+        BlockUpdateFlags, DeviceBreakPreEvent, DevicePlacementPreEvent, Flow, Hooks, Host, ModEntry,
+    };
+    use std::sync::{Arc, Mutex};
+
+    const TARGET: [i32; 3] = [4, 70, 2];
+    const OWNER: u128 = 91;
+    const OUTSIDER: u128 = 92;
+    const OPERATOR: u128 = 93;
+
+    struct Claims(Arc<Mutex<Vec<(u128, bool)>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Claims {
+        fn device_break_pre(&self, host: &dyn Host, event: &mut DeviceBreakPreEvent<'_>) -> Flow {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.pos, TARGET);
+            assert!(host.player(event.owner).is_none());
+            self.0.lock().unwrap().push((event.owner, event.operator));
+            if event.owner == OWNER || event.operator {
+                Flow::Continue
+            } else {
+                Flow::Cancel
+            }
+        }
+
+        fn device_placement_pre(&self, _: &dyn Host, _: &mut DevicePlacementPreEvent<'_>) -> Flow {
+            Flow::Cancel
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    mod_platform::testing::with_mods(
+        vec![ModEntry::new("device-break-claims", Box::new(Claims(calls.clone())))].into(),
+        || {
+            with_guests(|game| {
+                loaded(game);
+                game.options.execution_role =
+                    crate::game::execution_role::ExecutionRole::DedicatedServer;
+                let level = game.level(game.dim.id()).unwrap();
+                let stone = api_state(game, "minecraft:stone");
+                assert_eq!(
+                    level.set_block(game, TARGET, stone, BlockUpdateFlags::KNOWN_SHAPE),
+                    Ok(true)
+                );
+                game.lan.as_mut().unwrap().hub.ops.insert(OPERATOR, 4);
+                game.lan.as_mut().unwrap().hub.spawn_protection = 0;
+                assert!(!level.allow_device_placement(game, OWNER, TARGET));
+                assert!(level.allow_device_breaking(game, OWNER, TARGET));
+                assert!(!level.allow_device_breaking(game, OUTSIDER, TARGET));
+                assert!(!level.allow_device_breaking(game, OWNER, [1_000, 70, 2]));
+                assert!(!level.allow_device_breaking(game, OWNER, [4, -1_000, 2]));
+                let stale = mod_api::LevelRef::new(
+                    WorldEpoch::new(level.epoch().get() + 1),
+                    level.dimension(),
+                );
+                let inactive = mod_api::LevelRef::new(level.epoch(), mod_api::DimensionKey::NETHER);
+                assert!(!stale.allow_device_breaking(game, OWNER, TARGET));
+                assert!(!inactive.allow_device_breaking(game, OWNER, TARGET));
+
+                game.level.world_spawn = Some(TARGET);
+                game.level.world_spawn_dimension = Some(game.dim.id().to_owned());
+                game.lan.as_mut().unwrap().hub.spawn_protection = 2;
+                assert!(!level.allow_device_breaking(game, OWNER, TARGET));
+                assert!(level.allow_device_breaking(game, OPERATOR, TARGET));
+                assert_eq!(level.block_state(game, TARGET), Some(stone));
+            })
+        },
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [(OWNER, false), (OUTSIDER, false), (OPERATOR, true)]
+    );
+}
+
 mod device_protection {
     use mod_api::{EntityChangeBlockPreEvent, Flow, Hooks, ServerHost};
 
