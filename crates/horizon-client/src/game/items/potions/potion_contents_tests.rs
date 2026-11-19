@@ -68,7 +68,7 @@ fn a_splash_potion_applies_its_custom_effects_and_duration_scale() {
         0,
         &PotionOwner::default(),
         true,
-        Vec3::ZERO,
+        (None, Vec3::ZERO),
     );
     let effects = &game.potions.effects;
     // The potion's 3600 ticks and the custom effect's 900, both at 0.125.
@@ -130,7 +130,7 @@ fn a_lingering_potion_of_custom_effects_makes_its_cloud() {
         0,
         &PotionOwner::default(),
         true,
-        Vec3::ZERO,
+        (None, Vec3::ZERO),
     );
     assert_eq!(
         game.breath_clouds.len(),
@@ -175,7 +175,7 @@ fn a_water_potion_refills_an_axolotl_once() {
         0,
         &PotionOwner::default(),
         true,
-        Vec3::ZERO,
+        (None, Vec3::ZERO),
     );
     assert_eq!(game.mobs[0].air, 1800, "one rehydrate, capped at the max");
 }
@@ -218,7 +218,7 @@ fn a_water_potion_with_custom_effects_does_not_douse_fire() {
             0,
             &PotionOwner::default(),
             true,
-            Vec3::ZERO,
+            (None, Vec3::ZERO),
         )
     };
     let water = ItemStack::new("minecraft:splash_potion", 1).with_potion("minecraft:water");

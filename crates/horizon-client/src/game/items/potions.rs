@@ -116,9 +116,8 @@ pub(super) const LINGERING_WAIT: i32 = 10;
 /// `AreaEffectCloud.DEFAULT_REAPPLICATION_DELAY`.
 const REAPPLICATION_DELAY: i32 = 20;
 /// `AreaEffectCloud.readAdditionalSaveData` for the fields a client cloud keeps:
-/// its position, lifetime, radius and use settings, and the potion it carries.
-/// The custom particle and the owner reference are not modelled on a client
-/// cloud, and the entity id is the caller's (`load_potion_cloud`).
+/// its position, lifetime, radius, potion and saved owner reference. The
+/// entity id is the caller's (`load_potion_cloud`).
 pub(super) fn potion_cloud_from_nbt(tag: &Tag) -> Option<(Vec3, Breath)> {
     use horizon_client::save::{float, number, text};
     let at = horizon_client::entity_nbt::position(tag)?;
@@ -126,6 +125,10 @@ pub(super) fn potion_cloud_from_nbt(tag: &Tag) -> Option<(Vec3, Breath)> {
     let int = |key, default| number(tag.get(key)).map_or(default, |v| v as i32);
     let real = |key, default| float(tag.get(key)).map_or(default, |v| v as f32);
     let contents = tag.get("potion_contents");
+    let owner = match tag.get("Owner") {
+        Some(Tag::IntArray(uuid)) => uuid.as_slice().try_into().ok(),
+        _ => None,
+    };
     let mut effects = contents
         .and_then(|c| text(c.get("potion")))
         .and_then(|id| brewing::potion(&id))
@@ -188,9 +191,7 @@ pub(super) fn potion_cloud_from_nbt(tag: &Tag) -> Option<(Vec3, Breath)> {
                 color,
                 custom_particle: tag.get("custom_particle").cloned(),
                 victims: Vec::new(),
-                source: Text::translate("entity.minecraft.area_effect_cloud", &[]),
-                owner: None,
-                guest: None,
+                owner,
             }),
         },
     ))
@@ -199,8 +200,7 @@ pub(super) fn potion_cloud_from_nbt(tag: &Tag) -> Option<(Vec3, Breath)> {
 /// `AreaEffectCloud.addAdditionalSaveData`: the lifetime, radius and use
 /// settings with the effects the cloud applies, as `custom_effects` with the
 /// colour they were drawn in. The client keeps no potion id, so a cloud that
-/// came from a named potion is written effect by effect; the custom particle
-/// and the owner have no counterpart here.
+/// came from a named potion is written effect by effect.
 pub(super) fn potion_cloud_to_nbt(c: &Breath, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
     use horizon_core::nbt::Compound;
     let Some(potion) = &c.potion else {
@@ -239,6 +239,11 @@ pub(super) fn potion_cloud_to_nbt(c: &Breath, uuid: [i32; 4], raw: Option<&Tag>)
     let Tag::Compound(map) = &mut tag else {
         return tag;
     };
+    if let Some(owner) = potion.owner {
+        map.insert("Owner".into(), Tag::IntArray(owner.to_vec()));
+    } else {
+        map.remove(&"Owner".into());
+    }
     map.insert("Age".into(), Tag::Int(c.age));
     map.insert("Duration".into(), Tag::Int(c.duration));
     map.insert("Radius".into(), Tag::Float(c.radius.to_bits()));
@@ -300,14 +305,9 @@ pub(super) struct PotionCloud {
     custom_particle: Option<Tag>,
     /// Each victim and the tick it can be affected again.
     victims: Vec<(Victim, i32)>,
-    /// Who its instant damage names (`indirectMagic(cloud, owner)`): the
-    /// thrower, else the cloud.
-    source: Text,
-    /// `AreaEffectCloud.getOwner`: the thrower (`ThrownLingeringPotion.onHitAsPotion`), whose
-    /// kill a mob's death to its instant damage is.
-    owner: Option<Who>,
-    /// On a server, the guest (by connection) who threw it.
-    guest: Option<u32>,
+    /// `AreaEffectCloud.owner`: the saved entity reference, resolved only
+    /// while its source is available to the server.
+    owner: Option<[i32; 4]>,
 }
 impl PotionCloud {
     /// `AreaEffectCloud.updateParticle`: the custom particle when one is set,
@@ -394,7 +394,6 @@ impl Game<'_> {
     /// `amplifier`) on a mob: what a cloud puts on it, `indirectMagic(cloud,
     /// dragon)` with no owner to credit (the dragon is not a mob here).
     pub(super) fn breath_affect_mob(&mut self, mob: u32, amplifier: i32, at: [f64; 3]) {
-        let source = Text::translate("entity.minecraft.area_effect_cloud", &[]);
         let effect = [("instant_damage", 1, amplifier)];
         // DragonFireball.onHit and the flame phase: `setPotionDurationScale(0.25)`.
         self.cloud_affect(
@@ -402,7 +401,6 @@ impl Game<'_> {
             &effect,
             (&[], &[], 0.25),
             at,
-            &source,
             (None, None, &NO_ATTACK),
         );
     }
@@ -1855,7 +1853,16 @@ impl Game<'_> {
                 attacker: None,
                 guest,
             };
-            self.splash(&stack, at, mob, block, age, &owner, silent, motion);
+            self.splash(
+                &stack,
+                at,
+                mob,
+                block,
+                age,
+                &owner,
+                silent,
+                (Some(id), motion),
+            );
             if item != "minecraft:experience_bottle" {
                 self.native_potion_splash(&item, [at.x, at.y, at.z]);
             }
@@ -1986,6 +1993,37 @@ impl Game<'_> {
         }
     }
 
+    fn cloud_owner(&self, uuid: [i32; 4]) -> Option<(Who, Option<u32>, i32)> {
+        let uuid_value = horizon_client::lan::playerdata::ints_uuid(uuid);
+        let credit = super::combat::PlayerCredit(uuid_value);
+        if let Some(guest) = self.resolve_player_credit(credit) {
+            let entity = if guest == self.lan_acting && !self.lan_acting_fake {
+                self.own_entity_id()
+            } else {
+                self.guest_identity(guest?).map_or(0, |(_, id)| id as i32)
+            };
+            return (entity != 0).then_some((Who::Player, guest, entity));
+        }
+        self.mob_by_uuid(uuid)
+            .map(|id| (Who::Mob(id), None, id as i32))
+    }
+
+    fn potion_attack(
+        &self,
+        attacker: i32,
+        direct: Option<u32>,
+        at: [f64; 3],
+        source_is_player: bool,
+    ) -> Attack {
+        let mut attack = self.attack_of(attacker);
+        if !source_is_player {
+            attack.policy_player = None;
+        }
+        attack.direct = direct.map(|id| id as i32);
+        attack.position = Some(at);
+        attack
+    }
+
     /// `AreaEffectCloud.serverTick`: configured lifetime/radius changes and
     /// five-tick doses, with each victim's configured reapplication delay.
     /// False once the cloud is gone.
@@ -2048,24 +2086,15 @@ impl Game<'_> {
             inside.push((Victim::Player(p.who), p.position.x, p.position.z));
         }
         let effects = potion.effects.clone();
-        let player_source = self.harmful_potion_source(potion.owner, potion.guest, &effects);
-        let attacker = match (potion.owner, potion.guest) {
-            (Some(Who::Mob(id)), _) if self.mob_object(id).is_some() => id as i32,
-            (Some(Who::Player), Some(conn)) => self
-                .guest_identity(conn)
-                .map_or(0, |(_, entity)| entity as i32),
-            (Some(Who::Player), None) => self.own_entity_id(),
-            _ => 0,
-        };
-        let owner = (attacker != 0).then_some(potion.owner).flatten();
+        let (owner, guest, attacker) = potion
+            .owner
+            .and_then(|uuid| self.cloud_owner(uuid))
+            .map_or((None, None, 0), |(who, guest, entity)| {
+                (Some(who), guest, entity)
+            });
+        let player_source = self.harmful_potion_source(owner, guest, &effects);
         // Resolve the owner before swapping to any of the player victims.
-        let mut attack = self.attack_of(attacker);
-        // A cloud's responsible player is its own source player.
-        if owner != Some(Who::Player) {
-            attack.policy_player = None;
-        }
-        attack.direct = Some(c.id as i32);
-        attack.position = Some(c.at);
+        let attack = self.potion_attack(attacker, Some(c.id), c.at, owner == Some(Who::Player));
         // Only mobs that at least one of the cloud's effects can affect are
         // taken (`allEffects.stream().anyMatch(entity::canBeAffected)`), so
         // the others neither become victims nor use up its radius.
@@ -2104,8 +2133,7 @@ impl Game<'_> {
                     potion.settings.duration_scale,
                 ),
                 c.at,
-                &potion.source,
-                (owner, potion.guest, &attack),
+                (owner, guest, &attack),
             );
             if potion.settings.radius_on_use != 0.0 {
                 c.radius += potion.settings.radius_on_use;
@@ -2155,9 +2183,7 @@ impl Game<'_> {
                 color,
                 custom_particle: None,
                 victims: Vec::new(),
-                source: Text::translate("entity.minecraft.area_effect_cloud", &[]),
                 owner: None,
-                guest: None,
             }),
         });
     }
@@ -2170,12 +2196,21 @@ impl Game<'_> {
         effects: &[(&'static str, i32, i32)],
         (hidden, ambient, duration_scale): (&[&'static str], &[&'static str], f32),
         at: [f64; 3],
-        source: &Text,
         (owner, guest, attack): (Option<Who>, Option<u32>, &Attack),
     ) {
         // The cloud remains the direct entity even when it has no owner.
+        let name = match owner {
+            Some(Who::Player) => self
+                .player_attacker(guest)
+                .map(|(_, name)| name)
+                .or_else(|| self.player.as_ref().map(|_| self.player_display_text())),
+            Some(Who::Mob(id)) => self.mob_display_name(id),
+            None => None,
+        };
         let cloud_owner = PotionOwner {
-            name: Some(source.clone()),
+            name: Some(
+                name.unwrap_or_else(|| Text::translate("entity.minecraft.area_effect_cloud", &[])),
+            ),
             ..Default::default()
         };
         // MobEffectInstance.withScaledDuration: floor(duration * scale), at least 1; an infinite
@@ -2384,7 +2419,7 @@ impl Game<'_> {
     fn apply_indirect_effect_action(&mut self, a: EffectAction, owner: &PotionOwner, causing: i32) {
         let a = match a {
             EffectAction::Hurt("minecraft:magic", amount) => {
-                match (owner.attacker, &owner.name) {
+                match ((causing != 0).then_some(causing as u32), &owner.name) {
                     (Some(id), Some(name)) => {
                         self.note_named_attacker("minecraft:indirect_magic", id, name.clone())
                     }
@@ -2408,7 +2443,7 @@ impl Game<'_> {
         effects: &[(&'static str, i32, i32)],
         at: Vec3,
         age: u32,
-        owner: &PotionOwner,
+        (owner, attack): (&PotionOwner, &Attack),
         duration_scale: f64,
         player_source: Option<u128>,
     ) {
@@ -2437,7 +2472,9 @@ impl Game<'_> {
                     let instant = brewing::effect(id).is_some_and(|e| e.instant);
                     if instant {
                         if let Some(a) = horizon_client::effects::instant(id, *amp, intensity) {
-                            self.apply_indirect_effect_action(a, owner, 0);
+                            self.with_attack(attack.clone(), |game| {
+                                game.apply_indirect_effect_action(a, owner, attack.attacker);
+                            });
                         }
                     } else {
                         let d = (intensity * f64::from(*duration) * duration_scale + 0.5) as i32;
@@ -2474,7 +2511,8 @@ impl Game<'_> {
     /// `AbstractThrownPotion.onHit` with `ThrownSplashPotion.onHitAsPotion`, or
     /// `ThrownLingeringPotion.onHitAsPotion` for a lingering potion, read from
     /// the stack's `potion_contents`; `mob` is where it hit a mob, `hit` the
-    /// block and face it hit, `age` its age, `silent` its Silent flag, `motion` its motion as it hit.
+    /// block and face it hit, `age` its age and `silent` its Silent flag.
+    /// The final pair is the projectile's actual ID and motion at impact.
     pub(super) fn splash(
         &mut self,
         stack: &ItemStack,
@@ -2484,7 +2522,7 @@ impl Game<'_> {
         age: u32,
         owner: &PotionOwner,
         silent: bool,
-        motion: Vec3,
+        (projectile, motion): (Option<u32>, Vec3),
     ) {
         let block = [at.x, at.y, at.z].map(|v| v.floor() as i32);
         if &*stack.item == "minecraft:experience_bottle" {
@@ -2547,6 +2585,11 @@ impl Game<'_> {
             // stack's `potion_contents` and `potion_duration_scale`.
             let at = mob.unwrap_or(at);
             let id = self.take_entity_id();
+            let owner = match owner.who() {
+                Some(Who::Player) => self.player_uuid_of(owner.guest),
+                Some(Who::Mob(id)) => Some(self.uuid_for(id)),
+                None => None,
+            };
             self.breath_clouds.push(Breath {
                 attachment_lifetime: Default::default(),
                 join: Default::default(),
@@ -2570,11 +2613,7 @@ impl Game<'_> {
                     color,
                     custom_particle: None,
                     victims: Vec::new(),
-                    source: owner.name.clone().unwrap_or_else(|| {
-                        Text::translate("entity.minecraft.area_effect_cloud", &[])
-                    }),
-                    owner: owner.who(),
-                    guest: owner.guest,
+                    owner,
                 }),
             });
             return;
@@ -2582,9 +2621,30 @@ impl Game<'_> {
         let duration_scale = f64::from(stack.potion_duration_scale());
         // Every player in range (`ThrownSplashPotion.applySplash` over
         // `LivingEntity`s, the players among them).
-        let player_source = self.harmful_potion_source(owner.who(), owner.guest, &effects);
+        let who = owner.who();
+        let player_source = self.harmful_potion_source(who, owner.guest, &effects);
+        let attacker = match (who, owner.guest) {
+            (Some(Who::Player), None) => self.own_entity_id(),
+            (Some(Who::Player), Some(guest)) if Some(guest) == self.lan_acting => {
+                self.own_entity_id()
+            }
+            (Some(Who::Player), Some(guest)) => {
+                self.guest_identity(guest).map_or(0, |(_, id)| id as i32)
+            }
+            (Some(Who::Mob(id)), _) if self.mob_object(id).is_some() => id as i32,
+            _ => 0,
+        };
+        let source = (attacker != 0).then_some(who).flatten();
+        let attack = self.potion_attack(attacker, projectile, at.components(), owner.player);
         self.for_each_player(|g| {
-            g.splash_on_player(&effects, at, age, owner, duration_scale, player_source);
+            g.splash_on_player(
+                &effects,
+                at,
+                age,
+                (owner, &attack),
+                duration_scale,
+                player_source,
+            );
         });
         // Mobs take the instant effects (undead invert healing and harming).
         let undead = &self.stations().enchantments.entity_tags;
@@ -2630,10 +2690,10 @@ impl Game<'_> {
                 } else if harm {
                     // HealOrHarmMobEffect.applyInstantaneousEffect: indirectMagic(potion, owner).
                     let harm = (intensity * f64::from(6 << amp) + 0.5) as i32 as f32;
-                    let source = Damage::indirect_magic(owner.who(), [at.x, at.y, at.z]);
+                    let source = Damage::indirect_magic(source, at.components());
                     let id = m.id;
                     let hurt = m.damage_by(
-                        crate::game::entity::damage_level_of!(self, scoped),
+                        crate::game::entity::damage_level_of!(self, &attack),
                         harm,
                         source,
                         "minecraft:splash_potion",
@@ -3267,9 +3327,7 @@ mod tests {
                 color: 0x0033_FF44,
                 custom_particle: None,
                 victims: Vec::new(),
-                source: Text::translate("entity.minecraft.area_effect_cloud", &[]),
                 owner: None,
-                guest: None,
             }),
         };
         let tag = potion_cloud_to_nbt(&cloud, [1, 2, 3, 4], None);
@@ -3510,9 +3568,7 @@ mod tests {
                 color: 0,
                 custom_particle: None,
                 victims: Vec::new(),
-                source: Text::empty(),
                 owner: None,
-                guest: None,
             }),
         }]
         .into_iter()
@@ -3910,7 +3966,7 @@ mod xp_bottle_tests {
                     0,
                     &PotionOwner::default(),
                     false,
-                    motion,
+                    (None, motion),
                 );
                 assert!(!game.orbs.is_empty());
                 let at = [at.x, at.y, at.z];

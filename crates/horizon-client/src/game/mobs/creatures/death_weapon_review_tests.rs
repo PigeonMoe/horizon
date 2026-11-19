@@ -199,7 +199,16 @@ fn death_weapon_harming_potion_does_not_read_thrower_sword() {
         let mut potion = ItemStack::new("minecraft:splash_potion", 1);
         potion.data_mut().potion = Some("minecraft:harming".into());
         let owner = game.potion_owner(Some(Who::Player));
-        game.splash(&potion, at, Some(at), None, 3, &owner, true, Vec3::ZERO);
+        game.splash(
+            &potion,
+            at,
+            Some(at),
+            None,
+            3,
+            &owner,
+            true,
+            (None, Vec3::ZERO),
+        );
         let dead = game.mobs.iter().find(|mob| mob.id == 70).unwrap().clone();
         assert_eq!(dead.health, 0.0);
         assert_eq!(dead.last_direct, Some("minecraft:splash_potion"));
