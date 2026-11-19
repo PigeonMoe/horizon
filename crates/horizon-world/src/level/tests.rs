@@ -55,6 +55,7 @@ pub(crate) struct TestLevel {
     pub block_events_ready: bool,
     /// Positions that refuse fluids, fire, growth and piston moves, as a land claim would.
     pub guarded: HashSet<BlockPos>,
+    pub fade_checks: std::cell::RefCell<Vec<(BlockPos, BlockStateId, BlockStateId)>>,
     pub growth_spread_checks: std::cell::RefCell<Vec<(BlockPos, BlockPos)>>,
     pub guarded_current: HashSet<BlockPos>,
     pub guarded_falling: HashSet<BlockPos>,
@@ -141,6 +142,7 @@ impl TestLevel {
             tick_ready: true,
             block_events_ready: true,
             guarded: HashSet::new(),
+            fade_checks: Default::default(),
             growth_spread_checks: std::cell::RefCell::new(Vec::new()),
             guarded_current: HashSet::new(),
             guarded_falling: HashSet::new(),
@@ -317,6 +319,10 @@ impl LevelAccess for TestLevel {
         self.events.push(event);
     }
     fn allow_fluid_tick(&self, pos: BlockPos, _fluid: &'static str) -> bool {
+        !self.guarded.contains(&pos)
+    }
+    fn allow_block_fade(&self, pos: BlockPos, from: BlockStateId, to: BlockStateId) -> bool {
+        self.fade_checks.borrow_mut().push((pos, from, to));
         !self.guarded.contains(&pos)
     }
     fn allow_spread(&self, kind: Spread, from: BlockPos, to: BlockPos) -> bool {
@@ -4052,6 +4058,9 @@ fn diodes_on_downward_pistons_survive_retraction() {
 
 #[path = "cake_tests.rs"]
 mod cake_tests;
+
+#[path = "tests/fade.rs"]
+mod fade;
 
 #[test]
 fn water_douses_a_lit_campfire_with_the_extinguish_sound() {

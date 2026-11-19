@@ -194,12 +194,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         self.falling_block_fall(pos, state, None);
                     }
                 }
-                Class::Farmland => {
+                Class::Farmland | Class::Path => {
                     if !self.can_survive(state, pos) {
                         self.turn_to_base_block(pos, state);
                     }
                 }
-                Class::Path => self.turn_to_base_block(pos, state),
                 Class::Fire => self.fire_tick(pos, state),
                 Class::Frogspawn => {
                     if !self.can_survive(state, pos) {
@@ -442,7 +441,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
                 Class::Nylium => {
                     if !self.can_be_nylium(state, pos) {
-                        self.set_block_and_update(pos, b.default_of(b.named.netherrack));
+                        let netherrack = b.default_of(b.named.netherrack);
+                        if self.level.allow_block_fade(pos, state, netherrack) {
+                            self.set_block_and_update(pos, netherrack);
+                        }
                     }
                 }
                 Class::PitcherCrop => {
@@ -528,7 +530,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
 
     pub(crate) fn turn_to_base_block(&mut self, pos: BlockPos, state: BlockStateId) {
         let b = self.b;
-        let base = b.data(state).link.unwrap_or(b.named.dirt);
+        let base = b.default_of(b.data(state).link.unwrap_or(b.named.dirt));
+        if !self.level.allow_block_fade(pos, state, base) {
+            return;
+        }
         // Block.pushEntitiesUp(state, base, level, pos): the game lifts what
         // stands in the new block's added top onto it.
         self.emit(LevelEvent::BlockEvent {
@@ -536,7 +541,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             state,
             kind: "push_entities_up",
         });
-        self.set_block_and_update(pos, b.default_of(base));
+        self.set_block_and_update(pos, base);
         self.game_event(pos, "minecraft:block_change");
     }
     /// `FallingBlock.isFree`.
@@ -855,7 +860,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let age = b.table.int(state, b.props.age);
         if age < 3 {
-            self.set_block(pos, b.table.set_int(state, b.props.age, age + 1), 2);
+            let older = b.table.set_int(state, b.props.age, age + 1);
+            if self.level.allow_block_fade(pos, state, older) {
+                self.set_block(pos, older, 2);
+            }
             false
         } else {
             self.ice_melt(pos, state);
