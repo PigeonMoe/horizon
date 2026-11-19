@@ -241,9 +241,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         self.level_event(3009, pos, 0);
                     }
                     self.game_event_state(pos, "minecraft:block_place", state);
-                    let delay = if boosted { 12000 } else { 24000 } / 3;
-                    let jitter = self.random().next_int_bound(300).unwrap_or(0);
-                    self.schedule_tick(pos, block, delay + jitter);
+                    self.schedule_sniffer_egg_hatch(pos, block, boosted);
                 }
                 Class::SculkSensor => {
                     if !same

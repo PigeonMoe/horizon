@@ -1,7 +1,7 @@
 //! Blocks driven by the overworld day timeline's environment attributes
 //! (`gameplay/eyeblossom_open`, `gameplay/turtle_egg_hatch_chance`) and the
 //! dried ghast's hydration ticks.
-use super::{LevelAccess, LevelEvent, Sim, update::below};
+use super::{BlockId, LevelAccess, LevelEvent, Sim, update::below};
 use crate::registry::BlockStateId;
 use horizon_core::{position::BlockPos, random::RandomSource};
 use std::sync::Arc;
@@ -178,10 +178,30 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             });
         }
     }
+    pub(crate) fn schedule_sniffer_egg_hatch(
+        &mut self,
+        pos: BlockPos,
+        block: BlockId,
+        boosted: bool,
+    ) {
+        let delay = if boosted { 4000 } else { 8000 };
+        let jitter = self.random().next_int_bound(300).unwrap_or(0);
+        self.schedule_tick(pos, block, delay + jitter);
+    }
+
     /// `SnifferEggBlock.tick`: crack twice, then hatch a snifflet.
     pub(crate) fn sniffer_egg_tick(&mut self, state: BlockStateId, pos: BlockPos) {
         let b = self.b;
         let hatch = b.table.int(state, b.props.hatch);
+        if hatch >= 2
+            && !self
+                .level
+                .allow_block_fade(pos, state, b.legacy_block(self.fluid_at(pos)))
+        {
+            let boosted = b.is_block(self.below_state(pos), b.named.moss_block);
+            self.schedule_sniffer_egg_hatch(pos, b.block(state), boosted);
+            return;
+        }
         let pitch = 0.9 + self.random().next_float() * 0.2;
         if hatch < 2 {
             self.play(pos, "minecraft:block.sniffer_egg.crack", 0.7, pitch);

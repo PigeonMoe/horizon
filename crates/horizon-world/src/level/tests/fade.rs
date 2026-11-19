@@ -183,3 +183,43 @@ fn turtle_eggs_ask_at_final_hatch_and_try_again_on_a_later_random_tick() {
             if *pos == AT && *state == mature
     )));
 }
+
+#[test]
+fn sniffer_eggs_retry_at_the_current_hatch_speed_after_a_veto() {
+    for (before, support, expected_delay) in
+        [("stone", "moss_block", 4000), ("moss_block", "stone", 8000)]
+    {
+        let mut w = world!();
+        let egg = w.id("sniffer_egg", &[("hatch", "2")]);
+        let air = w.b().air();
+        let below = AT.offset(0, -1, 0);
+        w.put(AT, egg);
+        w.put(below, w.id(before, &[]));
+        schedule(&mut w, egg);
+        w.put(below, w.id(support, &[]));
+
+        let jitter = w.level.random.clone().next_int_bound(300).unwrap();
+        w.level.guarded.insert(AT);
+        w.tick();
+        assert_eq!(w.get(AT), egg);
+        assert_eq!(w.level.fade_checks.take(), [(AT, egg, air)]);
+        assert!(w.level.events.is_empty());
+
+        w.level.guarded.remove(&AT);
+        for _ in 1..(expected_delay + jitter) {
+            w.tick();
+        }
+        assert_eq!(w.get(AT), egg);
+        assert!(w.level.fade_checks.take().is_empty());
+        assert!(w.level.events.is_empty());
+
+        w.tick();
+        assert_eq!(w.get(AT), air);
+        assert_eq!(w.level.fade_checks.take(), [(AT, egg, air)]);
+        assert!(w.level.events.iter().any(|event| matches!(
+            event,
+            LevelEvent::BlockEvent { pos, state, kind: "hatch_sniffer" }
+                if *pos == AT && *state == egg
+        )));
+    }
+}
