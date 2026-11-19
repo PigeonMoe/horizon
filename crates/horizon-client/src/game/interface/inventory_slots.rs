@@ -392,6 +392,10 @@ impl Game<'_> {
         let scale = |id: i32| self.maps.data.get(&id).map(|m| m.scale);
         self.recipes()
             .find_with(&self.loop_context, &grid, n, &scale)
+            .filter(|(_, result)| {
+                self.menu_env()
+                    .recipe_result_allowed("minecraft:crafting", &grid, result)
+            })
             .map(|(name, result)| (name.to_owned(), result))
     }
     pub(super) fn draw_inventory_slots(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {

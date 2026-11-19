@@ -127,9 +127,22 @@ pub struct Env<'a> {
     pub limited_crafting: bool,
     /// The recipes the player knows (`ServerPlayer.getRecipeBook().contains(id)`).
     pub known_recipes: Option<&'a dyn KnownRecipes>,
-    /// The mods' `menu_slot_rules`, lent by the game with the read-only `Host` behind it (none
-    /// keeps every slot's own answer: a data-only consumer, or a click made without the game).
+    /// Read-only slot rules from the game. Data-only consumers keep the menu's own answers.
     pub slot_rules: Option<&'a dyn SlotRules>,
+}
+
+impl Env<'_> {
+    pub fn recipe_result_allowed(
+        &self,
+        menu: &str,
+        inputs: &[Option<ItemStack>],
+        result: &ItemStack,
+    ) -> bool {
+        self.loop_context.side() != LoopSide::Server
+            || self
+                .slot_rules
+                .is_none_or(|rules| rules.recipe_result_allowed(self.player, menu, inputs, result))
+    }
 }
 
 /// The maps of the level a menu is in.
@@ -1434,10 +1447,12 @@ impl Menu {
     /// `SmithingMenu.createResult`.
     fn smith_result(&mut self, env: &Env) {
         self.touch();
-        let [a, b, c] = [0, 1, 2].map(|i| self.state.containers[MAIN][i].as_ref());
-        self.state.containers[RESULT][0] =
-            env.station_recipes
-                .smithing_result(env.loop_context, env.enchantments, a, b, c);
+        let inputs = &self.state.containers[MAIN][..3];
+        let [a, b, c] = [0, 1, 2].map(|i| inputs[i].as_ref());
+        self.state.containers[RESULT][0] = env
+            .station_recipes
+            .smithing_result(env.loop_context, env.enchantments, a, b, c)
+            .filter(|result| env.recipe_result_allowed("minecraft:smithing", inputs, result));
     }
 
     /// `SmithingMenu.slotsChanged`'s `hasRecipeError`: every input filled and no result.
@@ -1690,11 +1705,24 @@ impl Menu {
     fn may_pickup(&self, env: &Env, s: usize) -> bool {
         match self.state.slots[s].role {
             Role::Inert | Role::Hidden => false,
-            Role::CraftResult => self.crafting_result_is_current(env, s),
+            Role::CraftResult => {
+                self.slot(s)
+                    .is_none_or(|result| self.crafting_rule_allows(env, result))
+                    && self.crafting_result_is_current(env, s)
+            }
             // AnvilMenu.mayPickup: the levels to pay, and a price.
             Role::CombineResult if self.state.kind == Kind::Anvil => {
                 (self.state.creative || self.state.levels >= self.state.data[0])
                     && self.state.data[0] > 0
+            }
+            Role::CombineResult if self.state.kind == Kind::Smithing => {
+                self.slot(s).is_none_or(|result| {
+                    env.recipe_result_allowed(
+                        "minecraft:smithing",
+                        &self.state.containers[MAIN][..3],
+                        result,
+                    )
+                })
             }
             Role::MerchantResult => self
                 .merchant
@@ -2066,8 +2094,14 @@ impl Menu {
                     }
                 }
                 Some(stack)
-            });
+            })
+            .filter(|result| self.crafting_rule_allows(env, result));
         self.state.containers[RESULT][0] = result;
+    }
+
+    fn crafting_rule_allows(&self, env: &Env, result: &ItemStack) -> bool {
+        !matches!(self.state.kind, Kind::Inventory | Kind::Crafting)
+            || env.recipe_result_allowed("minecraft:crafting", &self.state.containers[GRID], result)
     }
 
     /// `FurnaceResultSlot.checkTakeAchievements`: what `carried` and
@@ -3808,6 +3842,85 @@ pub(crate) mod tests {
             assert_eq!(menu.slot(0).map(|s| s.count), Some(4));
             assert_eq!(menu.quick_move_landing(env, 0), [45]);
         });
+    }
+
+    #[test]
+    fn player_recipe_rules_leave_blocked_results_empty_and_inputs_untouched() {
+        struct TaggedIngredients;
+        impl SlotRules for TaggedIngredients {
+            fn listens(&self, _: &str) -> bool {
+                false
+            }
+
+            fn rule(
+                &self,
+                _: &str,
+                _: usize,
+                _: &ItemStack,
+                _: SlotContext<'_>,
+                _: &mut bool,
+                _: &mut u32,
+            ) {
+            }
+
+            fn recipe_result_allowed(
+                &self,
+                _: Option<u128>,
+                menu: &str,
+                inputs: &[Option<ItemStack>],
+                _: &ItemStack,
+            ) -> bool {
+                assert_eq!(
+                    menu,
+                    if inputs.len() == 3 {
+                        "minecraft:smithing"
+                    } else {
+                        "minecraft:crafting"
+                    }
+                );
+                !inputs.iter().flatten().any(|stack| stack.damage == 1)
+            }
+        }
+
+        for (kind, result_slot, input_slot) in [
+            (Kind::Inventory, 0, 4),
+            (Kind::Crafting, 0, 9),
+            (Kind::Smithing, 3, 2),
+        ] {
+            with_menu(kind, |base, menu| {
+                let env = Env {
+                    slot_rules: Some(&TaggedIngredients),
+                    ..*base
+                };
+                menu.creative = false;
+                let (ingredient, output) = if kind == Kind::Smithing {
+                    menu.set_slot(&env, 0, stack("netherite_upgrade_smithing_template", 1));
+                    menu.set_slot(&env, 1, stack("diamond_sword", 1));
+                    ("netherite_ingot", "netherite_sword")
+                } else {
+                    ("oak_log", "oak_planks")
+                };
+                let mut blocked = stack(ingredient, 2).unwrap();
+                blocked.damage = 1;
+                menu.set_slot(&env, input_slot, Some(blocked.clone()));
+                assert!(menu.slot(result_slot).is_none());
+                // A previous result or another provider cannot let a click use these inputs.
+                menu.load_slot(result_slot, stack(output, 1));
+                menu.click(&env, result_slot as i32, 0, Input::QuickMove)
+                    .unwrap();
+                assert_eq!(menu.slot(input_slot), Some(&blocked));
+                assert!(menu.containers[PLAYER].iter().all(Option::is_none));
+                menu.set_slot(&env, input_slot, stack(ingredient, 2));
+                assert_eq!(
+                    menu.slot(result_slot).map(|stack| stack.item.as_ref()),
+                    Some(format!("minecraft:{output}").as_str())
+                );
+                menu.click(&env, result_slot as i32, 0, Input::QuickMove)
+                    .unwrap();
+                let remaining = menu.slot(input_slot).map_or(0, |stack| stack.count);
+                assert_eq!(remaining, u32::from(kind == Kind::Smithing));
+            });
+        }
     }
 
     /// A smithing result taken is recorded for `ItemSmithedEvent` while a mod

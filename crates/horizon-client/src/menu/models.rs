@@ -72,6 +72,17 @@ pub trait SlotRules {
         may_place: &mut bool,
         max_stack: &mut u32,
     );
+
+    /// Whether an otherwise valid player crafting or smithing result can be used.
+    fn recipe_result_allowed(
+        &self,
+        _player: Option<u128>,
+        _menu: &str,
+        _inputs: &[Option<ItemStack>],
+        _result: &ItemStack,
+    ) -> bool {
+        true
+    }
 }
 
 /// What `AnvilUpdateEvent` asks about once `createResult` made vanilla's

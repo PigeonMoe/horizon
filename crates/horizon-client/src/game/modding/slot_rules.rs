@@ -8,6 +8,34 @@ use crate::game::api_values::TryIntoApi;
 use horizon_client::menu::{SlotContext, SlotRules};
 
 impl SlotRules for Game<'_> {
+    fn recipe_result_allowed(
+        &self,
+        player: Option<u128>,
+        menu: &str,
+        inputs: &[Option<ItemStack>],
+        result: &ItemStack,
+    ) -> bool {
+        if !mod_api::__private::listened(mod_api::HookId::PlayerRecipeResult) {
+            return true;
+        }
+        let Ok(result) = result.try_into_api() else {
+            return true;
+        };
+        let inputs: Vec<_> = inputs
+            .iter()
+            .map(|slot| slot.as_ref().and_then(|stack| stack.try_into_api().ok()))
+            .collect();
+        let mut cancel = false;
+        self.native_player_recipe_result(mod_api::__private::PlayerRecipeResultCall {
+            player,
+            menu,
+            inputs: &inputs,
+            result: &result,
+            cancel: &mut cancel,
+        });
+        !cancel
+    }
+
     fn listens(&self, menu: &str) -> bool {
         mod_api::__private::has_part_hook(mod_api::HookId::MenuSlotRules)
             && mod_api::__private::menu_listens(mod_api::HookId::MenuSlotRules, menu)

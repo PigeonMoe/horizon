@@ -432,7 +432,11 @@ impl Game<'_> {
         let mut result = self
             .recipes()
             .find(&self.loop_context, &g.craft_grid, 2)
-            .map(|(_, stack)| stack);
+            .map(|(_, stack)| stack)
+            .filter(|stack| {
+                self.menu_env()
+                    .recipe_result_allowed("minecraft:crafting", &g.craft_grid, stack)
+            });
         if mod_api::__private::listened(mod_api::HookId::PrepareItemCraft) {
             let name = g.name.clone();
             self.native_prepare_item_craft(uuid, &name, None, &mut result);
