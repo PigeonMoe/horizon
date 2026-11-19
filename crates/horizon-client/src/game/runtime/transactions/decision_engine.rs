@@ -42,7 +42,7 @@ pub(super) struct KeptOwner {
 
 enum KeptValue {
     Inventory(Option<Box<EngineMenu>>),
-    Table(Option<(i32, i32, Box<EngineMenu>, [i32; 3])>),
+    Table(Option<crate::game::lan_crafting::OpenCraftingTable>),
     Machine(Option<(i32, Box<EngineMenu>)>),
     Station(Option<GuestStation>),
 }

@@ -657,6 +657,13 @@ pub trait PlayersBackendMut {
         entity: BlockEntityRef,
     ) -> Result<bool, BlockEntityError>;
     /// Side: server.
+    /// Opens the connected player's regular crafting table menu without an underlying block.
+    /// The 3-by-3 grid, recipe book, result and returning items on close follow the stock
+    /// crafting table menu. `container_opened` has no position and can refuse the open.
+    /// Returns the new window, or None for a stale, spectator, fake or refused player.
+    #[access(WorldOnly)]
+    fn player_open_crafting_menu(&mut self, player: PlayerRef) -> Option<i32>;
+    /// Side: server.
     /// Opens the connected player's own vanilla ender chest inventory without a block, as
     /// opening a portable ender chest does. The normal `container_opened` protection runs with
     /// no position before any menu is closed. All slot operations use the live ender chest.

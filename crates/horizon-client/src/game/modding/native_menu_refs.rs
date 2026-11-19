@@ -887,7 +887,7 @@ mod tests {
                 Box::new(horizon_client::menu::Menu::new(
                     horizon_client::menu::Kind::Crafting,
                 )),
-                [0; 3],
+                Some([0; 3]),
             ));
             assert_eq!(game.player_container_menu(player), None);
             assert_eq!(inventory.slot_count(game), None);

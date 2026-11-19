@@ -35,13 +35,15 @@ pub(super) enum MenuRemoval {
 pub(super) struct GuestCrafting {
     /// The inventory menu; its grid lives in the hub's guest.
     pub(super) inventory: MenuOwner<Option<Box<Menu>>>,
-    /// The open crafting table: its window, state id, menu and block.
-    pub(super) table: MenuOwner<Option<(i32, i32, Box<Menu>, [i32; 3])>>,
+    /// The crafting table window, state, menu and optional block position.
+    pub(super) table: MenuOwner<Option<OpenCraftingTable>>,
     /// The open furnace's or brewing stand's window and menu (`AbstractFurnaceMenu`,
     /// `BrewingStandMenu`); its slots live in the block entity and the hub's
     /// container menu keeps the client in sync.
     pub(super) machine: MenuOwner<Option<(i32, Box<Menu>)>>,
 }
+
+pub(super) type OpenCraftingTable = (i32, i32, Box<Menu>, Option<[i32; 3]>);
 
 /// The most containers `native_recipe_sources` adds to one placement.
 const MAX_RECIPE_SOURCES: usize = 64;
@@ -1131,23 +1133,28 @@ impl Game<'_> {
 
     /// The guest opened a crafting table (`CraftingTableBlock.getMenuProvider`).
     pub(super) fn lan_open_crafting(&mut self, conn: u32, pos: [i32; 3]) {
-        if !self.guest_may_open(conn, "minecraft:crafting", Some(pos)) {
-            return;
+        self.lan_open_crafting_menu(conn, Some(pos));
+    }
+
+    pub(super) fn lan_open_crafting_menu(
+        &mut self,
+        conn: u32,
+        pos: Option<[i32; 3]>,
+    ) -> Option<i32> {
+        if !self.guest_may_open(conn, "minecraft:crafting", pos) {
+            return None;
         }
-        // ServerPlayer.openMenu closes the menu that was open.
+        // ServerPlayer.openMenu returns the previous cursor and any grid items first.
         self.guest_close_all(conn);
-        let Some(host) = self.lan.as_mut() else {
-            return;
-        };
+        let host = self.lan.as_mut()?;
         let title = horizon_protocol::text::translatable("container.crafting", &[]);
-        let Some(window) = host.hub.open_window(conn, "minecraft:crafting", title) else {
-            return;
-        };
+        let window = host.hub.open_window(conn, "minecraft:crafting", title)?;
         let mut menu = Box::new(Menu::new(Kind::Crafting));
         menu.set_registry_id(Some("minecraft:crafting"));
         *host.menus.entry(conn).or_default().crafting.table = Some((window, 0, menu, pos));
         self.lan_send_table_content(conn);
         self.player_menu_opening(conn);
+        Some(window)
     }
 
     /// A click on the guest's crafting table window; false for other windows.
@@ -1195,7 +1202,7 @@ impl Game<'_> {
             let (uuid, name) = (guest.uuid, guest.name.clone());
             let mut result = menu.slot(0).cloned();
             let vanilla = result.clone();
-            self.native_prepare_item_craft(uuid, &name, Some(pos), &mut result);
+            self.native_prepare_item_craft(uuid, &name, pos, &mut result);
             if result != vanilla && !changed.contains(&0) {
                 changed.push(0);
             }
@@ -1233,7 +1240,8 @@ impl Game<'_> {
 
     /// `CraftingMenu.stillValid`: the block is still a crafting table and the
     /// guest is within reach of it.
-    pub(super) fn lan_table_valid(&self, g: &Guest, pos: [i32; 3]) -> bool {
+    pub(super) fn lan_table_valid(&self, g: &Guest, pos: Option<[i32; 3]>) -> bool {
+        let Some(pos) = pos else { return true };
         let name = &self
             .res
             .facts()

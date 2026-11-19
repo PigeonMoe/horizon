@@ -121,6 +121,15 @@ impl Game<'_> {
         self.open_menu(player.uuid(), rows, title, items, replace)
     }
 
+    pub(super) fn player_open_crafting_menu(&mut self, player: mod_api::PlayerRef) -> Option<i32> {
+        self.player_write_gate(player).ok()?;
+        let conn = self.native_conn(player.uuid())?;
+        if self.lan.as_ref()?.hub.guest(conn)?.spectator() {
+            return None;
+        }
+        self.lan_open_crafting_menu(conn, None)
+    }
+
     pub(super) fn player_open_ender_chest_menu(
         &mut self,
         player: mod_api::PlayerRef,
@@ -349,7 +358,7 @@ pub(super) fn open_menu_of(host: &LanHost, conn: u32) -> Option<(i32, &str, Opti
     let (window, menu, pos) = if let Some(gm) = &play.merchant {
         (gm.window, "minecraft:merchant", None)
     } else if let Some((window, _, _, pos)) = menus.and_then(|m| m.crafting.table.as_ref()) {
-        (*window, "minecraft:crafting", Some(*pos))
+        (*window, "minecraft:crafting", *pos)
     } else if let Some(st) = menus.and_then(|m| m.station.as_ref()) {
         (
             st.window,
@@ -548,7 +557,7 @@ mod tests {
         if super::super::native_entity_refs::tests::run_fresh_cases(
             "game::native_menus::tests::container_hooks_follow_actual_open_boundaries_without_a_tick",
             "HORIZON_CONTAINER_BOUNDARY_CASE",
-            &["same_tick", "replace", "mount", "guest"],
+            &["same_tick", "replace", "mount", "guest", "portable_craft"],
         ) {
             return;
         }
@@ -613,6 +622,64 @@ mod tests {
             game.lan_open_mount(1, u32::MAX);
             assert!(!game.lan_open_container(1, (0, 64, 0)));
             assert!(events.lock().unwrap().is_empty());
+            if case == "portable_craft" {
+                game.lan.as_mut().unwrap().play.entry(1).or_default();
+                let player = (&*game as &dyn ServerHost).player(123).unwrap();
+                assert_eq!(player.open_crafting_menu(game), Some(1));
+                assert_eq!(
+                    open_menu_of(game.lan.as_ref().unwrap(), 1),
+                    Some((1, "minecraft:crafting", None))
+                );
+                game.lan_tables_tick();
+                assert_eq!(
+                    open_menu_of(game.lan.as_ref().unwrap(), 1),
+                    Some((1, "minecraft:crafting", None))
+                );
+                let mut table = game
+                    .lan
+                    .as_mut()
+                    .unwrap()
+                    .menus
+                    .get_mut(&1)
+                    .unwrap()
+                    .crafting
+                    .table
+                    .take()
+                    .unwrap();
+                assert_eq!(table.2.slot_count(), 46);
+                table.2.set_slot(
+                    &game.menu_env(),
+                    1,
+                    Some(ItemStack::new("minecraft:stick", 2)),
+                );
+                *game
+                    .lan
+                    .as_mut()
+                    .unwrap()
+                    .menus
+                    .get_mut(&1)
+                    .unwrap()
+                    .crafting
+                    .table = Some(table);
+                game.lan_guest_packet(1, S::ContainerClose(play::ContainerClose { container: 1 }));
+                let player = (&*game as &dyn ServerHost).player(123).unwrap();
+                let inventory = player.inventory_slots(game).unwrap();
+                assert!(
+                    inventory
+                        .iter()
+                        .any(|(_, stack)| stack.item().id(game) == "minecraft:stick"
+                            && stack.count() == 2)
+                );
+                assert_eq!(open_menu_of(game.lan.as_ref().unwrap(), 1), None);
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    vec![
+                        (true, "minecraft:crafting".into()),
+                        (false, "minecraft:crafting".into())
+                    ]
+                );
+                return;
+            }
             if case == "mount" {
                 game.mobs.push(horizon_client::mobs::Mob::new(
                     31,
