@@ -101,8 +101,8 @@ impl GameLevel<'_> {
         self.fire_block_fade(dimension, pos, from, to, cancel);
     }
 
-    /// Precipitation is about to form or add to a block at `pos`. `from` and
-    /// `to` are block state IDs. Set `cancel` to keep the old state. Server-side.
+    /// Ice, snow or another natural formation is about to change `pos`.
+    /// Set `cancel` to keep the old block state. Server-side.
     #[inline(always)]
     pub(in crate::game) fn native_block_form(
         &self,

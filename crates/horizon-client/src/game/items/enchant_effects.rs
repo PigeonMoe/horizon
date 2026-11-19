@@ -1378,9 +1378,24 @@ impl Game<'_> {
                         f64::from(pos[2]) + 0.5 - at[2],
                     );
                     if x * x + z * z >= f64::from(radius * radius)
+                        || !self.world.is_loaded_at(pos[0], pos[1], pos[2])
                         || !self.disk_predicate(&effect["predicate"], pos, new)
-                        || self.level_set(pos, new).is_err()
                     {
+                        continue;
+                    }
+                    let from = self.world.block(pos[0], pos[1], pos[2]);
+                    let target = BlockPos::new(pos[0], pos[1], pos[2]);
+                    let formed = self.with_level(|blocks, level, ticks| {
+                        level.allow_block_form(target, from, new)
+                            && blocks.set_block(
+                                level,
+                                ticks,
+                                target,
+                                new,
+                                horizon_world::level::flags::UPDATE_ALL,
+                            )
+                    });
+                    if !formed || self.process_level_events().is_err() {
                         continue;
                     }
                     if event {
@@ -2106,6 +2121,10 @@ mod tests {
         assert_eq!(random.next_long(), LegacyRandom::new(7).next_long());
     }
 }
+
+#[cfg(test)]
+#[path = "enchant_effects/frost_walker_tests.rs"]
+mod frost_walker_tests;
 
 #[cfg(test)]
 mod impulse_rounding_tests {
