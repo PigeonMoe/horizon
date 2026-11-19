@@ -334,7 +334,7 @@ impl Game<'_> {
         if announced {
             super::log("INFO", &format!("System chat: {name} joined the game"));
         }
-        self.announce_login(uuid, name);
+        self.announce_login(uuid, name, false);
     }
 
     fn export_from(&mut self, uuid: u128, freeze: bool) -> Value {

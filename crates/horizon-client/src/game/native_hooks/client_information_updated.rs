@@ -23,8 +23,8 @@ impl Game<'_> {
 
     /// A placed player's login as the mods hear it: the client information
     /// they joined with (`client_information_updated`, from the defaults),
-    /// then `player_logged_in`.
-    pub(in crate::game) fn announce_login(&mut self, player: u128, name: &str) {
+    /// then `player_logged_in` and, on a fresh profile, `player_first_join`.
+    pub(in crate::game) fn announce_login(&mut self, player: u128, name: &str, first_join: bool) {
         if mod_api::__private::listened(mod_api::HookId::ClientInformationUpdated)
             && let Some(g) = self
                 .lan
@@ -43,6 +43,13 @@ impl Game<'_> {
             self.native_client_information_updated(player, entity_id, name, &old, &new);
         }
         self.native_player_logged_in(player, name);
+        if first_join {
+            self.native_player_first_join(player, name);
+        }
+    }
+
+    pub(in crate::game) fn native_player_first_join(&mut self, player: u128, name: &str) {
+        self.fire_player_first_join(player, name);
     }
 }
 
@@ -96,7 +103,7 @@ mod client_information_updated_tests {
                         (g.uuid, g.name.clone())
                     })
                     .unwrap();
-                game.announce_login(uuid, &name);
+                game.announce_login(uuid, &name, false);
                 // Vanilla's `ClientInformation.createDefault()`.
                 let defaults = ClientInfo {
                     language: "en_us".into(),
@@ -112,6 +119,59 @@ mod client_information_updated_tests {
                 assert_eq!(
                     *heard.lock().unwrap(),
                     [Some((defaults, 12, MainHand::Left)), None]
+                );
+            });
+        });
+    }
+
+    struct JoinLog(Arc<Mutex<Vec<(u128, bool)>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for JoinLog {
+        fn player_logged_in(&self, _: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
+            self.0.lock().unwrap().push((event.player, false));
+        }
+
+        fn player_first_join(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut mod_api::PlayerFirstJoinEvent<'_>,
+        ) {
+            assert!(host.player(event.player).is_some());
+            self.0.lock().unwrap().push((event.player, true));
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn only_a_fresh_placed_profile_fires_first_join_after_login() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: mod_api::Mods =
+            vec![ModEntry::new("join", Box::new(JoinLog(heard.clone())))].into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_guest_turn_tests::with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world_root = game.save.root.clone();
+                let host = game.lan.as_mut().unwrap();
+                horizon_client::lan::playerdata::save_now(
+                    host.hub.guest(13).unwrap(),
+                    &game.world_root,
+                )
+                .unwrap();
+                host.hub.guests.update_all(|guest| guest.placed = false);
+                for (conn, expected) in [(12, true), (13, false)] {
+                    let first = game.lan_guest_joined(conn, &[], [0.5, 64.0, 0.5]);
+                    assert_eq!(first, expected);
+                    let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+                    assert!(guest.placed);
+                    let (uuid, name) = (guest.uuid, guest.name.clone());
+                    game.announce_login(uuid, &name, first);
+                }
+                // This is the flag used when transfer has imported and saved a profile.
+                game.announce_login(12, "guest12", false);
+                assert_eq!(
+                    *heard.lock().unwrap(),
+                    [(12, false), (12, true), (13, false), (12, false)]
                 );
             });
         });

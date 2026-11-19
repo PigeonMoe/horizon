@@ -2238,7 +2238,7 @@ impl Game<'_> {
                         }
                         host.hub.former_names.insert(uuid, old.name);
                     }
-                    self.lan_guest_joined(conn, entities, spawn);
+                    let first_join = self.lan_guest_joined(conn, entities, spawn);
                     let host = self.lan.as_ref()?;
                     if self.is_dedicated_server()
                         && let Some(g) = host.hub.guest(conn)
@@ -2304,7 +2304,7 @@ impl Game<'_> {
                         .filter(|g| g.placed)
                         .map(|g| (g.uuid, g.name.clone()))
                     {
-                        self.announce_login(uuid, &name);
+                        self.announce_login(uuid, &name, first_join);
                     }
                 }
                 HostEvent::Left(mut guest) => {
@@ -2947,14 +2947,15 @@ impl Game<'_> {
         }
     }
 
+    /// Prepares and places the guest. Returns true when its profile was new.
     pub(super) fn lan_guest_joined(
         &mut self,
         conn: u32,
         entities: &[EntityState],
         spawn: [f64; 3],
-    ) {
+    ) -> bool {
         let Some(host) = self.lan.as_mut() else {
-            return;
+            return false;
         };
         let default_mode = host.hub.config.default_game_mode;
         let force = host.hub.config.force_game_mode;
@@ -2977,12 +2978,12 @@ impl Game<'_> {
             // the player not yet placed.
             (known, g.uuid, g.name.clone())
         }) else {
-            return;
+            return false;
         };
         self.initialize_server_player(uuid, conn);
         self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
         let Some(host) = self.lan.as_mut() else {
-            return;
+            return false;
         };
         if host
             .hub
@@ -2998,7 +2999,7 @@ impl Game<'_> {
             })
             .is_none()
         {
-            return;
+            return false;
         }
         if !known {
             // ServerPlayer.adjustSpawnLocation: a player new to the world
@@ -3011,7 +3012,7 @@ impl Game<'_> {
                 spawn
             };
             let Some(host) = self.lan.as_mut() else {
-                return;
+                return false;
             };
             if host
                 .hub
@@ -3027,12 +3028,12 @@ impl Game<'_> {
                 })
                 .is_none()
             {
-                return;
+                return false;
             }
         }
         // A server places each player in their own level (`PlayerList.placeNewPlayer`).
         let Some(host) = self.lan.as_mut() else {
-            return;
+            return false;
         };
         let back = self.dim;
         let Some((level, mut elsewhere)) = host.hub.update_guest(conn, |g| {
@@ -3043,7 +3044,7 @@ impl Game<'_> {
             }
             (level, elsewhere)
         }) else {
-            return;
+            return false;
         };
         self.load_guest_records(conn);
         // Collect the recipient's recipe types and filter their command tree.
@@ -3059,7 +3060,7 @@ impl Game<'_> {
             });
             elsewhere = back != overworld;
             if moved.is_none() || (elsewhere && self.enter_level(overworld).is_err()) {
-                return;
+                return false;
             }
         }
         let mut theirs = States::default();
@@ -3091,13 +3092,14 @@ impl Game<'_> {
             streaming: Some(&self.streaming),
         };
         let Some(host) = self.lan.as_mut() else {
-            return;
+            return false;
         };
         host.hub.place_new_player(conn, &mut ctx);
         self.bind_player_attachments(conn, false);
         if elsewhere && let Err(e) = self.enter_level(back) {
             log::error!("could not reopen {}: {e}", back.id());
         }
+        !known
     }
 
     /// Level events the game queued, for the guests (`process_level_events`).
