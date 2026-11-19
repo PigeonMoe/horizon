@@ -2,11 +2,12 @@
 //! (docs/modding/src/how-to/native-mods.md, "Entity and level handles", #7387): sneaking and
 //! sprinting, water and lava, fire and air, silence, invisibility and pose.
 //! Players and mobs have them all; the other kinds have the ones Horizon
-//! keeps for them (an armor stand's fire and invisibility, an item's fire),
+//! keeps for them (an armor stand's fire, invisibility, silence and gravity, an item's fire),
 //! and `None` for the rest, as for a stale handle. Secondary use also reads
 //! the local client's live semantic sneak state; the other flags are server-only.
 //! Ticks lived (`Entity.tickCount`) are read for mobs, items, orbs and minecarts.
 use super::{Game, commands::Target};
+use horizon_client::entity_nbt::flag;
 use horizon_client::mobs::{Mob, Species, sync};
 use horizon_client::motion::PlayerMotion;
 use horizon_client::pose::Pose;
@@ -368,12 +369,15 @@ impl Game<'_> {
             _ => Some(max_air(None)),
         }
     }
-    /// Whether the mob makes no sounds (`Entity.isSilent`, its `Silent`
-    /// tag); false for a player.
+    /// Whether a mob or armor stand is silent (`Entity.isSilent`); false for a player.
     pub(super) fn entity_is_silent(&self, entity: EntityRef) -> Option<bool> {
         match self.native_entity_body(entity)? {
             Body::Player(_) => Some(false),
             Body::Mob(m) => Some(m.silent),
+            Body::Other(Target::Stand(id)) => Some(
+                self.persist_raw(id)
+                    .is_some_and(|data| flag(data, "Silent")),
+            ),
             Body::Other(_) => None,
         }
     }
@@ -441,10 +445,15 @@ impl Game<'_> {
             _ => None,
         }
     }
-    /// Returns the mob's no-gravity flag (`Entity.isNoGravity`).
+    /// Returns the mob or armor stand's no-gravity flag (`Entity.isNoGravity`).
     pub(super) fn entity_no_gravity(&self, entity: EntityRef) -> Option<bool> {
         match self.native_entity_body(entity)? {
             Body::Mob(m) => Some(m.no_gravity),
+            Body::Other(Target::Stand(id)) => self
+                .armor_stands
+                .iter()
+                .find(|stand| stand.id == id)
+                .map(|stand| stand.no_gravity),
             _ => None,
         }
     }
@@ -623,6 +632,39 @@ mod tests {
             assert!(entity.set_no_gravity(game, true));
             assert!(game.mobs[0].no_gravity);
             assert!(game.mobs[0].needs_sync);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn armor_stand_reads_silence_and_gravity_from_its_actual_spawn_data() {
+        use super::super::native_entity_refs::tests::with_game;
+        use mod_api::{Compound, ServerHost, Tag};
+
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            for silent in [false, true] {
+                let nbt = Compound::from([
+                    ("Silent".into(), Tag::Byte(i8::from(silent))),
+                    ("NoGravity".into(), Tag::Byte(i8::from(silent))),
+                ]);
+                let host: &mut dyn ServerHost = game;
+                let id = host
+                    .summon(
+                        "minecraft:overworld",
+                        "minecraft:armor_stand",
+                        [0.5, 64.37, 0.5],
+                        nbt,
+                    )
+                    .unwrap();
+                let armor_stand = host.entity(id).unwrap();
+                assert_eq!(armor_stand.is_silent(host), Some(silent));
+                assert_eq!(armor_stand.no_gravity(host), Some(silent));
+            }
         });
     }
 

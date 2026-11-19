@@ -1302,6 +1302,7 @@ horizon-client game::native_entity_sounds::tests::game_and_entity_events_come_fr
 horizon-client game::native_entity_sounds::tests::only_a_spectator_player_is_a_spectator lib daily resources
 horizon-client game::native_entity_sounds::tests::play_sound_queues_at_the_entity_in_its_source lib daily resources
 horizon-client game::native_entity_sounds::tests::sound_sources_follow_the_entity_class lib daily resources
+horizon-client game::native_entity_state::tests::armor_stand_reads_silence_and_gravity_from_its_actual_spawn_data lib daily resources
 horizon-client game::native_entity_state::tests::fire_ticks_reads_supported_entities_and_refuses_others lib daily resources
 horizon-client game::native_entity_state::tests::mob_setters_update_stored_state lib daily resources
 horizon-client game::native_entity_state::tests::player_frozen_write_updates_server_state lib daily resources

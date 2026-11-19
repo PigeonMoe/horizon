@@ -500,7 +500,7 @@ pub trait EntitiesBackend {
     #[access(WorldOnly)]
     fn entity_max_air_supply(&self, entity: EntityRef) -> Option<i32>;
     /// Side: server.
-    /// Whether the mob makes no sounds (`Entity.isSilent`, its `Silent`
+    /// Whether a mob or armor stand is silent (`Entity.isSilent`, its `Silent`
     /// tag); false for a player.
     #[access(WorldOnly)]
     fn entity_is_silent(&self, entity: EntityRef) -> Option<bool>;
@@ -509,7 +509,7 @@ pub trait EntitiesBackend {
     #[access(WorldOnly)]
     fn entity_glowing(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
-    /// Returns the mob's no-gravity flag (`Entity.isNoGravity`).
+    /// Returns the mob or armor stand's no-gravity flag (`Entity.isNoGravity`).
     #[access(WorldOnly)]
     fn entity_no_gravity(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
