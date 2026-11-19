@@ -455,6 +455,14 @@ pub trait MobsBackendMut {
     /// no changes, for a negative duration, a stale handle or a non-animal.
     #[access(WorldOnly)]
     fn mob_set_love_ticks(&mut self, mob: MobRef, ticks: i32) -> bool;
+
+    /// Side: server.
+    /// `Sheep.setColor`: writes the wool's dye color in its vanilla ID
+    /// order, from white (0) through black (15). Leaves health, shearing
+    /// and the rest of the mob state intact. False for other mobs, a
+    /// stale handle, a client, or a color outside this range.
+    #[access(WorldOnly)]
+    fn mob_set_sheep_wool_color(&mut self, mob: MobRef, color: u8) -> bool;
     /// Side: server.
     /// `LookControl.setLookAt`, by the mob's `lookAt` path: the wanted
     /// position its look control rotates the head toward over the next

@@ -253,6 +253,11 @@ impl Game<'_> {
     /// Pickup delay is default (10 ticks). Hand Y pos is `eyeY - 0.3`.
     fn piglin_throw(&mut self, index: usize, target_pos: [f64; 3], stack: ItemStack) {
         let m = &self.mobs[index];
+        let mut replacement = None;
+        if mod_api::__private::listened(mod_api::HookId::PiglinThrowItem) {
+            self.native_piglin_throw_item(m.id, &stack, &mut replacement);
+        }
+        let stack = replacement.unwrap_or(stack);
         let from = [m.position.x, m.eye_y() - 0.3, m.position.z];
         let d = [
             target_pos[0] - m.position.x,
@@ -315,6 +320,7 @@ impl Game<'_> {
             if !self.entity_grief(m.id, griefing) {
                 continue;
             }
+            let piglin = m.id;
             let pos = m.position;
             // NearestItemSensor: the nearest wanted item within 32 that the piglin
             // sees (eye to eye); GoToWantedItem then walks to it within 9 blocks.
@@ -349,6 +355,13 @@ impl Game<'_> {
             if !close || e.pickup_delay > 0 {
                 self.mobs[i].extra.point = Some([e.position.x, e.position.y, e.position.z]);
                 continue;
+            }
+            if mod_api::__private::listened(mod_api::HookId::PiglinPickupPre) {
+                let mut canceled = false;
+                self.native_piglin_pickup_pre(piglin, &e.stack, &mut canceled);
+                if canceled {
+                    continue;
+                }
             }
             // Nuggets come whole, anything else one at a time.
             let (taken_item, id) = (e.clone(), self.mobs[i].id);

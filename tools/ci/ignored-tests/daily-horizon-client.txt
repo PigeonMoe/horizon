@@ -285,3 +285,5 @@ horizon-client game::native_player_break::tests::a_protected_natural_break_drops
 horizon-client game::native_player_break::tests::scripted_removal_obeys_break_protection_and_never_drops_vanilla_loot lib daily resources
 horizon-client game::server_travel::changed_dimension_tests::the_end_portal_resolves_before_moving_a_player_and_can_be_vetoed lib daily resources
 horizon-client game::block_entity_ticks::furnace_process_tests::stock_furnace_process_preserves_its_generation_and_native_inventory lib daily resources
+horizon-client game::native_is_piglin_currency_tests::piglin_mods_can_refuse_ground_items_and_replace_a_real_barter_throw lib daily resources
+horizon-client game::native_mob_refs::tests::a_sheep_wool_color_change_keeps_its_sheared_state_and_health lib daily resources

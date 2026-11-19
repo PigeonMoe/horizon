@@ -402,3 +402,86 @@ fn a_loved_coin_from_the_ground_is_admired_and_bartered_isolated() {
     });
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+struct PiglinDrops;
+
+#[mod_api::__subscriptions]
+impl Hooks for PiglinDrops {
+    fn piglin_pickup_pre(
+        &self,
+        _: &dyn Host,
+        event: &mut mod_api::PiglinPickupPreEvent<'_>,
+    ) -> mod_api::Flow {
+        let coin = event
+            .stack
+            .components()
+            .and_then(|patch| patch.as_nbt().get(&"minecraft:custom_data".into()))
+            .and_then(|entry| entry.get("coin"));
+        if coin == Some(&Tag::Byte(1)) {
+            mod_api::Flow::Cancel
+        } else {
+            mod_api::Flow::Continue
+        }
+    }
+
+    fn piglin_throw_item(
+        &self,
+        host: &dyn Host,
+        event: &mut mod_api::PiglinThrowItemEvent<'_>,
+    ) -> Option<mod_api::ItemStack> {
+        assert!(host.entity(event.piglin).is_some());
+        assert!(event.stack.count() > 0);
+        let dye = mod_api::Identifier::parse("minecraft:purple_dye").ok()?;
+        mod_api::ItemStack::new(host.item_key(&dye)?, 1)
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn piglin_mods_can_refuse_ground_items_and_replace_a_real_barter_throw() {
+    crate::game::in_own_process(
+        "game::native_is_piglin_currency_tests::piglin_mods_can_refuse_ground_items_and_replace_a_real_barter_throw",
+        piglin_mods_can_refuse_ground_items_and_replace_a_real_barter_throw_isolated,
+    );
+}
+
+fn piglin_mods_can_refuse_ground_items_and_replace_a_real_barter_throw_isolated() {
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+        "barter_physics",
+        Box::new(PiglinDrops),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        crate::game::api_values::install_parts(&mods).unwrap();
+        with_game(|game| {
+            field(game);
+            let p = add_piglin(game, 0.5, 0.5, None, false);
+            let blocked = horizon_items::item_data::parse_stack(
+                r#"{id:"minecraft:gold_ingot",count:3,components:{"minecraft:custom_data":{coin:1b}}}"#,
+            )
+            .unwrap()
+            .unwrap();
+
+            drop_beside(game, p, blocked.clone());
+            step(game, 3);
+            assert!(off_hand(game, p).is_none());
+            assert_eq!(game.dropped.len(), 1);
+            assert_eq!(game.dropped[0].stack, blocked);
+            assert!(mob(game, p).extra.inventory.is_empty());
+            game.dropped.clear();
+
+            drop_beside(game, p, ItemStack::new(GOLD_INGOT, 1));
+            assert_eq!(off_hand(game, p).unwrap().item.as_ref(), GOLD_INGOT);
+            assert!(game.dropped.is_empty());
+            step(game, 118);
+            assert_eq!(off_hand(game, p).unwrap().item.as_ref(), GOLD_INGOT);
+            assert!(game.dropped.is_empty());
+            step(game, 1);
+            assert!(off_hand(game, p).is_none());
+            assert_eq!(game.dropped.len(), 1);
+            let thrown = &game.dropped[0];
+            assert_eq!(thrown.stack, ItemStack::new("minecraft:purple_dye", 1));
+            assert!((thrown.position.y - mob(game, p).eye_y() + 0.3).abs() < 0.4);
+        });
+    });
+}

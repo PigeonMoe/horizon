@@ -640,6 +640,24 @@ impl Game<'_> {
         true
     }
 
+    pub(super) fn mob_set_sheep_wool_color(&mut self, mob: MobRef, color: u8) -> bool {
+        if color > 15 {
+            return false;
+        }
+        let Some(Target::Mob(id)) = self.native_entity_target(mob.entity()) else {
+            return false;
+        };
+        let Some(sheep) = self
+            .mobs
+            .iter_mut()
+            .find(|m| m.id == id && m.species() == Species::Sheep && m.alive() && !m.removed)
+        else {
+            return false;
+        };
+        sheep.extra.color = color;
+        true
+    }
+
     /// `LookControl.setLookAt`, by the mob's `lookAt` path: the wanted
     /// position its look control rotates the head toward over the next
     /// ticks. As `move_to`'s path, the mob's own AI — a goal's look, or a
@@ -1487,7 +1505,8 @@ mod tests {
             let mut expected = LegacyRandom::new(2026);
             let sound_delay = expected.next_int_bound(21).unwrap();
             let alert_delay = 80 + expected.next_int_bound(41).unwrap();
-            game.mobs.iter_mut().find(|m| m.id == 14).unwrap().random = horizon_core::random::EntityRandom::own(LegacyRandom::new(2026));
+            game.mobs.iter_mut().find(|m| m.id == 14).unwrap().random =
+                horizon_core::random::EntityRandom::own(LegacyRandom::new(2026));
             assert!(piglin.set_target(game, Some(other)));
             assert_eq!(piglin.target(game), Some(other));
             let first = state(game, 14);
@@ -1906,6 +1925,29 @@ mod tests {
                 saved.get("ConversionPlayer"),
                 Some(&Tag::IntArray(words.to_vec()))
             );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_sheep_wool_color_change_keeps_its_sheared_state_and_health() {
+        use horizon_core::nbt::Tag;
+        with_game(|game| {
+            let sheep = add_mob(game, 12, "minecraft:sheep");
+            let cow = add_mob(game, 13, "minecraft:cow");
+            let wild = game.mobs.iter_mut().find(|mob| mob.id == 12).unwrap();
+            wild.extra.sheared = true;
+            wild.extra.color = 0;
+            let health = wild.health;
+            assert!(!cow.set_sheep_wool_color(game, 10));
+            assert!(!sheep.set_sheep_wool_color(game, 16));
+            assert!(sheep.set_sheep_wool_color(game, 10));
+            let changed = game.mobs.iter().find(|mob| mob.id == 12).unwrap();
+            let saved =
+                horizon_client::entity_nbt::mob_to_nbt(changed, [0; 4], None, None, |_| None);
+            assert_eq!(changed.health, health);
+            assert_eq!(saved.get("Color"), Some(&Tag::Byte(10)));
+            assert_eq!(saved.get("Sheared"), Some(&Tag::Byte(1)));
         });
     }
 
