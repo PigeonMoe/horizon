@@ -29,13 +29,13 @@ impl Game<'_> {
         }));
         targets
     }
-    /// Paintings are additionally pickable by the arrow's hanging-entity
-    /// damage route. Keep other projectile families' target lists unchanged.
+    /// Paintings and living non-marker armor stands are additional Arrow targets.
+    /// Other projectile families continue using the shared target list.
     pub(super) fn arrow_targets<'a>(
         &self,
         targets: &'a [(Who, Aabb)],
     ) -> std::borrow::Cow<'a, [(Who, Aabb)]> {
-        if self.paintings.is_empty() {
+        if self.paintings.is_empty() && self.armor_stands.is_empty() {
             return std::borrow::Cow::Borrowed(targets);
         }
         let mut combined = targets.to_vec();
@@ -49,6 +49,12 @@ impl Game<'_> {
                 ),
             )
         }));
+        combined.extend(
+            self.armor_stands
+                .iter()
+                .filter(|stand| !stand.marker && stand.health > 0.0)
+                .map(|stand| (Who::Mob(stand.id), stand.bounds())),
+        );
         std::borrow::Cow::Owned(combined)
     }
 

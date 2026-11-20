@@ -259,7 +259,11 @@ fn armor_stand_sweeps_and_sourced_damage_check_the_living_target() {
     }
 
     crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
-        let mods = vec![mod_api::ModEntry::new("protect-stand", Box::new(ProtectStand))].into();
+        let mods = vec![mod_api::ModEntry::new(
+            "protect-stand",
+            Box::new(ProtectStand),
+        )]
+        .into();
         mod_platform::testing::with_mods(mods, || {
             with_game(|game| {
                 survival_player(game, 225020);
@@ -1013,5 +1017,162 @@ fn unsubscribed_damage_does_not_convert() {
             );
             super::api_values::damage::CONVERSIONS.with(|count| assert_eq!(count.get(), 0));
         })
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_flying_arrow_hurts_only_an_admitted_non_marker_armor_stand() {
+    use horizon_client::{
+        entities::ArmorStand,
+        mobs::Who,
+        projectiles::{Projectile, ProjectileKind},
+    };
+    use mod_api::{ArrowHitArmorStandPostEvent, Flow, ServerHost};
+
+    const PLAYER: u32 = 225040;
+    const DENIED: u32 = 225041;
+    const MARKER: u32 = 225042;
+    const ALLOWED: u32 = 225043;
+    struct Proof(Arc<Mutex<Vec<(u32, u32, [f64; 3], f32)>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Proof {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut mod_api::EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.target_kind, "minecraft:armor_stand");
+            assert_eq!(
+                event.player.map(|player| player.uuid),
+                Some(u128::from(PLAYER))
+            );
+            assert!(event.alive_kind);
+            if event.position[2] < 2.0 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn arrow_hit_armor_stand_post(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut ArrowHitArmorStandPostEvent<'_>,
+        ) {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.stand, event.owner, event.position, event.damage));
+        }
+    }
+
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
+        let mods = vec![mod_api::ModEntry::new(
+            "arrow-stand",
+            Box::new(Proof(heard.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                survival_player(game, PLAYER);
+                game.options.dedicated = Some(Vec::new());
+                game.build_registries();
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                for (id, x, z) in [(DENIED, 4., 0.5), (MARKER, 2., 4.5), (ALLOWED, 4., 4.5)] {
+                    let mut stand = ArmorStand::new(id, Vec3::new(x, 64., z), 0.);
+                    stand.marker = id == MARKER;
+                    game.armor_stands.push(stand);
+                }
+                for z in [0.5, 4.5] {
+                    let mut arrow = Projectile::new(
+                        ProjectileKind::Arrow {
+                            base_damage: 2.,
+                            critical: false,
+                            effect: None,
+                        },
+                        Vec3::new(1., 64.75, z),
+                        Some(Who::Player),
+                    );
+                    arrow.velocity = Vec3::new(4., 0., 0.);
+                    game.spawn_mob_projectile(arrow);
+                }
+                for _ in 0..3 {
+                    game.tick_projectiles_now().unwrap();
+                }
+                assert!(
+                    game.armor_stands
+                        .iter()
+                        .any(|stand| stand.id == DENIED && stand.health == 20.)
+                );
+                assert!(game.armor_stands.iter().any(|stand| stand.id == MARKER));
+                assert!(!game.armor_stands.iter().any(|stand| stand.id == ALLOWED));
+            })
+        });
+    });
+    let observed = heard.lock().unwrap();
+    let [(stand, owner, position, raw)] = &observed[..] else {
+        panic!("one admitted stand hit")
+    };
+    assert_eq!(
+        (*stand, *owner, *position),
+        (ALLOWED, PLAYER, [4., 64., 4.5])
+    );
+    assert!(raw.is_finite() && *raw > 0.);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_player_damage_permission_query_reports_the_actual_cross_dimension_shooter() {
+    struct Protect;
+    #[mod_api::__subscriptions]
+    impl Hooks for Protect {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut mod_api::EntityDamageTargetPreEvent<'_>,
+        ) -> mod_api::Flow {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            let player = event.player.expect("the online original shooter");
+            assert_eq!(
+                (player.uuid, player.dimension.as_str()),
+                (12, "minecraft:the_nether")
+            );
+            assert_eq!(player.position, [7., 69., 3.]);
+            mod_api::Flow::Cancel
+        }
+    }
+    crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
+        let mods = vec![mod_api::ModEntry::new(
+            "cross-world-splash",
+            Box::new(Protect),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            super::native_guest_turn_tests::with_guests(|game| {
+                game.build_registries();
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(12, |guest| {
+                        guest.dimension = "minecraft:the_nether".into();
+                        guest.position = [7., 69., 3.];
+                    })
+                    .unwrap();
+                let shooter = game.player(12).unwrap();
+                let id = 225044;
+                let pig = mob(game, id, "minecraft:pig");
+                game.mobs.push(pig);
+                let target = game.entity(id).unwrap();
+                assert_eq!(target.allows_player_damage(game, shooter), Some(false));
+                assert_eq!(game.mobs.last().unwrap().health, 10.);
+            });
+        });
     });
 }

@@ -639,9 +639,10 @@ pub trait EntitiesBackendMut {
     /// Checks a player's permission to damage `entity` through the PvP rule
     /// for player targets and `entity_damage_target_pre`. Invokes protection
     /// without inflicting damage, recording a hit, or changing its source.
-    /// None for an unavailable player or target, or a target outside the
-    /// player's resident level. A separate damage operation still runs its
-    /// own ordinary invulnerability and damage hooks.
+    /// The target must be in the level in place. An online player in another
+    /// dimension keeps their actual position and dimension in the protection
+    /// event. None for an unavailable player or target. A separate damage
+    /// operation still runs its own ordinary invulnerability and damage hooks.
     #[access(WorldOnly)]
     fn entity_allows_player_damage(&mut self, entity: EntityRef, player: PlayerRef)
     -> Option<bool>;

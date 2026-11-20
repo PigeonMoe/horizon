@@ -294,9 +294,6 @@ impl Game<'_> {
             return None;
         }
         let actor = self.damage_player_by_uuid(player.uuid())?;
-        if actor.dimension != self.dim.id() {
-            return None;
-        }
         if matches!(target, Target::Player | Target::Guest(_)) && !self.player_may_harm(None, None)
         {
             return Some(false);

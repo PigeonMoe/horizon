@@ -5505,6 +5505,66 @@ impl Game<'_> {
             );
             return Ok(());
         }
+        if matches!(p.kind, ProjectileKind::Arrow { .. })
+            && let Hit::Entity {
+                who: Who::Mob(id), ..
+            } = hit
+            && let Some(stand) = self.armor_stands.iter().find(|stand| stand.id == id)
+        {
+            let position = stand.position.components();
+            let mut arrow = p.clone();
+            let amount = self.shot_damage(&mut arrow, Some("minecraft:armor_stand"), Who::Mob(id));
+            let cause = p
+                .owner_uuid
+                .and_then(|uuid| {
+                    self.target_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid))
+                })
+                .filter(|&target| {
+                    // A nearby saved owner can resolve by UUID. An owner in a different
+                    // level must still be the same online player carried by the shot.
+                    self.target_level(target) == self.dim
+                        || p.owner == Some(Who::Player)
+                            && self.network_entity_id(target).is_some_and(|id| {
+                                self.player_entity_id_by_connection(p.guest) == Some(id)
+                            })
+                });
+            let owner = cause
+                .and_then(|target| self.network_entity_id(target))
+                .unwrap_or(0);
+            let hurt = self.command_damage_stand(id, "minecraft:arrow", cause);
+            if hurt && p.entity_type() == "minecraft:arrow" {
+                if mod_api::__private::listened(mod_api::HookId::ArrowHitArmorStandPost) {
+                    let weapon = p
+                        .arrow
+                        .as_ref()
+                        .and_then(|arrow| arrow.fired_from_weapon.as_ref())
+                        .try_into_api()
+                        .ok()
+                        .flatten();
+                    self.native_arrow_hit_armor_stand_post(
+                        mod_api::__private::ArrowHitArmorStandPostCall {
+                            dimension: self.dim.id(),
+                            projectile: p.id,
+                            owner: u32::try_from(owner).unwrap_or(0),
+                            stand: id,
+                            position,
+                            damage: amount,
+                            weapon: weapon.as_ref(),
+                        },
+                    );
+                }
+                self.note_arrow_contact(p, "damage");
+            }
+            self.finish_arrow_hit(
+                arrow,
+                if hurt {
+                    EntityHit::Hurt
+                } else {
+                    EntityHit::Refused
+                },
+            );
+            return Ok(());
+        }
         if p.arrow.is_some()
             && let Hit::Entity {
                 who: Who::Mob(id), ..
