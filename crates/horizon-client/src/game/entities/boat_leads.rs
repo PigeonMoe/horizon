@@ -150,6 +150,10 @@ impl Game<'_> {
                 Some(o) => Held::At(boat_state(o).1, false),
                 None => Held::Gone,
             },
+            Holder::Arrow(id) => match self.leash_arrow(id) {
+                Some(arrow) => Held::At(super::leads::arrow_state(arrow).1, false),
+                None => Held::Gone,
+            },
             Holder::Knot(pos) => {
                 let name = self
                     .res
@@ -304,7 +308,7 @@ impl Game<'_> {
                 } else {
                     self.mob_by_uuid(u)
                         .map(|id| (Holder::Mob(id), None))
-                        .or_else(|| self.boat_by_uuid(u).map(|id| (Holder::Boat(id), None)))
+                        .or_else(|| self.other_leash_anchor_by_uuid(u).map(|holder| (holder, None)))
                         .or_else(|| self.knot_by_uuid(u).map(|p| (Holder::Knot(p), None)))
                 }
             }
@@ -336,9 +340,9 @@ impl Game<'_> {
                 let uuid = self.mob_uuid(id);
                 leash::to_nbt(Holder::Mob(id), Some(uuid))
             }
-            (Some(Holder::Boat(id)), _) => {
+            (Some(holder @ (Holder::Boat(id) | Holder::Arrow(id))), _) => {
                 let uuid = self.uuid_for(id);
-                leash::to_nbt(Holder::Boat(id), Some(uuid))
+                leash::to_nbt(holder, Some(uuid))
             }
             (Some(h), _) => leash::to_nbt(h, player),
             (None, Some(Pending::Knot(p))) => leash::to_nbt(Holder::Knot(p), None),
@@ -586,7 +590,7 @@ impl Game<'_> {
                     .find(|(u, _)| Some(horizon_client::lan::playerdata::uuid_ints(*u)) == uuid)
                     .map(|&(_, id)| id)
             }
-            Holder::Mob(id) | Holder::Boat(id) => Some(id as i32),
+            Holder::Mob(id) | Holder::Boat(id) | Holder::Arrow(id) => Some(id as i32),
             Holder::Knot(p) => self.knot_ids.get(&p).map(|&id| id as i32),
         }
     }

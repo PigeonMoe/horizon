@@ -3078,7 +3078,12 @@ impl Game<'_> {
                     {
                         let b = self.res.behaviours();
                         self.level_set(pos, b.legacy_block(b.fluid(state)))?;
-                        self.post_block_game_event("minecraft:block_destroy", pos, Some(Who::Mob(mob)), Some(state));
+                        self.post_block_game_event(
+                            "minecraft:block_destroy",
+                            pos,
+                            Some(Who::Mob(mob)),
+                            Some(state),
+                        );
                     } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
                         m.extra.carried = None;
                     }
@@ -4239,9 +4244,15 @@ impl Game<'_> {
         // DamageSource.scalesWithDifficulty: a mob (or its projectile's
         // owner) caused the hit, not a player.
         let living_cause = attacker.or(owner).is_some_and(|id| {
-            !self.player.as_ref().is_some_and(|p| p.entity_id as u32 == id)
+            !self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.entity_id as u32 == id)
                 && !self.lan.as_ref().is_some_and(|host| {
-                    host.hub.guests.iter().any(|guest| guest.entity_id as u32 == id)
+                    host.hub
+                        .guests
+                        .iter()
+                        .any(|guest| guest.entity_id as u32 == id)
                 })
         });
         // The native damage hook's causing entity: the one given, or the
@@ -4540,6 +4551,8 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
+        let arrow_targets = self.arrow_targets(&targets);
+        let guest_arrow_targets = self.arrow_targets(&targets_guests);
         let border = Some(self.border.bounds());
         // Every guest, not only the ones a projectile can hit: a dead or
         // spectating guest's pearl or arrow still resolves to them.
@@ -4625,15 +4638,17 @@ impl Game<'_> {
                     }
                     let use_guests = (mob_shot || pvp) && has_guests;
                     let (keep, hit) = match (p.arrow.is_some(), use_guests, winds.is_empty()) {
-                        (true, false, true) => horizon_client::arrows::tick(p, &scene, pw.targets),
+                        (true, false, true) => {
+                            horizon_client::arrows::tick(p, &scene, &arrow_targets)
+                        }
                         (true, true, true) => {
-                            horizon_client::arrows::tick(p, &scene, pw_guests.targets)
+                            horizon_client::arrows::tick(p, &scene, &guest_arrow_targets)
                         }
                         (true, with_guests, false) => {
                             let mut targets = if with_guests {
-                                pw_guests.targets.to_vec()
+                                guest_arrow_targets.to_vec()
                             } else {
-                                pw.targets.to_vec()
+                                arrow_targets.to_vec()
                             };
                             targets.extend_from_slice(&winds);
                             horizon_client::arrows::tick(p, &scene, &targets)
@@ -5287,6 +5302,16 @@ impl Game<'_> {
         });
     }
 
+    fn arrow_decoration_actor(&self, arrow: &Projectile) -> Option<mod_api::DamagePlayer> {
+        let heard = mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre)
+            || mod_api::__private::listened(mod_api::HookId::HangingBreak);
+        if !heard {
+            return None;
+        }
+        let uuid = arrow.owner_uuid?;
+        self.damage_player_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid))
+    }
+
     /// A projectile's hit, landed in the attack of its owner.
     pub(super) fn projectile_hit(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
         let attack = self.projectile_attack(p);
@@ -5423,13 +5448,7 @@ impl Game<'_> {
             // AbstractArrow.onHitEntity on an item frame: spent when the
             // frame took the hit, turned back when a fixed one refused it.
             let by_player = p.owner == Some(Who::Player);
-            let player = if mod_api::__private::listened(mod_api::HookId::EntityDamageTargetPre) {
-                p.owner_uuid
-                    .map(horizon_client::lan::playerdata::ints_uuid)
-                    .and_then(|uuid| self.damage_player_by_uuid(uuid))
-            } else {
-                None
-            };
+            let player = self.arrow_decoration_actor(p);
             let hurt = self.projectile_hurts_frame(
                 id,
                 by_player,
@@ -5441,7 +5460,49 @@ impl Game<'_> {
             } else {
                 EntityHit::Refused
             };
+            if hurt {
+                let kind = if self.item_frames.iter().any(|f| f.id == id) {
+                    "damage"
+                } else {
+                    "hanging_break"
+                };
+                self.note_arrow_contact(p, kind);
+            }
             self.finish_arrow_hit(p.clone(), outcome);
+            return Ok(());
+        }
+        if p.arrow.is_some()
+            && let Hit::Entity {
+                who: Who::Mob(id), ..
+            } = hit
+            && let Some(index) = self.paintings.iter().position(|p| p.id == id)
+        {
+            let position = self.paintings[index].pos.map(|v| f64::from(v) + 0.5);
+            let player = self.arrow_decoration_actor(p);
+            let source = match p.owner {
+                Some(Who::Player) => Some(super::commands::Target::Player),
+                Some(Who::Mob(id)) => Some(super::commands::Target::Mob(id)),
+                None => None,
+            };
+            let broken = self.entity_target_damage_allowed(
+                "minecraft:painting",
+                position,
+                false,
+                player.as_ref(),
+            ) && self.paintings.iter().position(|p| p.id == id).is_some_and(
+                |current| self.break_painting_by(current, p.owner == Some(Who::Player), source),
+            );
+            if broken {
+                self.note_arrow_contact(p, "hanging_break");
+            }
+            self.finish_arrow_hit(
+                p.clone(),
+                if broken {
+                    EntityHit::Hurt
+                } else {
+                    EntityHit::Refused
+                },
+            );
             return Ok(());
         }
         if p.arrow.is_some()
@@ -5491,7 +5552,9 @@ impl Game<'_> {
                 p.owner.is_some(),
             );
             let hurt = !self.vehicle_refuses_projectile(p, id, &kind, damage_type)
-                && self.hurt_boat_result(i, amount, creative, super::nonliving_hurt::projectile_by(p)).is_some();
+                && self
+                    .hurt_boat_result(i, amount, creative, super::nonliving_hurt::projectile_by(p))
+                    .is_some();
             self.finish_arrow_hit(
                 arrow,
                 if hurt {
@@ -5727,7 +5790,10 @@ impl Game<'_> {
                     self.arrow_post_hurt_effects(p, who);
                 }
                 match (hurt, who) {
-                    (true, _) => self.finish_arrow_hit(arrow, EntityHit::Hurt),
+                    (true, _) => {
+                        self.note_arrow_contact(p, "damage");
+                        self.finish_arrow_hit(arrow, EntityHit::Hurt);
+                    }
                     // What the player took no damage from (a raised shield)
                     // keeps its fire as it was and turns the arrow back.
                     (false, Who::Player) => {

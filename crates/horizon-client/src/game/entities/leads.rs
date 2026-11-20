@@ -11,6 +11,7 @@ use horizon_client::{
     mobs::leash::{self, Holder, Pending},
     pose::Pose,
 };
+use horizon_core::geometry::Vec3;
 use horizon_core::nbt::Tag;
 use mod_api::LootDrops;
 
@@ -88,7 +89,7 @@ fn resolve_pending_leash(
     owner_uuid: Option<[i32; 4]>,
     is_guest: impl FnOnce([i32; 4]) -> bool,
     mob_by_uuid: impl FnOnce([i32; 4]) -> Option<u32>,
-    boat_by_uuid: impl FnOnce([i32; 4]) -> Option<u32>,
+    anchor_by_uuid: impl FnOnce([i32; 4]) -> Option<Holder>,
     knot_by_uuid: impl FnOnce([i32; 4]) -> Option<[i32; 3]>,
 ) -> Option<(Holder, Option<[i32; 4]>)> {
     match pending {
@@ -111,7 +112,7 @@ fn resolve_pending_leash(
         // leash knot included.
         Pending::Uuid(u) => mob_by_uuid(u)
             .map(|id| (Holder::Mob(id), None))
-            .or_else(|| boat_by_uuid(u).map(|id| (Holder::Boat(id), None)))
+            .or_else(|| anchor_by_uuid(u).map(|holder| (holder, None)))
             .or_else(|| knot_by_uuid(u).map(|p| (Holder::Knot(p), None))),
     }
 }
@@ -123,13 +124,13 @@ fn write_mob_leash_tag(
     pending: Option<Pending>,
     leash_player: Option<[i32; 4]>,
     level_player_uuid: Option<[i32; 4]>,
-    mob_uuid: impl FnOnce(u32) -> [i32; 4],
+    anchor_uuid: impl FnOnce(u32) -> [i32; 4],
 ) {
     let Tag::Compound(map) = tag else { return };
     map.remove(&"leash".into());
     let uuid = match (holder, pending) {
         (Some(Holder::Player), _) => leash_player.or(level_player_uuid).or(Some([0, 0, 0, 1])),
-        (Some(Holder::Mob(id) | Holder::Boat(id)), _) => Some(mob_uuid(id)),
+        (Some(Holder::Mob(id) | Holder::Boat(id) | Holder::Arrow(id)), _) => Some(anchor_uuid(id)),
         (_, Some(Pending::Uuid(u))) => Some(u),
         _ => None,
     };
@@ -144,7 +145,45 @@ fn write_mob_leash_tag(
     }
 }
 
+/// The bounding box and movement used by the ordinary leash solver.
+pub(super) fn arrow_state(
+    arrow: &horizon_client::projectiles::Projectile,
+) -> (u32, leash::HolderState) {
+    let position = arrow.position;
+    let width = f64::from(horizon_client::arrows::WIDTH);
+    let height = f64::from(horizon_client::arrows::HEIGHT);
+    (
+        arrow.id,
+        leash::HolderState {
+            position,
+            center: Vec3::new(position.x, position.y + height * 0.5, position.z),
+            width,
+            height,
+            yaw: arrow.yaw,
+            velocity: arrow.velocity,
+        },
+    )
+}
+
 impl Game<'_> {
+    pub(super) fn leash_arrow(&self, id: u32) -> Option<&horizon_client::projectiles::Projectile> {
+        if self.target_removed(&Target::Projectile(id)) {
+            return None;
+        }
+        self.creatures
+            .projectiles
+            .iter()
+            .find(|arrow| arrow.id == id && arrow.is_arrow())
+    }
+
+    pub(super) fn other_leash_anchor_by_uuid(&self, uuid: [i32; 4]) -> Option<Holder> {
+        self.boat_by_uuid(uuid).map(Holder::Boat).or_else(|| {
+            let uuid = mod_api::EntityUuid(horizon_client::lan::playerdata::ints_uuid(uuid));
+            let id = self.entity_by_uuid(uuid)?.id();
+            self.leash_arrow(id).map(|_| Holder::Arrow(id))
+        })
+    }
+
     /// The fences the live leads of the level in place hang on, mobs first,
     /// each once.
     fn lead_fences(&self) -> Vec<[i32; 3]> {
@@ -588,7 +627,7 @@ impl Game<'_> {
                     })
                 },
                 |u| self.mob_by_uuid(u),
-                |u| self.boat_by_uuid(u),
+                |u| self.other_leash_anchor_by_uuid(u),
                 |u| self.knot_by_uuid(u),
             );
             if let Some((Holder::Knot(_), _)) = holder {
@@ -625,7 +664,10 @@ impl Game<'_> {
             pending,
             leash_player,
             level_player_uuid,
-            |id| self.mob_uuid(id),
+            |id| match holder {
+                Some(Holder::Arrow(_)) => self.uuid_for(id),
+                _ => self.mob_uuid(id),
+            },
         );
     }
     #[cfg(test)]
@@ -862,6 +904,13 @@ impl Game<'_> {
                 a.z + (b.z - a.z) * alpha,
             )
         };
+        let arrow_end = |id| {
+            let arrow = self.leash_arrow(id)?;
+            Some(
+                lerp3(arrow.previous, arrow.position)
+                    + glam::DVec3::new(0.0, arrow.kind.eye_height() * 0.7, 0.0),
+            )
+        };
         let mut knots: Vec<[i32; 3]> = Vec::new();
         // EntityRenderer.extractRenderState: a leashed mob or boat (an
         // `AbstractBoat` is `Leashable` too) with where it hangs.
@@ -950,11 +999,15 @@ impl Game<'_> {
                         )
                     }
                     Holder::Mob(id) => {
-                        let Some(o) = self.mobs.iter().find(|o| o.id == id) else {
+                        if let Some(o) = self.mobs.iter().find(|o| o.id == id) {
+                            lerp3(o.previous, o.position)
+                                + glam::DVec3::new(0.0, o.eye_height() * 0.7, 0.0)
+                        } else if let Some(end) = self.remote.as_ref().and_then(|_| arrow_end(id)) {
+                            // A link may name an arrow before the client tracks it.
+                            end
+                        } else {
                             continue;
-                        };
-                        lerp3(o.previous, o.position)
-                            + glam::DVec3::new(0.0, o.eye_height() * 0.7, 0.0)
+                        }
                     }
                     Holder::Boat(id) => {
                         let Some(o) = self.boats.iter().find(|o| o.id == id) else {
@@ -962,6 +1015,10 @@ impl Game<'_> {
                         };
                         lerp3(o.previous, o.position) + boat_hold()
                     }
+                    Holder::Arrow(id) => match arrow_end(id) {
+                        Some(end) => end,
+                        None => continue,
+                    },
                     Holder::Player => {
                         let Some(p) = self.player.as_ref() else {
                             continue;
@@ -1474,3 +1531,7 @@ mod attach_tests {
 #[cfg(test)]
 #[path = "tests/leash_knot_uuid_tests.rs"]
 mod leash_knot_uuid_tests;
+
+#[cfg(test)]
+#[path = "leads/arrow_tests.rs"]
+mod arrow_tests;

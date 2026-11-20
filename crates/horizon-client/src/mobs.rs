@@ -3246,8 +3246,8 @@ pub struct MobWorld<'a> {
     pub live_mobs: Option<&'a dyn LiveMobs>,
     /// The separately simulated dragon, visible to revenge and melee goals.
     pub dragon: Option<(u32, TargetInfo)>,
-    /// The boats and rafts a lead can hang on (`Holder::Boat`): id and state.
-    pub leash_boats: &'a [(u32, leash::HolderState)],
+    /// The boats, rafts and arrows that hold leads: id and state.
+    pub leash_anchors: &'a [(u32, leash::HolderState)],
     /// `others` by position, when the caller keeps one (the mob ticks).
     pub others_grid: Option<&'a seen_grid::SeenGrid>,
     /// Where each id stands in `others`, when the caller keeps one.

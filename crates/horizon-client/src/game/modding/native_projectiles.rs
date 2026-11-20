@@ -158,6 +158,55 @@ impl Game<'_> {
         }
     }
 
+    pub(in crate::game) fn note_arrow_contact(&mut self, arrow: &Projectile, contact: &str) {
+        if arrow.entity_type() != "minecraft:arrow" || !self.hears_arrow_contacts() {
+            return;
+        }
+        let owner = self.native_impact_owner(arrow);
+        self.native_arrow_contact_post(mod_api::__private::ArrowContactPostCall {
+            dimension: self.dim.id(),
+            projectile: arrow.id,
+            owner,
+            at: arrow.position.components(),
+            contact,
+        });
+    }
+
+    pub(in crate::game) fn hears_arrow_contacts(&self) -> bool {
+        self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::ArrowContactPost)
+    }
+
+    /// A real portal swept the arrow's bounds before the travel pass. False
+    /// when the callback removed it and no portal state should be installed.
+    pub(in crate::game) fn note_arrow_portal_contact(&mut self, id: u32) -> bool {
+        if !self.hears_arrow_contacts() {
+            return true;
+        }
+        let Some(arrow) = self
+            .creatures
+            .projectiles
+            .iter()
+            .find(|p| p.id == id && p.entity_type() == "minecraft:arrow")
+        else {
+            return true;
+        };
+        let Some(entity) = self.entity(id) else {
+            // Logical discard precedes the projectile list's physical sweep.
+            return false;
+        };
+        let owner = self.native_impact_owner(arrow);
+        let at = arrow.position.components();
+        self.native_arrow_contact_post(mod_api::__private::ArrowContactPostCall {
+            dimension: self.dim.id(),
+            projectile: id,
+            owner,
+            at,
+            contact: "portal",
+        });
+        self.entity(id) == Some(entity)
+    }
+
     /// The entity id of the player who threw something: the guest `guest`, or
     /// the host.
     fn native_thrower(&self, guest: Option<u32>) -> u32 {
@@ -167,7 +216,7 @@ impl Game<'_> {
                 .into_iter()
                 .find(|&(c, _)| c == conn)
                 .map_or(0, |(_, id)| id),
-            None => 0,
+            None => self.player_entity_id_by_connection(None).unwrap_or(0) as u32,
         }
     }
 
@@ -247,7 +296,12 @@ impl Game<'_> {
         if self.lan_guest_entities().iter().any(|&(_, e)| e == id) {
             return (id, "minecraft:player".into());
         }
-        (id, String::new())
+        let kind = self
+            .entity(id)
+            .and_then(|entity| self.entity_kind(entity))
+            .map(|key| key.id(self))
+            .unwrap_or_default();
+        (id, kind)
     }
 
     /// `EntityTeleportEvent.EnderPearl` for `owner`'s pearl that hit `hit`:

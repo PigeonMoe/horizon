@@ -348,6 +348,10 @@ impl Game<'_> {
                 }
                 LeashHolder::Entity(entity)
             }
+            Some(Holder::Arrow(id)) => {
+                self.leash_arrow(id)?;
+                LeashHolder::Entity(self.entity(id)?)
+            }
             Some(Holder::Player) => LeashHolder::Entity(self.player(ints_uuid(player?))?.entity()),
         })
     }
@@ -377,7 +381,7 @@ impl Game<'_> {
     /// of any other holder and gets off its vehicle, where a mod's `mob_ride` lets it. As
     /// there, neither `canBeLeashed` nor the distance is asked: a holder too far away snaps
     /// the lead on the next tick. False for a stale handle, the entity itself, a holder other
-    /// than a player, mob or boat, or an entity that takes no lead.
+    /// than a player, mob, boat or arrow, or an entity that takes no lead.
     pub(super) fn entity_leash_to(&mut self, entity: EntityRef, holder: EntityRef) -> bool {
         let (Some(target), Some(by)) = (
             self.native_entity_target(entity),
@@ -391,6 +395,7 @@ impl Game<'_> {
         let (holder, player) = match by {
             Target::Mob(id) => (Holder::Mob(id), None),
             Target::Boat(id) => (Holder::Boat(id), None),
+            Target::Projectile(id) if self.leash_arrow(id).is_some() => (Holder::Arrow(id), None),
             Target::Player | Target::Guest(_) => match self.native_player_facts(by) {
                 Some(facts) => (Holder::Player, Some(facts.uuid)),
                 None => return false,

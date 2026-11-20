@@ -1877,7 +1877,7 @@ impl Game<'_> {
                         .map(|g| g.entity_id),
                     None => player_entity(),
                 },
-                Holder::Mob(id) | Holder::Boat(id) => Some(id as i32),
+                Holder::Mob(id) | Holder::Boat(id) | Holder::Arrow(id) => Some(id as i32),
                 Holder::Knot(p) => self.knot_ids.get(&p).map(|&id| id as i32),
             });
             let idle = idle_at(m.position);

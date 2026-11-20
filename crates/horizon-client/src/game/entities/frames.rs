@@ -433,7 +433,7 @@ impl Game<'_> {
             self.attack_ticks = 0;
             return true;
         }
-        self.hit_frame(i, true, self.creative, None);
+        self.hit_frame(i, true, self.creative, None, false);
         true
     }
     /// `ItemFrame.hurtServer` from a projectile (`AbstractArrow.onHitEntity`,
@@ -457,22 +457,32 @@ impl Game<'_> {
         if !self.entity_target_damage_allowed(frame.kind(), at, false, player) {
             return false;
         }
-        if self.item_frames[i].fixed {
-            if !creative {
-                return false;
-            }
-            self.item_frames[i].item = None;
+        let fixed = self.item_frames[i].fixed;
+        if fixed && !creative {
+            return false;
         }
-        self.hit_frame(i, by_player, creative, player.map(|player| player.uuid));
-        true
+        self.hit_frame(
+            i,
+            by_player,
+            creative,
+            player.map(|player| player.uuid),
+            fixed,
+        )
     }
     /// The non-fixed part of `ItemFrame.hurtServer`: a filled frame gives its
     /// item up (`shouldDamageDropItem`), an empty one breaks
     /// (`BlockAttachedEntity.hurtServer`). `by_player`: the damage source's
     /// entity is the acting player, `creative` when they have infinite
     /// materials (no drops).
-    fn hit_frame(&mut self, mut i: usize, by_player: bool, creative: bool, actor: Option<u128>) {
-        let with_frame = self.item_frames[i].item.is_none();
+    fn hit_frame(
+        &mut self,
+        mut i: usize,
+        by_player: bool,
+        creative: bool,
+        actor: Option<u128>,
+        forced: bool,
+    ) -> bool {
+        let with_frame = forced || self.item_frames[i].item.is_none();
         let entity_id = self.item_frames[i].id;
         if with_frame {
             let (kind, pos) = (self.item_frames[i].kind(), self.item_frames[i].pos);
@@ -482,15 +492,15 @@ impl Game<'_> {
                 self.hanging_break_cancelled(kind, pos, by_player)
             };
             if denied {
-                return;
+                return false;
             }
             // The hook had `&mut self`: find the frame again by id.
             let Some(now) = self.item_frames.iter().position(|f| f.id == entity_id) else {
-                return;
+                return false;
             };
             i = now;
-            if self.item_frames[i].item.is_some() {
-                return;
+            if !forced && self.item_frames[i].item.is_some() {
+                return false;
             }
         }
         let old_item = self.item_frames[i]
@@ -543,6 +553,7 @@ impl Game<'_> {
                 rotation.rem_euclid(8) as u8,
             );
         }
+        true
     }
     /// `ItemFrame.setItem(stack, true)`: keeps one item, plays the add sound
     /// for a non-empty stack and updates the comparators.

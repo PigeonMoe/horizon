@@ -29,6 +29,29 @@ impl Game<'_> {
         }));
         targets
     }
+    /// Paintings are additionally pickable by the arrow's hanging-entity
+    /// damage route. Keep other projectile families' target lists unchanged.
+    pub(super) fn arrow_targets<'a>(
+        &self,
+        targets: &'a [(Who, Aabb)],
+    ) -> std::borrow::Cow<'a, [(Who, Aabb)]> {
+        if self.paintings.is_empty() {
+            return std::borrow::Cow::Borrowed(targets);
+        }
+        let mut combined = targets.to_vec();
+        combined.extend(self.paintings.iter().map(|painting| {
+            let (lo, hi) = painting.bounds();
+            (
+                Who::Mob(painting.id),
+                Aabb::new(
+                    Vec3::new(lo[0], lo[1], lo[2]),
+                    Vec3::new(hi[0], hi[1], hi[2]),
+                ),
+            )
+        }));
+        std::borrow::Cow::Owned(combined)
+    }
+
     /// What a projectile can hit: the mobs, the player, the dragon's parts and
     /// the End crystals (under reserved ids, game/dragon.rs), and the vehicles
     /// and item frames.

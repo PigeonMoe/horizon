@@ -1116,6 +1116,9 @@ impl Game<'_> {
         });
         self.portals.sections = portal_sections;
         for (id, pos, delay) in inside {
+            if !self.note_arrow_portal_contact(id) {
+                continue;
+            }
             self.portals
                 .entities
                 .entry(id)

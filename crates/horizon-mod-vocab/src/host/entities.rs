@@ -849,7 +849,7 @@ pub trait EntitiesBackendMut {
     /// of any other holder and gets off its vehicle, where a mod's `mob_ride` lets it. As
     /// there, neither `canBeLeashed` nor the distance is asked: a holder too far away snaps
     /// the lead on the next tick. False for a stale handle, the entity itself, a holder other
-    /// than a player, mob or boat, or an entity that takes no lead.
+    /// than a player, mob, boat or arrow, or an entity that takes no lead.
     #[access(WorldOnly)]
     fn entity_leash_to(&mut self, entity: EntityRef, holder: EntityRef) -> bool;
     /// Side: server.

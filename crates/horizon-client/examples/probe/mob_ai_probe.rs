@@ -1227,7 +1227,7 @@ pub fn main() -> horizon_client::Result<()> {
                     others: $snapshot,
                     live_mobs: None,
                     dragon: None,
-                    leash_boats: &[],
+                    leash_anchors: &[],
                     who_lookup: None,
                     foreign: None,
                     others_grid: $grid,

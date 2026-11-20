@@ -3737,8 +3737,7 @@ impl Game<'_> {
             }
             C::SetPassengers(p) => self.remote_set_passengers(p.vehicle, &p.passengers),
             // ClientPacketListener.handleEntityLinkPacket: who holds a mob's
-            // lead (this player, another player, a mob or a fence knot), for
-            // the rope.
+            // lead (a player, an entity or a fence knot), for the rope.
             C::SetEntityLink(p) => {
                 let me = self.remote.as_ref().map(|r| r.entity_id);
                 use horizon_client::mobs::leash::Holder;
@@ -3751,6 +3750,9 @@ impl Game<'_> {
                         // arrives (game/network/remote_objects.rs).
                         None if self.boats.iter().any(|b| b.id == d as u32) => {
                             Some(Holder::Boat(d as u32))
+                        }
+                        None if self.leash_arrow(d as u32).is_some() => {
+                            Some(Holder::Arrow(d as u32))
                         }
                         None => Some(Holder::Mob(d as u32)),
                     },

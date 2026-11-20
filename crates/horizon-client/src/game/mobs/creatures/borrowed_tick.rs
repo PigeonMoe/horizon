@@ -174,10 +174,17 @@ impl Game<'_> {
                 let nearest = super::super::natural_spawning::NearestPlayers::new(&players);
                 // All but the snapshot is the same for every mob of the tick, so
                 // build it once: the player view and the teams scan every UUID.
-                self.leash_boats = self
+                self.leash_anchors = self
                     .boats
                     .iter()
                     .map(super::super::boat_leads::boat_state)
+                    .chain(self.creatures.projectiles.iter().filter_map(|arrow| {
+                        (arrow.is_arrow()
+                            && !self.target_removed(&super::super::commands::Target::Projectile(
+                                arrow.id,
+                            )))
+                        .then(|| super::super::leads::arrow_state(arrow))
+                    }))
                     .collect();
                 let mut base = self.mob_world_base(&[]);
                 // Install the shared observer only on the per-mob view below; keeping the

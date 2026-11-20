@@ -1655,6 +1655,38 @@ impl Game<'_> {
                 .or_default()
                 .enter_with_delay(pos, delay);
         }
+        // The Paper contact belongs to the gateway's inside-block check,
+        // even when a mod removes the arrow before it can start any travel.
+        if self.hears_arrow_contacts() {
+            let arrows: Vec<_> = self
+                .creatures
+                .projectiles
+                .iter()
+                .filter(|p| p.entity_type() == "minecraft:arrow" && ticks(p.position))
+                .filter(|p| {
+                    p.previous != p.position && p.arrow.as_ref().is_some_and(|a| !a.no_physics)
+                })
+                .filter_map(|p| {
+                    let (width, height) = super::nether_portal::projectile_box(p);
+                    horizon_client::end_gateway::swept_gateway(
+                        p.previous,
+                        p.position,
+                        width,
+                        height,
+                        |pos| is_gateway(self, pos),
+                    )
+                    .map(|pos| (p.id, [pos.x, pos.y, pos.z]))
+                })
+                .collect();
+            for (id, pos) in arrows {
+                if self.gateway_available(pos)
+                    && self.entity(id).is_some()
+                    && !self.note_arrow_portal_contact(id)
+                {
+                    self.gateway_enter(pos);
+                }
+            }
+        }
         // ThrowableProjectile applies the gateway's block effect before Entity.tick.
         self.handle_end_gateway_portals_phase(true);
     }

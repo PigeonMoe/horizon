@@ -237,7 +237,7 @@ impl GoalCx<'_, '_> {
         Some(match mob.extra.leash {
             None => mod_api::LeashHolder::Unleashed,
             Some(Holder::Knot(pos)) => mod_api::LeashHolder::Knot(pos),
-            Some(Holder::Mob(id) | Holder::Boat(id)) => mod_api::LeashHolder::Entity(
+            Some(Holder::Mob(id) | Holder::Boat(id) | Holder::Arrow(id)) => mod_api::LeashHolder::Entity(
                 self.lookup_entity(id).or_else(|| self.host.entity(id))?,
             ),
             Some(Holder::Player) => {

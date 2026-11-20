@@ -37,6 +37,8 @@ pub enum Holder {
     Mob(u32),
     /// A boat or raft (`AbstractBoat` is `Leashable`, and any entity can be a holder).
     Boat(u32),
+    /// An arrow projectile holding the other end of a lead.
+    Arrow(u32),
     /// A `LeashFenceKnotEntity` on the fence at this block.
     Knot([i32; 3]),
 }
@@ -45,7 +47,7 @@ impl Holder {
         match self {
             Holder::Player => Some(Who::Player),
             Holder::Mob(id) => Some(Who::Mob(id)),
-            Holder::Boat(_) | Holder::Knot(_) => None,
+            Holder::Boat(_) | Holder::Arrow(_) | Holder::Knot(_) => None,
         }
     }
 }
@@ -130,10 +132,10 @@ pub fn holder_state(w: &MobWorld, holder: Holder) -> Option<HolderState> {
                 velocity: s.velocity,
             })
         }
-        Holder::Boat(id) => w
-            .leash_boats
+        Holder::Boat(id) | Holder::Arrow(id) => w
+            .leash_anchors
             .iter()
-            .find(|(boat, _)| *boat == id)
+            .find(|(anchor, _)| *anchor == id)
             .map(|(_, state)| *state),
         Holder::Knot(pos) => {
             let fence = w.has_tag("minecraft:fences", w.block_name(pos[0], pos[1], pos[2]));

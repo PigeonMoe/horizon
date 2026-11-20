@@ -1013,7 +1013,7 @@ fn run_test_world(
         others,
         live_mobs: None,
         dragon: None,
-        leash_boats: &[],
+        leash_anchors: &[],
         who_lookup: None,
         foreign: None,
         others_grid: None,

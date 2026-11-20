@@ -32,7 +32,7 @@ impl Game<'_> {
             others,
             live_mobs: None,
             dragon: self.dragon_target(),
-            leash_boats: &self.leash_boats,
+            leash_anchors: &self.leash_anchors,
             others_grid: None,
             others_index: None,
             passenger_objects: &[],

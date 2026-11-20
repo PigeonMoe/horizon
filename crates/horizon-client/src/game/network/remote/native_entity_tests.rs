@@ -388,3 +388,81 @@ impl super::Remote {
         self.tab_players.insert(self.profile, me);
     }
 }
+
+#[test]
+#[ignore = "daily"]
+fn an_arrow_lead_renders_for_both_holder_packet_orders() {
+    crate::game::native_entity_refs::tests::with_client_game(|game| {
+        let (pipe, _server) = horizon_protocol::connection::Pipe::pair();
+        game.connect_local(pipe, "Steve").unwrap();
+        let builtin = game.remote.as_ref().unwrap().builtin.clone();
+        let entity_type = builtin.get("minecraft:entity_type").unwrap();
+        game.handle_packet(C::Login(play::Login {
+            player_id: 7,
+            hardcore: false,
+            levels: vec!["minecraft:overworld".into()],
+            max_players: 20,
+            chunk_radius: 8,
+            simulation_distance: 8,
+            reduced_debug_info: false,
+            show_death_screen: true,
+            limited_crafting: false,
+            spawn: spawn("minecraft:overworld"),
+            online_mode: false,
+            enforces_secure_chat: false,
+        }))
+        .unwrap();
+        game.handle_packet(C::PlayerPosition(play::PlayerPosition {
+            teleport: 1,
+            position: [0.5, 64.0, 0.5],
+            delta: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            relatives: 0,
+        }))
+        .unwrap();
+        let add = |id, kind, x| {
+            C::AddEntity(play::AddEntity {
+                id,
+                uuid: id as u128,
+                kind: entity_type.id(kind).unwrap(),
+                position: [x, 64.0, 5.5],
+                velocity: [0.0; 3],
+                pitch: 0,
+                yaw: 0,
+                head_yaw: 0,
+                data: 0,
+            })
+        };
+        let link = |dest| C::SetEntityLink(play::SetEntityLink { source: 21, dest });
+        let draw_leash = |game: &Game<'_>| {
+            let mut geometry = Vec::new();
+            game.leash_geometry(glam::DVec3::ZERO, 0.5, &mut geometry);
+            geometry
+        };
+        game.handle_packet(add(21, "minecraft:bat", 4.5)).unwrap();
+        game.handle_packet(link(31)).unwrap();
+        assert!(draw_leash(game).is_empty(), "the holder is not tracked yet");
+        game.handle_packet(add(31, "minecraft:arrow", 8.5)).unwrap();
+        let rope = draw_leash(game);
+        assert!(!rope.is_empty());
+        assert!(
+            rope.iter()
+                .any(|vertex| vertex.pos[0] > 8.45 && (vertex.pos[1] - 64.091).abs() < 0.05),
+            "the rope reaches the arrow at 0.7 of its 0.13-block eye height"
+        );
+
+        game.handle_packet(link(0)).unwrap();
+        assert!(draw_leash(game).is_empty());
+        game.handle_packet(add(32, "minecraft:arrow", 10.5))
+            .unwrap();
+        game.handle_packet(link(32)).unwrap();
+        assert!(draw_leash(game).iter().any(|vertex| vertex.pos[0] > 10.4));
+        game.handle_packet(C::RemoveEntities(play::RemoveEntities { ids: vec![32] }))
+            .unwrap();
+        assert!(
+            draw_leash(game).is_empty(),
+            "untracking the holder hides its rope"
+        );
+    });
+}
