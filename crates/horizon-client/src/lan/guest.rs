@@ -1323,6 +1323,7 @@ fn builtin_component(
     use horizon_protocol::buf::Writer;
     let mut w = Writer::new();
     match name {
+        "minecraft:profile" => return crate::item_sync::profile_component(value),
         "minecraft:attribute_modifiers" => {
             return crate::item_sync::attribute_modifiers::encode(value, ids);
         }
@@ -2060,6 +2061,7 @@ pub(super) fn network_stack(
         }
         // These built-ins use their own stream codecs, not the custom NBT route.
         for (name, kind) in [
+            ("minecraft:profile", horizon_protocol::item::component::PROFILE),
             (
                 "minecraft:provides_trim_material",
                 horizon_protocol::item::component::PROVIDES_TRIM_MATERIAL,
@@ -2604,6 +2606,26 @@ mod tests {
     use horizon_core::nbt::Tag;
     use horizon_protocol::buf::{Codec, Reader, Writer};
     use horizon_protocol::item::{Component, component};
+
+    #[test]
+    fn a_saved_player_head_keeps_its_texture_property_on_the_wire() {
+        use horizon_core::nbt::parse_snbt;
+        let (profile, _) = parse_snbt(
+            r#"{id:[I;1,2,3,4],properties:[{name:"textures",value:"original-skin"}]}"#,
+        )
+        .unwrap();
+        let mut head = ItemStack::new("minecraft:player_head", 1);
+        head.data_mut().set_other("minecraft:profile", Some(profile));
+        let stack = network_stack(&|_| 1, &|_, _| None, &head);
+        let mut writer = Writer::new();
+        stack.write(&mut writer);
+        let decoded = Stack::read(&mut Reader::new(&writer.data)).unwrap();
+        let Some(Component::Profile(profile)) = decoded.component(component::PROFILE) else {
+            panic!("missing profile component");
+        };
+        assert_eq!(profile.id, Some(0x0000_0001_0000_0002_0000_0003_0000_0004));
+        assert_eq!(profile.properties, [("textures".into(), "original-skin".into(), None)]);
+    }
 
     /// A consumable a client made goes out as `Consumable.STREAM_CODEC`. A byte
     /// flag is `Codec.BOOL` (non-zero is true). An unknown animation is refused.

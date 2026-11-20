@@ -438,7 +438,7 @@ fn profile_nbt(p: &horizon_protocol::entity_data::Profile) -> Tag {
 }
 /// `ResolvableProfile.CODEC` read back: the compound `profile_nbt` writes, or a
 /// bare player name (`Codec.withAlternative(FULL_CODEC, PLAYER_NAME, ...)`).
-fn profile_from_nbt(tag: &Tag) -> Option<horizon_protocol::entity_data::Profile> {
+pub(crate) fn profile_from_nbt(tag: &Tag) -> Option<horizon_protocol::entity_data::Profile> {
     if let Tag::String(name) = tag {
         return Some(horizon_protocol::entity_data::Profile {
             name: Some(name.to_string_lossy()),

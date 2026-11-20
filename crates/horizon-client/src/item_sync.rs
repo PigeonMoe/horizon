@@ -6,7 +6,7 @@
 use crate::items::{ConsumeEffect, ItemStack};
 use horizon_core::nbt::Tag;
 use horizon_protocol::buf::{Codec, Reader};
-use horizon_protocol::item::{Component, Profile, Stack, Template, component};
+use horizon_protocol::item::{Component, Profile, SkinPatch, Stack, Template, component};
 use horizon_protocol::registry::{Builtin, Dynamic};
 use std::sync::Arc;
 
@@ -1419,6 +1419,29 @@ fn fireworks_tag(e: &horizon_protocol::item::FireworkExplosion) -> Tag {
     ])
 }
 
+/// Encode the same `ResolvableProfile.CODEC` used by block and entity saves.
+pub(crate) fn profile_component(tag: &Tag) -> Option<Component> {
+    if !matches!(tag, Tag::String(_) | Tag::Compound(_)) {
+        return None;
+    }
+    let profile = crate::entity_nbt::profile_from_nbt(tag)?;
+    Some(Component::Profile(Profile {
+        name: profile.name,
+        id: profile.uuid,
+        properties: profile
+            .properties
+            .into_iter()
+            .map(|p| (p.name, p.value, p.signature))
+            .collect(),
+        skin: SkinPatch {
+            body: profile.body,
+            cape: profile.cape,
+            elytra: profile.elytra,
+            slim: profile.slim,
+        },
+    }))
+}
+
 /// A `minecraft:profile` component as the item data JSON the model reads.
 fn profile_tag(p: &Profile) -> Tag {
     let properties = p
@@ -1451,6 +1474,18 @@ fn profile_tag(p: &Profile) -> Tag {
         ));
     }
     entries.push(("properties", Tag::List(properties)));
+    for (key, texture) in [
+        ("texture", &p.skin.body),
+        ("cape", &p.skin.cape),
+        ("elytra", &p.skin.elytra),
+    ] {
+        if let Some(texture) = texture {
+            entries.push((key, Tag::String(texture.as_str().into())));
+        }
+    }
+    if let Some(slim) = p.skin.slim {
+        entries.push(("model", Tag::String(if slim { "slim" } else { "wide" }.into())));
+    }
     Tag::compound(entries)
 }
 
