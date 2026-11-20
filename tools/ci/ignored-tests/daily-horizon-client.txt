@@ -63,6 +63,7 @@ horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_moun
 horizon-client game::lan_stations::tests::table_proposal_pays_once_and_keeps_both_book_enchantment_components lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
 horizon-client game::machines::dispenser_selection_tests::dispenser_selection_reports_the_slot_and_stack_before_ordinary_dispense lib daily resources
+horizon-client game::machines::double_chest_transfer_tests::hopper_inventory_stack_move_keeps_marked_bottles_in_the_source lib daily resources
 horizon-client game::machines::double_chest_transfer_tests::hopper_push_and_pull_use_the_double_chest_midpoint_across_a_boundary lib daily resources
 horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_transfer_policy_uses_its_new_position_and_preserves_denied_items lib daily resources
 horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_tries_each_rail_step_until_an_inventory_transfer_succeeds lib daily resources
@@ -135,6 +136,7 @@ horizon-client game::native_explosions_tests::an_invalid_source_explodes_nothing
 horizon-client game::native_explosions_tests::an_unknown_damage_type_particle_or_tag_explodes_nothing lib daily resources
 horizon-client game::native_explosions_tests::block_particle_weights_whose_total_is_past_an_int_explode_nothing lib daily resources
 horizon-client game::native_explosions_tests::immune_blocks_survive_and_every_other_cell_resists_nothing lib daily resources
+horizon-client game::native_explosions_tests::player_fire_starters_respect_ignition_veto_and_keep_paper_item_cost lib daily resources
 horizon-client game::native_explosions_tests::player_lit_tnt_as_the_source_credits_the_player_with_the_kill lib daily resources
 horizon-client game::native_explosions_tests::primed_tnt_that_went_through_a_portal_spares_a_portal_unless_a_calculator_is_passed lib daily resources
 horizon-client game::native_explosions_tests::unowned_tnt_as_the_source_credits_no_one lib daily resources
@@ -143,6 +145,7 @@ horizon-client game::native_give_stack_tests::a_given_stack_fills_the_inventory_
 horizon-client game::native_give_stack_tests::an_snbt_item_goes_through_the_api_unchanged lib daily resources
 horizon-client game::native_give_stack_tests::item_from_snbt_refuses_what_is_not_one_item_compound lib daily resources
 horizon-client game::native_give_stack_tests::saved_paper_components_keep_stack_data_and_reject_partial_payloads lib daily resources
+horizon-client game::native_guest_turn_tests::a_guest_turn_reports_the_latest_secondary_use_key_before_motion_ticks lib daily resources
 horizon-client game::native_hooks::death_source_tests::mob_death_and_handle_preserve_namespaced_types lib daily resources
 horizon-client game::native_hooks::death_source_tests::player_drops_expose_recent_resolved_credit_separate_from_the_fatal_fall lib daily resources
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::a_listener_waking_the_player_again_is_told_once lib daily game-boot
