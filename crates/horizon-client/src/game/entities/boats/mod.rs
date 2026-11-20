@@ -58,6 +58,7 @@ pub(super) struct Boat {
     pub wood: Arc<str>,
     pub position: Vec3,
     pub previous: Vec3,
+    published_pose: Option<(Vec3, [f32; 2])>,
     pub velocity: Vec3,
     pub yaw: f32,
     pub previous_yaw: f32,
@@ -215,6 +216,7 @@ impl Boat {
             wood,
             position,
             previous: position,
+            published_pose: None,
             velocity: Vec3::ZERO,
             yaw,
             previous_yaw: yaw,
@@ -1035,6 +1037,8 @@ impl Game<'_> {
         let mut round = self.native_tick_round();
         // A server player's boat is driven by its client (lan_vehicles.rs).
         let driven = self.guest_vehicles();
+        let checks_guest_move = self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::GuestBoatTickMovePre);
         // EntityTickEvent.Post comes once AbstractBoat.tick is over, after the
         // passes of `boat_server_passes` (lava, ejection, bubbles, contacts),
         // and before the next boat ticks, as `ServerLevel.tickNonPassenger`.
@@ -1069,6 +1073,13 @@ impl Game<'_> {
                             game.store_boat_back(i, b);
                         });
                     }
+                    if checks_guest_move && ticking(p.x.floor() as i32, p.z.floor() as i32) {
+                        if driven.contains(&id) {
+                            self.tick_guest_boat_movement(i, id);
+                        } else {
+                            self.remember_boat_pose(i, id);
+                        }
+                    }
                     self.boat_server_passes(id, &driven, &ticking, &round);
                     break 'boat;
                 }
@@ -1102,6 +1113,9 @@ impl Game<'_> {
                         self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
                         self.complete_vehicle_rider_recovery(id, recovery);
                     }
+                    if checks_guest_move {
+                        self.remember_boat_pose(i, id);
+                    }
                     self.boat_server_passes(id, &driven, &ticking, &round);
                 }
                 self.native_tick_post_one(&round, id, &kind);
@@ -1116,6 +1130,81 @@ impl Game<'_> {
             };
         }
     }
+
+    /// Paper's `VehicleMoveEvent` compares the tick's final hull position
+    /// with its previous published pose, including guest-driven hulls.
+    fn tick_guest_boat_movement(&mut self, index: usize, id: u32) {
+        let Some(i) = self.boat_tick_index(index, id) else {
+            return;
+        };
+        let boat = &self.boats[i];
+        let attempted = (boat.position, [boat.yaw, boat.pitch]);
+        if let Some(origin) = boat.published_pose
+            && let Some(player) = self.guest_boat_tick_move_denial(id, origin.0, attempted.0)
+        {
+            self.boats.update(i, |boat| {
+                boat.velocity = Vec3::ZERO;
+                boat.delta_rotation = 0.0;
+            });
+            let recovery = self.vehicle_recovery_if_rollback_denied(id, player, attempted, origin);
+            // The driver's packet moves its seat immediately. A second seat
+            // may still be at the boat's earlier packet baseline this tick.
+            let dimension = self.dim.id();
+            if let Some(host) = self.lan.as_mut() {
+                host.hub.guests.update_all(|guest| {
+                    if guest.vehicle == Some(id) && guest.dimension == dimension {
+                        let at = attempted.0.components();
+                        if let Some(base) = guest.vehicle_good {
+                            for axis in 0..3 {
+                                let delta = at[axis] - base[axis];
+                                guest.position[axis] += delta;
+                                guest.previous_position[axis] += delta;
+                            }
+                        }
+                        guest.vehicle_good = Some(at);
+                    }
+                });
+            }
+            if recovery.is_some() {
+                self.complete_vehicle_rider_recovery(id, recovery);
+            } else {
+                self.place_teleport_filed(
+                    super::commands::Target::Boat(id),
+                    origin.0.components(),
+                    Some(origin.1),
+                    [false; 3],
+                    true,
+                );
+                if let Some(host) = self.lan.as_mut() {
+                    host.hub.guests.update_all(|guest| {
+                        if guest.vehicle == Some(id) && guest.dimension == dimension {
+                            guest.vehicle_good = Some(origin.0.components());
+                        }
+                    });
+                }
+            }
+        }
+        self.remember_boat_pose(i, id);
+    }
+
+    fn boat_tick_index(&self, index: usize, id: u32) -> Option<usize> {
+        if self.boats.get(index).is_some_and(|boat| boat.id == id) {
+            Some(index)
+        } else {
+            self.boats.iter().position(|boat| boat.id == id)
+        }
+    }
+
+    fn remember_boat_pose(&mut self, index: usize, id: u32) {
+        if let Some(i) = self.boat_tick_index(index, id) {
+            let boat = &self.boats[i];
+            let pose = Some((boat.position, [boat.yaw, boat.pitch]));
+            if boat.published_pose != pose {
+                self.boats.update(i, |boat| boat.published_pose = pose);
+            }
+        }
+    }
+
     /// The rest of `AbstractBoat.tick` on the server, for every boat, the
     /// client-driven ones too: `applyEffectsFromBlocks` (lava breaks a boat
     /// at once), the passengers of one under water too long get out, and it

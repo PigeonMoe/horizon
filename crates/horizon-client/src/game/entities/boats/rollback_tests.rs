@@ -267,3 +267,268 @@ fn a_rejected_guest_boat_packet_keeps_its_immediate_correction() {
         });
     });
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GuestPolicy {
+    DenyDriver,
+    LegacyVeto,
+    RecoverHull,
+    Eject,
+}
+
+struct GuestBoundary {
+    policy: GuestPolicy,
+    checks: Arc<Mutex<Vec<u128>>>,
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for GuestBoundary {
+    fn ridden_vehicle_move_pre(
+        &self,
+        _: &dyn Host,
+        event: &mut RiddenVehicleMovePreEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.guest_boat_driver, Some(FIRST));
+        self.checks.lock().unwrap().push(event.player);
+        if (self.policy == GuestPolicy::DenyDriver && event.player == FIRST)
+            || (self.policy == GuestPolicy::LegacyVeto && event.player == SECOND)
+        {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn guest_boat_tick_move_pre(
+        &self,
+        _: &dyn Host,
+        event: &mut mod_api::GuestBoatTickMovePreEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.vehicle, BOAT);
+        assert_eq!(event.from, START.components());
+        assert_eq!(event.to, [START.x + 0.7, START.y, START.z]);
+        self.checks.lock().unwrap().push(event.player + 100);
+        if event.player == SECOND {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn entity_teleport_pre(&self, _: &dyn Host, event: &mut EntityTeleportPreEvent<'_>) -> Flow {
+        assert_eq!(event.entity, BOAT);
+        assert_eq!(event.to, START.components());
+        self.checks.lock().unwrap().push(200);
+        if self.policy == GuestPolicy::Eject {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn player_teleport_pre(
+        &self,
+        _: &mut dyn ServerHost,
+        event: &mut PlayerTeleportPreEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.player, SECOND);
+        assert_eq!(event.to, START.components());
+        self.checks.lock().unwrap().push(300);
+        Flow::Continue
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
+    run_on_guest_stack(|| {
+        for policy in [
+            GuestPolicy::DenyDriver,
+            GuestPolicy::LegacyVeto,
+            GuestPolicy::RecoverHull,
+            GuestPolicy::Eject,
+        ] {
+            let checks = Arc::new(Mutex::new(Vec::new()));
+            let mods = [ModEntry::new(
+                "guest-boat-move-phases",
+                Box::new(GuestBoundary {
+                    policy,
+                    checks: checks.clone(),
+                }),
+            )];
+            mod_platform::testing::with_mods(mods.into(), || {
+                with_guests(|game| {
+                    launch(game);
+                    let boat = game.entity(BOAT).unwrap();
+                    let first = game.player(FIRST).unwrap().entity();
+                    let second = game.player(SECOND).unwrap().entity();
+                    assert!(game.entity_start_riding(first, boat, true));
+                    assert!(game.entity_start_riding(second, boat, true));
+                    let (tx, packets) = mpsc::channel();
+                    let mut sender = Some(PlayerSender::new(tx, Arc::default()));
+                    game.lan.as_mut().unwrap().hub.guests.update_all(|guest| {
+                        guest.loaded = true;
+                        guest.load_timeout = 0;
+                        guest.awaiting_teleport = None;
+                        if guest.uuid == FIRST {
+                            guest.sender = sender.take().unwrap();
+                        }
+                    });
+                    let good = |game: &Game<'_>, conn| {
+                        game.lan
+                            .as_ref()
+                            .unwrap()
+                            .hub
+                            .guest(conn)
+                            .unwrap()
+                            .vehicle_good
+                    };
+                    let request = |game: &mut Game<'_>, dx| {
+                        game.guest_move_vehicle(
+                            FIRST as u32,
+                            &MoveVehicleRequest {
+                                position: [START.x + dx, START.y, START.z],
+                                yaw: 20.0,
+                                pitch: 0.0,
+                                on_ground: false,
+                            },
+                        );
+                    };
+                    let received = || {
+                        packets
+                            .try_iter()
+                            .flat_map(|out| match out {
+                                Out::Packet(body) => vec![body],
+                                Out::Packets(bodies) => bodies,
+                                _ => Vec::new(),
+                            })
+                            .filter_map(|body| {
+                                let mut reader = Reader::new(&body);
+                                let id = reader.varint().ok()?;
+                                Clientbound::decode(id, reader.rest()).ok()
+                            })
+                            .collect::<Vec<_>>()
+                    };
+
+                    // Initialize the tick baseline while both guests are seated.
+                    game.guest_vehicle_tick(FIRST as u32);
+                    game.guest_vehicle_tick(SECOND as u32);
+                    game.tick_boats();
+                    assert!(checks.lock().unwrap().is_empty());
+                    let old_seats =
+                        [first, second].map(|rider| game.entity_position(rider).unwrap());
+                    received();
+                    request(game, 0.3);
+                    if matches!(policy, GuestPolicy::DenyDriver | GuestPolicy::LegacyVeto) {
+                        let before = checks.lock().unwrap().clone();
+                        assert!(before.contains(
+                            &(if policy == GuestPolicy::DenyDriver {
+                                FIRST
+                            } else {
+                                SECOND
+                            })
+                        ));
+                        assert_eq!(game.boats[0].position, START);
+                        game.tick_boats();
+                        assert_eq!(*checks.lock().unwrap(), before);
+                        let corrections = received()
+                            .into_iter()
+                            .filter_map(|p| match p {
+                                Clientbound::MoveVehicle(p) => Some(p.position),
+                                Clientbound::TeleportEntity(_) => {
+                                    panic!("an early veto should not send a hull teleport")
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(corrections, [START.components()]);
+                        return;
+                    }
+                    request(game, 0.7);
+                    assert_eq!(game.boats[0].position.x, START.x + 0.7);
+                    assert_eq!(*checks.lock().unwrap(), [SECOND, FIRST, SECOND, FIRST]);
+                    game.tick_boats();
+                    let mut expected =
+                        vec![SECOND, FIRST, SECOND, FIRST, FIRST + 100, SECOND + 100, 200];
+                    let messages = received();
+                    assert!(
+                        messages
+                            .iter()
+                            .all(|p| !matches!(p, Clientbound::MoveVehicle(_)))
+                    );
+                    if policy == GuestPolicy::RecoverHull {
+                        assert_eq!(game.boats[0].position, START);
+                        for (conn, rider, before) in
+                            [(FIRST, first, old_seats[0]), (SECOND, second, old_seats[1])]
+                        {
+                            assert_eq!(good(game, conn as u32), Some(START.components()));
+                            assert_eq!(game.entity_vehicle(rider), Some(boat));
+                            let at = game.entity_position(rider).unwrap();
+                            assert!((at[0] - before[0]).abs() < 1e-8);
+                        }
+                        let saved = messages
+                            .iter()
+                            .filter_map(|p| match p {
+                                Clientbound::TeleportEntity(p) if p.id == BOAT as i32 => {
+                                    Some(p.position)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(saved, [START.components()]);
+                        let driver = game.lan.as_ref().unwrap().hub.guest(FIRST as u32).unwrap();
+                        assert!(driver.awaiting_teleport.is_some());
+                    } else {
+                        expected.push(300);
+                        assert_eq!(game.boats[0].position.x, START.x + 0.7);
+                        for (conn, rider) in [(FIRST, first), (SECOND, second)] {
+                            assert_eq!(good(game, conn as u32), None);
+                            assert_eq!(game.entity_vehicle(rider), None);
+                        }
+                        assert_eq!(game.entity_position(second), Some(START.components()));
+                    }
+                    assert_eq!(game.boats[0].velocity, Vec3::ZERO);
+                    game.tick_boats();
+                    assert_eq!(*checks.lock().unwrap(), expected, "{policy:?}");
+
+                    if policy == GuestPolicy::RecoverHull {
+                        use horizon_client::lan::InboxItem;
+                        use horizon_protocol::packets::play::{AcceptTeleportation, Serverbound};
+                        game.lan
+                            .as_mut()
+                            .unwrap()
+                            .hub
+                            .guests
+                            .update_connection(FIRST as u32, |driver| {
+                                let (id, [x, y, z]) = driver.awaiting_teleport.unwrap();
+                                driver.inbox.push_back(InboxItem::Packet(
+                                    Serverbound::AcceptTeleportation(AcceptTeleportation {
+                                        id,
+                                        x,
+                                        y,
+                                        z,
+                                        yaw: driver.yaw,
+                                        pitch: driver.pitch,
+                                    }),
+                                    None,
+                                ));
+                            })
+                            .unwrap();
+                        game.tick_lan_packets();
+                        request(game, 0.05);
+                        assert_eq!(game.boats[0].position.x, START.x + 0.05);
+                        assert_eq!(
+                            good(game, FIRST as u32),
+                            Some([START.x + 0.05, START.y, START.z])
+                        );
+                        assert!(
+                            received()
+                                .into_iter()
+                                .all(|p| !matches!(p, Clientbound::MoveVehicle(_)))
+                        );
+                    }
+                });
+            });
+        }
+    });
+}

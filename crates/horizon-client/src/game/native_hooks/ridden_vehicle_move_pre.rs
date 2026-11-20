@@ -20,6 +20,18 @@ impl Game<'_> {
         })
     }
 
+    pub(in crate::game) fn ridden_vehicle_packet_allowed(
+        &self,
+        vehicle: u32,
+        from: Vec3,
+        to: Vec3,
+        guest_boat_driver: Option<u128>,
+    ) -> bool {
+        self.ridden_move_allowed_with(vehicle, from, to, guest_boat_driver, |seat| {
+            self.vehicle_carries_seat(vehicle, seat)
+        })
+    }
+
     pub(in crate::game) fn ridden_vehicle_move_allowed_with(
         &self,
         vehicle: u32,
@@ -27,10 +39,24 @@ impl Game<'_> {
         to: Vec3,
         carried: impl Fn(u32) -> bool,
     ) -> bool {
+        self.ridden_move_allowed_with(vehicle, from, to, None, carried)
+    }
+
+    fn ridden_move_allowed_with(
+        &self,
+        vehicle: u32,
+        from: Vec3,
+        to: Vec3,
+        guest_boat_driver: Option<u128>,
+        carried: impl Fn(u32) -> bool,
+    ) -> bool {
         if !self.checks_ridden_move(from, to) {
             return true;
         }
-        let allows = |uuid| self.ridden_move_denial(vehicle, from, to, uuid).is_none();
+        let allows = |uuid| {
+            self.ridden_move_denial(vehicle, from, to, uuid, guest_boat_driver)
+                .is_none()
+        };
         if self.player.is_some()
             && !self.lan_acting_fake
             && self.riding.is_some_and(&carried)
@@ -65,6 +91,43 @@ impl Game<'_> {
         if !self.checks_ridden_move(from, to) {
             return None;
         }
+        self.hull_rider_denial_with(vehicle, |uuid| {
+            self.ridden_move_denial(vehicle, from, to, uuid, None)
+        })
+    }
+
+    pub(in crate::game) fn guest_boat_tick_move_denial(
+        &self,
+        vehicle: u32,
+        from: Vec3,
+        to: Vec3,
+    ) -> Option<u128> {
+        if from == to
+            || !self.native_authoritative()
+            || !mod_api::__private::listened(mod_api::HookId::GuestBoatTickMovePre)
+        {
+            return None;
+        }
+        self.hull_rider_denial_with(vehicle, |player| {
+            let mut cancel = false;
+            self.native_guest_boat_tick_move_pre(mod_api::__private::GuestBoatTickMovePreCall {
+                player,
+                vehicle,
+                dimension: self.dim.id(),
+                from: from.components(),
+                to: to.components(),
+                cancel: &mut cancel,
+            });
+            cancel.then_some(())
+        })
+        .map(|(player, ())| player)
+    }
+
+    fn hull_rider_denial_with<T>(
+        &self,
+        vehicle: u32,
+        deny: impl Fn(u128) -> Option<T>,
+    ) -> Option<(u128, T)> {
         let mut order = self.native_indirect_passenger_ids(vehicle);
         let acting = self.player.as_ref().and_then(|body| {
             let seat = self.riding?;
@@ -103,8 +166,7 @@ impl Game<'_> {
                 })?;
                 guest.uuid
             };
-            self.ridden_move_denial(vehicle, from, to, uuid)
-                .map(|paper_rollback| (uuid, paper_rollback))
+            deny(uuid).map(|denial| (uuid, denial))
         })
     }
 
@@ -122,7 +184,14 @@ impl Game<'_> {
         })
     }
 
-    fn ridden_move_denial(&self, vehicle: u32, from: Vec3, to: Vec3, player: u128) -> Option<bool> {
+    fn ridden_move_denial(
+        &self,
+        vehicle: u32,
+        from: Vec3,
+        to: Vec3,
+        player: u128,
+        guest_boat_driver: Option<u128>,
+    ) -> Option<bool> {
         let mut cancel = false;
         let mut paper_rollback = false;
         self.native_ridden_vehicle_move_pre(mod_api::__private::RiddenVehicleMovePreCall {
@@ -131,6 +200,7 @@ impl Game<'_> {
             dimension: self.dim.id(),
             from: from.components(),
             to: to.components(),
+            guest_boat_driver,
             paper_rollback: &mut paper_rollback,
             cancel: &mut cancel,
         });

@@ -5,6 +5,8 @@ pub trait Hooks {
     /// `vehicle` is its network entity ID and the endpoints are in `dimension`.
     /// Each player passenger, including nested passengers, can veto the same
     /// movement. Covers server physics as well as validated driver packets.
+    /// `guest_boat_driver` names the driver for a validated guest boat packet.
+    /// The boat's later per-tick check uses `guest_boat_tick_move_pre`.
     /// A veto restores the source position. Server-driven living mounts keep
     /// their velocity. Boats, minecarts and validated driver packets stop their
     /// movement. A veto can also set `paper_rollback` to request a checked
@@ -16,7 +18,7 @@ pub trait Hooks {
         host = "read",
         contract = "cancel",
         out = "cancel",
-        version = 2,
+        version = 3,
         neoforge = "none (NeoForge has no vehicle motion veto)",
         paper = "VehicleMoveEvent",
         cancellable = true
@@ -27,6 +29,7 @@ pub trait Hooks {
         dimension: &str,
         from: [f64; 3],
         to: [f64; 3],
+        guest_boat_driver: Option<u128>,
         paper_rollback: &mut bool,
         cancel: &mut bool,
     );

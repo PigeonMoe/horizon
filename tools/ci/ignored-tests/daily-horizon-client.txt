@@ -8,6 +8,7 @@ horizon-client game::big_dripleaf_tests::a_leaf_stays_flat_under_an_entity_that_
 horizon-client game::big_dripleaf_tests::a_leaf_tilts_under_a_mob_an_item_a_boat_a_minecart_and_a_trident lib daily resources
 horizon-client game::block_use_completion_tests::boat_item_protects_its_fluid_hit_without_repeating_the_block_phase lib daily resources
 horizon-client game::block_use_completion_tests::dragon_egg_clicks_stop_on_the_first_refused_destination lib daily resources
+horizon-client game::boats::rollback_tests::a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once lib daily resources
 horizon-client game::boats::rollback_tests::a_rejected_guest_boat_packet_keeps_its_immediate_correction lib daily resources
 horizon-client game::boats::rollback_tests::a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_rider lib daily resources
 horizon-client game::commands::modprofile::tests::modprofile_state_and_report_side_effects lib daily child-process

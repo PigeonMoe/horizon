@@ -1,8 +1,8 @@
 //! The `entity_teleport_pre` hook: declarations the mod API generator reads.
 
 pub trait Hooks {
-    /// Veto a same-level entity teleport. Currently covers server-driven boat
-    /// and minecart rollbacks after a denied rider's move
+    /// Veto a same-level entity teleport. Covers boat and minecart rollbacks
+    /// after a denied rider's move
     /// (`cause = "vehicle_rollback"`). The network
     /// entity ID may be held by the tick. The supplied positions and yaw/pitch
     /// describe the attempted move and the proposed return, in that order.

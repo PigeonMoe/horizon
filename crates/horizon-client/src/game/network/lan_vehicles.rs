@@ -580,7 +580,7 @@ impl Game<'_> {
                 return;
             }
         }
-        if !self.ridden_vehicle_move_allowed(id, old, target) {
+        if !self.ridden_vehicle_packet_allowed(id, old, target, boat.map(|_| player)) {
             if let Some(i) = mount {
                 self.mobs[i].velocity = Vec3::ZERO;
             } else if let Some(i) = boat {
