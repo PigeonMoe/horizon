@@ -505,6 +505,55 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn sneak_release_in_the_same_packet_batch_does_not_change_a_block_click() {
+        use crate::game::native_entity_refs::tests::with_game;
+        use crate::game::native_item_places::tests::{guest, open_to_lan};
+        use horizon_client::{chunk::Chunk, items::ItemStack, lan::guest::InboxItem};
+        use horizon_protocol::packets::play::{PlayerInput, Serverbound, UseItemOn};
+
+        with_game(|game| {
+            open_to_lan(game);
+            game.streaming
+                .insert_remote(&mut game.world, Chunk::empty(0, 0));
+            let registry = &game.pack.assets.registry;
+            let table = registry.default_state("minecraft:crafting_table").unwrap();
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            game.world.set(4, 63, 5, table).unwrap();
+            let mut player = guest(7);
+            player.position = [4.5, 64.0, 3.5];
+            player.loaded = true;
+            player.load_timeout = 0;
+            player.inventory[0] = Some(ItemStack::new("minecraft:stone", 3));
+            player.inbox.extend(
+                [
+                    Serverbound::PlayerInput(PlayerInput { flags: 32 }),
+                    Serverbound::UseItemOn(UseItemOn {
+                        hand: 0,
+                        pos: [4, 63, 5],
+                        face: 1,
+                        cursor: [0.5, 1.0, 0.5],
+                        inside: false,
+                        world_border: false,
+                        sequence: 1,
+                    }),
+                    Serverbound::PlayerInput(PlayerInput { flags: 0 }),
+                ]
+                .into_iter()
+                .map(InboxItem::uncredited),
+            );
+            game.lan.as_mut().unwrap().hub.guests.push(player);
+
+            game.tick_lan_packets();
+
+            assert_eq!(game.world.block(4, 64, 5), stone);
+            let player = game.lan.as_ref().unwrap().hub.guest(7).unwrap();
+            assert!(!player.sneaking);
+            assert_eq!(player.inventory[0].as_ref().unwrap().count, 2);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn menu_rules_match_guest_packets_and_prediction() {
         use horizon_client::{
             chunk::Chunk,

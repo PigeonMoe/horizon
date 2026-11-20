@@ -197,15 +197,11 @@ pub enum HostEvent {
         open: bool,
         filtering: bool,
     },
-    /// A guest changed sneaking in a player input packet, already applied.
-    Sneak {
-        conn: u32,
-        sneaking: bool,
-    },
-    /// A loaded guest sent their current player input flags.
+    /// Apply these input flags in order with the guest's gameplay packets.
     Input {
         conn: u32,
-        flags: i32,
+        flags: u8,
+        loaded: bool,
     },
     /// A guest was kicked, with the reason rendered by the hub.
     Kicked {
@@ -4273,25 +4269,11 @@ impl Hub {
                     }
                 }
                 S::PlayerInput(p) => {
-                    self.guests.update(i, |g| {
-                        g.input = p.flags;
-                        if g.client_loaded() {
-                            // The events only tell the mods: nothing is queued with none loaded.
-                            let listening = self.mods_loaded;
-                            if listening {
-                                events.push(HostEvent::Input {
-                                    conn,
-                                    flags: i32::from(p.flags),
-                                });
-                            }
-                            let sneaking = p.flags & 32 != 0;
-                            if g.sneaking != sneaking {
-                                g.sneaking = sneaking;
-                                if listening {
-                                    events.push(HostEvent::Sneak { conn, sneaking });
-                                }
-                            }
-                        }
+                    // A sneak release behind a click must not change how that click is handled.
+                    events.push(HostEvent::Input {
+                        conn,
+                        flags: p.flags,
+                        loaded: self.guests[i].client_loaded(),
                     });
                     // handlePlayerInput only records keys and updates crouching.
                     // Sprinting persists after the sprint key is released (or

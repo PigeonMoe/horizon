@@ -128,6 +128,34 @@ impl Game<'_> {
         }
     }
 
+    pub(in crate::game) fn lan_player_input(&mut self, conn: u32, flags: u8, loaded: bool) {
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        let input_hook = mod_api::__private::listened(mod_api::HookId::PlayerInput);
+        let sneak_hook = mod_api::__private::listened(mod_api::HookId::PlayerToggleSneak);
+        let changed = host.hub.update_guest(conn, |guest| {
+            guest.input = flags;
+            if !loaded {
+                return None;
+            }
+            let sneaking = flags & 32 != 0;
+            let toggled = guest.sneaking != sneaking;
+            guest.sneaking = sneaking;
+            (input_hook || (sneak_hook && toggled)).then(|| (guest.uuid, guest.name.clone(), toggled))
+        });
+        if let Some(Some((uuid, name, toggled))) = changed {
+            self.as_guest(conn, |game| {
+                if input_hook {
+                    game.native_player_input(uuid, &name, i32::from(flags));
+                }
+                if sneak_hook && toggled {
+                    game.native_player_toggle_sneak(uuid, &name, flags & 32 != 0);
+                }
+            });
+        }
+    }
+
     /// A packet from a guest that the hub does not handle itself.
     pub(in crate::game) fn lan_guest_packet(&mut self, conn: u32, packet: S) {
         // A crossing the hub's move check passed; a dead player's is refused, not dropped.

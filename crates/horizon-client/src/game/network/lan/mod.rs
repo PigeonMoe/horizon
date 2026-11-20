@@ -2352,17 +2352,6 @@ impl Game<'_> {
                 HostEvent::Flight { conn, flying } => {
                     self.lan_flight_toggled(conn, flying);
                 }
-                HostEvent::Sneak { conn, sneaking } => {
-                    if !mod_api::__private::listened(mod_api::HookId::PlayerToggleSneak) {
-                        continue;
-                    }
-                    if let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
-                        let (uuid, name) = (g.uuid, g.name.clone());
-                        self.as_guest(conn, |game| {
-                            game.native_player_toggle_sneak(uuid, &name, sneaking);
-                        });
-                    }
-                }
                 HostEvent::Kicked {
                     conn,
                     player,
@@ -2387,17 +2376,7 @@ impl Game<'_> {
                     }
                 }
                 HostEvent::PlayerMove(conn) => self.lan_player_move(conn),
-                HostEvent::Input { conn, flags } => {
-                    if !mod_api::__private::listened(mod_api::HookId::PlayerInput) {
-                        continue;
-                    }
-                    if let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
-                        let (uuid, name) = (g.uuid, g.name.clone());
-                        self.as_guest(conn, |game| {
-                            game.native_player_input(uuid, &name, flags);
-                        });
-                    }
-                }
+                HostEvent::Input { conn, flags, loaded } => self.lan_player_input(conn, flags, loaded),
                 HostEvent::ClientInformation(conn, old, new) => {
                     if let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
                         let (uuid, entity_id, name) = (g.uuid, g.entity_id, g.name.clone());
