@@ -492,7 +492,7 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
                     assert_eq!(*checks.lock().unwrap(), expected, "{policy:?}");
 
                     if policy == GuestPolicy::RecoverHull {
-                        use horizon_client::lan::InboxItem;
+                        use horizon_client::lan::guest::InboxItem;
                         use horizon_protocol::packets::play::{AcceptTeleportation, Serverbound};
                         game.lan
                             .as_mut()
