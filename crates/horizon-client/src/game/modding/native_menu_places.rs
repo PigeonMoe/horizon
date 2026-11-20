@@ -599,6 +599,52 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn a_backed_menu_commits_its_last_click_before_a_close_in_the_same_batch() {
+        use horizon_client::lan::guest::InboxItem;
+        use horizon_protocol::packets::play::{ContainerClick, ContainerClose, Serverbound};
+
+        with_game(|game| {
+            let window = backpack_menu(game);
+            let player = game.menu(123, window).unwrap().fields().player;
+            game.player_back_mod_menu_slots(player, window, held_places(Hand::Main, 0..27))
+                .unwrap();
+            let click = |slot| {
+                Serverbound::ContainerClick(ContainerClick {
+                    container: window,
+                    state: 0,
+                    slot,
+                    button: 0,
+                    input: 0,
+                    changed: Vec::new(),
+                    carried: None,
+                })
+            };
+            edit_guest(game, |guest| {
+                guest.load_timeout = 0;
+                guest.inbox.extend(
+                    [
+                        click(27),
+                        click(0),
+                        Serverbound::ContainerClose(ContainerClose { container: window }),
+                    ]
+                    .into_iter()
+                    .map(InboxItem::uncredited),
+                );
+            });
+
+            game.tick_lan_packets();
+
+            let host: &mut dyn ServerHost = game;
+            assert!(host.menu(123, window).is_none());
+            assert_eq!(held_slot(0).amount(host), 64);
+            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+            assert!(guest.inventory[9].is_none());
+            assert!(guest.carried.is_none());
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn a_mod_slot_is_shared_by_two_views_and_refuses_a_stale_second_take() {
         use super::super::native_guest_turn_tests::with_guests;
         use mod_api::{AttachmentCodec, AttachmentType, Compound, Holder, PlaceProvider, Tag};

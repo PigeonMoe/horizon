@@ -2405,6 +2405,14 @@ impl Game<'_> {
                 }
                 HostEvent::Packet(conn, packet) => {
                     self.lan_guest_packet(conn, *packet);
+                    // A later packet can close the menu whose click the hub just queued.
+                    if self
+                        .lan
+                        .as_ref()
+                        .is_some_and(|host| !host.hub.native_menu_events.is_empty())
+                    {
+                        self.run_native_menu_events();
+                    }
                     if self
                         .lan
                         .as_ref()
