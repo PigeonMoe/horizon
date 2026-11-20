@@ -628,7 +628,7 @@ mod tests {
                         Serverbound::ContainerClose(ContainerClose { container: window }),
                     ]
                     .into_iter()
-                    .map(InboxItem::uncredited),
+                    .map(|packet| InboxItem::Packet(packet, None)),
                 );
             });
 

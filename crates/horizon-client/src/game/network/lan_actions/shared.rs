@@ -539,7 +539,7 @@ mod tests {
                     Serverbound::PlayerInput(PlayerInput { flags: 0 }),
                 ]
                 .into_iter()
-                .map(InboxItem::uncredited),
+                .map(|packet| InboxItem::Packet(packet, None)),
             );
             game.lan.as_mut().unwrap().hub.guests.push(player);
 
