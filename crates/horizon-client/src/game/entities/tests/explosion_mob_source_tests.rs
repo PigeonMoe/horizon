@@ -116,15 +116,21 @@ fn a_deflected_ghast_fireballs_blast_protects_targets_against_the_actual_shooter
                     game.load_ticking_neighbourhood(0, 0);
                     game.update_chunk_tickets();
                     assert!(game.entity_ticking_area()(5, 5));
-                    game.lan
-                        .as_mut()
-                        .unwrap()
-                        .hub
-                        .update_guest(VICTIM, |g| {
-                            g.position = [7.0, 64.0, 3.5];
-                            g.previous_position = g.position;
+                    let hub = &mut game.lan.as_mut().unwrap().hub;
+                    // Placed guests still have join immunity until their clients load.
+                    for conn in [SHOOTER, VICTIM] {
+                        hub.update_guest(conn, |g| {
+                            g.loaded = true;
+                            g.loading = false;
+                            g.load_timeout = 0;
                         })
                         .unwrap();
+                    }
+                    hub.update_guest(VICTIM, |g| {
+                        g.position = [7.0, 64.0, 3.5];
+                        g.previous_position = g.position;
+                    })
+                    .unwrap();
                     let stone = game
                         .pack
                         .assets
@@ -191,10 +197,12 @@ fn a_deflected_ghast_fireballs_blast_protects_targets_against_the_actual_shooter
                         assert_eq!(after, before);
                     } else {
                         assert!(
-                            after
-                                .into_iter()
-                                .zip(before)
-                                .all(|(after, before)| after < before)
+                            after[0] < before[0],
+                            "unreflected blast: guest {before:?} -> {after:?}"
+                        );
+                        assert!(
+                            after[1] < before[1],
+                            "unreflected blast: pig {before:?} -> {after:?}"
                         );
                     }
                 });
