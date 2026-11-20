@@ -19,6 +19,7 @@ horizon-client game::container_loot::tests::transfers_between_containers lib dai
 horizon-client game::crafting_recipe_kind_tests::registered_crafting_remainder_drops_through_server_item_toss lib daily resources
 horizon-client game::crafting_recipe_kind_tests::unregistered_serializer_failed_reload_preserves_previous_recipes lib daily resources
 horizon-client game::creatures::block_change_tests::living_block_changes_keep_powder_snow_and_grass_when_denied lib daily resources
+horizon-client game::creatures::borrowed_tick::mounted_move_tests::a_denied_living_mount_crossing_preserves_momentum_and_seat lib daily resources
 horizon-client game::creatures::frame_projectile_tests::a_normal_arrow_reports_only_real_damage_hanging_break_and_swept_portal_contact lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::footwear_checks_current_gear_before_farmland_and_pearls_write lib daily resources
 horizon-client game::creatures::mob_pearl_hook_tests::gliding_impact_wears_the_real_head_slot_and_only_protects_that_glide lib daily resources

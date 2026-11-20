@@ -578,8 +578,8 @@ impl Game<'_> {
                         );
                     let m = &mut mobs[i];
                     if denied_move {
+                        // Paper cancels a living entity's move with absSnapTo, retaining its velocity.
                         m.position = m.previous;
-                        m.velocity = Vec3::ZERO;
                         m.yaw = m.previous_yaw;
                         m.head_yaw = m.previous_head_yaw;
                         m.body_yaw = m.previous_body_yaw;
@@ -1022,6 +1022,10 @@ mod hoglin_routing_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mounted_move_tests.rs"]
+mod mounted_move_tests;
 
 #[cfg(test)]
 #[path = "mob_tick_access_tests.rs"]

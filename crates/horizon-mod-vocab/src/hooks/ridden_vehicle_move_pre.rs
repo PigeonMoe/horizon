@@ -5,8 +5,9 @@ pub trait Hooks {
     /// `vehicle` is its network entity ID and the endpoints are in `dimension`.
     /// Each player passenger, including nested passengers, can veto the same
     /// movement. Covers server physics as well as validated driver packets.
-    /// A veto restores the source position and stops its movement. Teleports
-    /// use their own hooks.
+    /// A veto restores the source position. Server-driven living mounts
+    /// keep their velocity. Boats, minecarts and validated driver packets
+    /// stop their movement. Teleports use their own hooks.
     #[hook(
         side = "server",
         host = "read",
