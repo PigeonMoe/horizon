@@ -71,6 +71,8 @@ horizon-client game::machines::double_chest_transfer_tests::hopper_push_and_pull
 horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_transfer_policy_uses_its_new_position_and_preserves_denied_items lib daily resources
 horizon-client game::machines::hopper_cart_transfer_tests::hopper_cart_tries_each_rail_step_until_an_inventory_transfer_succeeds lib daily resources
 horizon-client game::maps::tests::map_on_banner_in_adventure_mode_honours_can_place_on lib daily game-boot
+horizon-client game::minecarts::cart_rollback_tests::a_failed_cart_rollback_recovers_the_first_denied_nested_rider_in_boarding_order lib daily resources
+horizon-client game::minecarts::cart_rollback_tests::a_requested_cart_rollback_keeps_ordinary_vetoes_and_checks_rider_recovery lib daily resources
 horizon-client game::minecarts::minecart_riders_tests::a_denied_rail_crossing_stops_the_cart_and_preserves_its_seat lib daily resources
 horizon-client game::mods::tests::a_shared_missing_jar_stops_native_load_and_refuses_each_content_mod_row lib daily child-process
 horizon-client game::mods::tests::content_overlay_validates_dependencies_and_orders_layers lib daily child-process

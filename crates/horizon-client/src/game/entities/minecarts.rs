@@ -5,6 +5,9 @@
 //! furnace and TNT variants, saving, and `AbstractMinecartRenderer`'s old
 //! rail-following render with the display block.
 #[cfg(test)]
+#[path = "minecarts/cart_rollback_tests.rs"]
+mod cart_rollback_tests;
+#[cfg(test)]
 #[path = "minecarts/lifetime_tests.rs"]
 mod lifetime_tests;
 #[path = "minecarts/save_lending.rs"]
@@ -46,6 +49,13 @@ mod hit;
 mod seat;
 pub(super) use hit::CartHit;
 use seat::*;
+
+struct CartRiderRollback {
+    player: u128,
+    pos: [f64; 3],
+    rotation: [f32; 2],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum CartKind {
     Rideable,
@@ -1433,6 +1443,7 @@ impl Game<'_> {
         intent: [f64; 2],
         slot: usize,
         index: &mut CartIndex,
+        rider_rollback: &mut Option<CartRiderRollback>,
     ) -> bool {
         c.tick_count += 1;
         c.previous = c.position;
@@ -1470,13 +1481,19 @@ impl Game<'_> {
             self.come_off_track(c);
             None
         };
-        if !self.ridden_vehicle_move_allowed(c.id, c.previous, c.position) {
-            c.position = c.previous;
-            c.yaw = c.previous_yaw;
-            c.pitch = c.previous_pitch;
+        let denied = self.ridden_cart_move_denial(c.id, c.previous, c.position);
+        let restore_pose = |cart: &mut Minecart| {
+            cart.position = cart.previous;
+            cart.yaw = cart.previous_yaw;
+            cart.pitch = cart.previous_pitch;
+        };
+        if let Some((_, paper_rollback)) = denied {
             c.velocity = Vec3::ZERO;
             c.lerp_steps.clear();
             c.fall_blast = None;
+            if !paper_rollback {
+                restore_pose(c);
+            }
         } else if let Some(rail) = old_rail {
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
@@ -1503,6 +1520,17 @@ impl Game<'_> {
             }
             c.yaw %= 360.0;
             c.pitch %= 360.0;
+        }
+        if let Some((player, true)) = denied {
+            if self.cart_return_teleport_denied(c) {
+                *rider_rollback = Some(CartRiderRollback {
+                    player,
+                    pos: c.previous.components(),
+                    rotation: [c.previous_yaw, c.previous_pitch],
+                });
+            } else {
+                restore_pose(c);
+            }
         }
         if !self.minecart_improvements() {
             self.cart_block_effects(c);
@@ -2050,9 +2078,14 @@ impl Game<'_> {
             // opening the cart, a command or a save reads it, never a tick, and
             // a mineshaft's chest cart carries its whole roll as NBT. The
             // stored cart keeps its slots for whatever reads them meanwhile.
-            let (due, section_step) =
-                self.with_entity_held_out(id, |game| section_steps::tick(game, id, i, &mut index));
+            let mut rider_rollback = None;
+            let (due, section_step) = self.with_entity_held_out(id, |game| {
+                section_steps::tick(game, id, i, &mut index, &mut rider_rollback)
+            });
             section_steps::tell(self, id, section_step);
+            if self.complete_cart_rider_rollback(id, rider_rollback) {
+                index.forget_carts();
+            }
             if due {
                 self.perform_cart_command(id);
                 index.forget_carts();
@@ -2174,8 +2207,10 @@ impl Game<'_> {
         let (s, co) = (f64::from(r.sin()), f64::from(r.cos()));
         let intent = [left * co - forward * s, forward * co + left * s];
         let id = self.carts[i].id;
-        let result =
-            self.with_entity_held_out(id, |game| section_steps::tick_riding(game, id, i, intent));
+        let mut rider_rollback = None;
+        let result = self.with_entity_held_out(id, |game| {
+            section_steps::tick_riding(game, id, i, intent, &mut rider_rollback)
+        });
         let Some((_, alive, cart_step, player_step)) = result else {
             return true;
         };
@@ -2190,8 +2225,52 @@ impl Game<'_> {
         {
             self.dismount_cart(i);
         }
+        self.complete_cart_rider_rollback(id, rider_rollback);
         true
     }
+
+    fn cart_return_teleport_denied(&self, cart: &Minecart) -> bool {
+        if !mod_api::__private::listened(mod_api::HookId::EntityTeleportPre) {
+            return false;
+        }
+        let mut cancel = false;
+        self.native_entity_teleport_pre(mod_api::__private::EntityTeleportPreCall {
+            entity: cart.id,
+            dimension: self.dim.id(),
+            from: cart.position.components(),
+            to: cart.previous.components(),
+            from_rotation: [cart.yaw, cart.pitch],
+            to_rotation: [cart.previous_yaw, cart.previous_pitch],
+            cause: "vehicle_rollback",
+            cancel: &mut cancel,
+        });
+        cancel
+    }
+
+    /// Complete the failed hull teleport once its new position is public.
+    fn complete_cart_rider_rollback(
+        &mut self,
+        id: u32,
+        rollback: Option<CartRiderRollback>,
+    ) -> bool {
+        let Some(rollback) = rollback else {
+            return false;
+        };
+        let Some(cart) = self.entity(id) else {
+            return false;
+        };
+        self.entity_eject_passengers(cart);
+        if let Some(player) = self.player(rollback.player) {
+            let _ = self.player_teleport_checked(
+                player,
+                self.dim.id(),
+                rollback.pos,
+                Some(rollback.rotation),
+            );
+        }
+        true
+    }
+
     /// `getDismountLocationForPassenger`: beside the cart's motion direction,
     /// else on top.
     pub(super) fn dismount_cart(&mut self, i: usize) {
@@ -3323,7 +3402,13 @@ mod tnt_impact_tests {
             let mut cart = Minecart::new(1, CartKind::Tnt, at);
             cart.velocity = velocity;
             for _ in 0..40 {
-                if !game.tick_cart(&mut cart, [0.0; 2], 0, &mut super::CartIndex::default()) {
+                if !game.tick_cart(
+                    &mut cart,
+                    [0.0; 2],
+                    0,
+                    &mut super::CartIndex::default(),
+                    &mut None,
+                ) {
                     result = true;
                     break;
                 }
@@ -3411,7 +3496,13 @@ mod tnt_impact_tests {
         let mut cart = Minecart::new(1, CartKind::Rideable, Vec3::new(5.5, 64.5, 8.5));
         cart.velocity = Vec3::new(0.4, 0.0, 0.0);
         game.carts.push(cart.clone());
-        assert!(game.tick_cart(&mut cart, [0.0; 2], 0, &mut super::CartIndex::default()));
+        assert!(game.tick_cart(
+            &mut cart,
+            [0.0; 2],
+            0,
+            &mut super::CartIndex::default(),
+            &mut None,
+        ));
         let powered = registry
             .state(game.world.block(6, 65, 8))
             .unwrap()

@@ -190,27 +190,27 @@ impl Game<'_> {
     /// intermediaries but return only resident handles.
     pub(super) fn entity_indirect_passengers(&self, entity: EntityRef) -> Option<Vec<EntityRef>> {
         self.native_entity_target(entity)?;
-        let mut all: Vec<EntityRef> = Vec::new();
-        // This vector allocates only when a retained, unrepresentable object is
-        // actually encountered; ordinary resident-only trees keep two buffers.
-        let mut visited_off_level = Vec::new();
-        let mut next = self.native_passenger_ids(entity.id());
+        Some(
+            self.native_indirect_passenger_ids(entity.id())
+                .into_iter()
+                .filter_map(|id| self.entity(id))
+                .collect(),
+        )
+    }
+
+    /// Ordered passenger links during vehicle physics, including a held-out root.
+    pub(super) fn native_indirect_passenger_ids(&self, vehicle: u32) -> Vec<u32> {
+        let mut all = Vec::new();
+        let mut next = self.native_passenger_ids(vehicle);
         next.reverse();
         while let Some(passenger) = next.pop() {
-            if passenger == entity.id()
-                || all.iter().any(|r| r.id() == passenger)
-                || visited_off_level.contains(&passenger)
-            {
+            if passenger == vehicle || all.contains(&passenger) {
                 continue;
             }
-            if let Some(handle) = self.entity(passenger) {
-                all.push(handle);
-            } else {
-                visited_off_level.push(passenger);
-            }
+            all.push(passenger);
             next.extend(self.native_passenger_ids(passenger).into_iter().rev());
         }
-        Some(all)
+        all
     }
     /// Whether the player `t` holds the stick that steers `species` in either hand.
     fn native_player_steers(&self, species: Species, t: Target) -> bool {
