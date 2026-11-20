@@ -1070,10 +1070,11 @@ fn a_flying_arrow_hurts_only_an_admitted_non_marker_armor_stand() {
     }
 
     let heard = Arc::new(Mutex::new(Vec::new()));
-    crate::game::native_entity_refs::tests::run_on_guest_stack(|| {
+    let during_hit = heard.clone();
+    crate::game::native_entity_refs::tests::run_on_guest_stack(move || {
         let mods = vec![mod_api::ModEntry::new(
             "arrow-stand",
-            Box::new(Proof(heard.clone())),
+            Box::new(Proof(during_hit)),
         )]
         .into();
         mod_platform::testing::with_mods(mods, || {
