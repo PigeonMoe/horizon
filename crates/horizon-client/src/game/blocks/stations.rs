@@ -667,10 +667,7 @@ impl Game<'_> {
             return;
         };
         let creative = self.creative;
-        let (enchantments, data) = (
-            std::sync::Arc::clone(self.item_enchantments()),
-            self.stations(),
-        );
+        let enchantments = std::sync::Arc::clone(self.item_enchantments());
         let items = self.items();
         match s.kind {
             // A server's table: its data slots carry the offers, and its
@@ -728,17 +725,9 @@ impl Game<'_> {
                     s.inputs[1].as_ref(),
                 );
             }
-            Kind::Smithing => {
-                s.result = data.recipes.smithing_result(
-                    &self.loop_context,
-                    &data.enchantments,
-                    s.inputs[0].as_ref(),
-                    s.inputs[1].as_ref(),
-                    s.inputs[2].as_ref(),
-                );
-            }
-            // The menu engine keeps the merchant's result (Game::menu_session).
-            Kind::Merchant => {}
+            // The menu engine owns these results (Game::menu_session). On a client
+            // the server's smithing result is already in the slot.
+            Kind::Smithing | Kind::Merchant => {}
             Kind::Beacon => {}
             // The menu engine keeps the cartography table's, the loom's and
             // the stonecutter's state (Game::menu_session).

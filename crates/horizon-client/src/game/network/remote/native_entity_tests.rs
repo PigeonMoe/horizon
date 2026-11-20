@@ -391,6 +391,108 @@ impl super::Remote {
 
 #[test]
 #[ignore = "daily"]
+fn a_remote_smithing_menu_shows_only_the_servers_result() {
+    crate::game::native_entity_refs::tests::with_client_game(|game| {
+        let (pipe, _server) = horizon_protocol::connection::Pipe::pair();
+        game.connect_local(pipe, "Steve").unwrap();
+        let builtin = game.remote.as_ref().unwrap().builtin.clone();
+        let item = |name| builtin.get("minecraft:item").unwrap().id(name).unwrap();
+        game.handle_packet(C::Login(play::Login {
+            player_id: 7,
+            hardcore: false,
+            levels: vec!["minecraft:overworld".into()],
+            max_players: 20,
+            chunk_radius: 8,
+            simulation_distance: 8,
+            reduced_debug_info: false,
+            show_death_screen: true,
+            limited_crafting: false,
+            spawn: spawn("minecraft:overworld"),
+            online_mode: false,
+            enforces_secure_chat: false,
+        }))
+        .unwrap();
+        game.handle_packet(C::OpenScreen(play::OpenScreen {
+            container: 3,
+            menu: builtin
+                .get("minecraft:menu")
+                .unwrap()
+                .id("minecraft:smithing")
+                .unwrap(),
+            title: Tag::String("Smithing Table".into()),
+        }))
+        .unwrap();
+
+        let mut blocked = Stack::new(item("minecraft:gold_ingot"), 1);
+        blocked.added.push((
+            component::CUSTOM_DATA,
+            Component::Nbt(Tag::compound([(
+                "PublicBukkitValues",
+                Tag::compound([("slimefun:slimefun_item", Tag::String("GOLD_24K".into()))]),
+            )])),
+        ));
+        let base = item("minecraft:diamond_chestplate");
+        let mut items = vec![None; 40];
+        items[0] = Some(Stack::new(
+            item("minecraft:sentry_armor_trim_smithing_template"),
+            1,
+        ));
+        items[1] = Some(Stack::new(base, 1));
+        items[2] = Some(blocked);
+        game.handle_packet(C::ContainerSetContent(play::ContainerSetContent {
+            container: 3,
+            state: 1,
+            items,
+            carried: None,
+        }))
+        .unwrap();
+        let station = game.station.as_ref().expect("smithing station is open");
+        assert_eq!(
+            station.inputs[2].as_ref().unwrap().item.as_ref(),
+            "minecraft:gold_ingot"
+        );
+        assert!(station.result.is_none(), "the server refused the trim");
+
+        let update = |state, slot, item| {
+            C::ContainerSetSlot(play::ContainerSetSlot {
+                container: 3,
+                state,
+                slot,
+                item,
+            })
+        };
+        let gold = |count| Some(Stack::new(item("minecraft:gold_ingot"), count));
+        game.handle_packet(update(2, 2, gold(1))).unwrap();
+        assert!(
+            game.station.as_ref().unwrap().result.is_none(),
+            "only inputs changed"
+        );
+
+        let mut approved = Stack::new(base, 1);
+        approved.added.push((
+            component::CUSTOM_NAME,
+            Component::Text(Tag::String("Server result".into())),
+        ));
+        game.handle_packet(update(3, 3, Some(approved))).unwrap();
+        game.handle_packet(update(4, 2, gold(2))).unwrap();
+        assert_eq!(
+            game.station
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .custom_name()
+                .as_deref(),
+            Some("Server result"),
+        );
+        game.handle_packet(update(5, 3, None)).unwrap();
+        assert!(game.station.as_ref().unwrap().result.is_none());
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn an_arrow_lead_renders_for_both_holder_packet_orders() {
     crate::game::native_entity_refs::tests::with_client_game(|game| {
         let (pipe, _server) = horizon_protocol::connection::Pipe::pair();

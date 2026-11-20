@@ -1448,6 +1448,11 @@ impl Menu {
 
     /// `SmithingMenu.createResult`.
     fn smith_result(&mut self, env: &Env) {
+        // Only the server has the smithing recipe lookup and prepares the result.
+        // A client keeps the last result the server put in its result slot.
+        if env.loop_context.side() != LoopSide::Server {
+            return;
+        }
         self.touch();
         let inputs = &self.state.containers[MAIN][..3];
         let [a, b, c] = [0, 1, 2].map(|i| inputs[i].as_ref());
