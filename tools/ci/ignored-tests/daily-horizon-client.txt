@@ -8,6 +8,8 @@ horizon-client game::big_dripleaf_tests::a_leaf_stays_flat_under_an_entity_that_
 horizon-client game::big_dripleaf_tests::a_leaf_tilts_under_a_mob_an_item_a_boat_a_minecart_and_a_trident lib daily resources
 horizon-client game::block_use_completion_tests::boat_item_protects_its_fluid_hit_without_repeating_the_block_phase lib daily resources
 horizon-client game::block_use_completion_tests::dragon_egg_clicks_stop_on_the_first_refused_destination lib daily resources
+horizon-client game::boats::rollback_tests::a_rejected_guest_boat_packet_keeps_its_immediate_correction lib daily resources
+horizon-client game::boats::rollback_tests::a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_rider lib daily resources
 horizon-client game::commands::modprofile::tests::modprofile_state_and_report_side_effects lib daily child-process
 horizon-client game::commands::selector_bounds_tests::actual_selector_uses_body_overlap_but_distance_stays_at_the_origin lib daily game-boot
 horizon-client game::commands::world_cmds::allay_owner_damage_tests::allay_owner_adapters_compare_the_actual_player_uuid lib daily game-boot
@@ -233,6 +235,7 @@ horizon-client game::remote::interaction_event_tests::mapping_press_tests::openi
 horizon-client game::remote::interaction_event_tests::mapping_press_tests::the_host_presses_by_name_and_refuses_the_others lib daily resources
 horizon-client game::remote::interaction_event_tests::predicted_use_tests::native_client_prediction_owns_the_hand_loop lib daily game-boot
 horizon-client game::remote::interaction_event_tests::predicted_use_tests::wasm_client_prediction_owns_the_hand_loop lib daily wasm-fixture
+horizon-client game::remote::native_entity_tests::a_remote_smithing_menu_shows_only_the_servers_result lib daily resources
 horizon-client game::remote::native_entity_tests::an_arrow_lead_renders_for_both_holder_packet_orders lib daily resources
 horizon-client game::remote::tests::predicted_block_notice_tests::applied_placement_carries_predicted_true lib daily game-boot
 horizon-client game::remote::tests::predicted_block_notice_tests::confirmed_prediction_has_no_duplicate lib daily game-boot

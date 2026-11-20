@@ -15,6 +15,7 @@ mod save_lending;
 #[path = "minecarts/section_steps.rs"]
 mod section_steps;
 
+use super::native_hooks::VehicleRiderRecovery;
 use super::{Game, Hit, InteractTarget, Keys, entity::Entity};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
@@ -49,12 +50,6 @@ mod hit;
 mod seat;
 pub(super) use hit::CartHit;
 use seat::*;
-
-struct CartRiderRollback {
-    player: u128,
-    pos: [f64; 3],
-    rotation: [f32; 2],
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum CartKind {
@@ -1443,7 +1438,7 @@ impl Game<'_> {
         intent: [f64; 2],
         slot: usize,
         index: &mut CartIndex,
-        rider_rollback: &mut Option<CartRiderRollback>,
+        rider_rollback: &mut Option<VehicleRiderRecovery>,
     ) -> bool {
         c.tick_count += 1;
         c.previous = c.position;
@@ -1481,7 +1476,7 @@ impl Game<'_> {
             self.come_off_track(c);
             None
         };
-        let denied = self.ridden_cart_move_denial(c.id, c.previous, c.position);
+        let denied = self.ridden_hull_move_denial(c.id, c.previous, c.position);
         let restore_pose = |cart: &mut Minecart| {
             cart.position = cart.previous;
             cart.yaw = cart.previous_yaw;
@@ -1522,13 +1517,13 @@ impl Game<'_> {
             c.pitch %= 360.0;
         }
         if let Some((player, true)) = denied {
-            if self.cart_return_teleport_denied(c) {
-                *rider_rollback = Some(CartRiderRollback {
-                    player,
-                    pos: c.previous.components(),
-                    rotation: [c.previous_yaw, c.previous_pitch],
-                });
-            } else {
+            *rider_rollback = self.vehicle_recovery_if_rollback_denied(
+                c.id,
+                player,
+                (c.position, [c.yaw, c.pitch]),
+                (c.previous, [c.previous_yaw, c.previous_pitch]),
+            );
+            if rider_rollback.is_none() {
                 restore_pose(c);
             }
         }
@@ -2083,7 +2078,7 @@ impl Game<'_> {
                 section_steps::tick(game, id, i, &mut index, &mut rider_rollback)
             });
             section_steps::tell(self, id, section_step);
-            if self.complete_cart_rider_rollback(id, rider_rollback) {
+            if self.complete_vehicle_rider_recovery(id, rider_rollback) {
                 index.forget_carts();
             }
             if due {
@@ -2225,49 +2220,7 @@ impl Game<'_> {
         {
             self.dismount_cart(i);
         }
-        self.complete_cart_rider_rollback(id, rider_rollback);
-        true
-    }
-
-    fn cart_return_teleport_denied(&self, cart: &Minecart) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::EntityTeleportPre) {
-            return false;
-        }
-        let mut cancel = false;
-        self.native_entity_teleport_pre(mod_api::__private::EntityTeleportPreCall {
-            entity: cart.id,
-            dimension: self.dim.id(),
-            from: cart.position.components(),
-            to: cart.previous.components(),
-            from_rotation: [cart.yaw, cart.pitch],
-            to_rotation: [cart.previous_yaw, cart.previous_pitch],
-            cause: "vehicle_rollback",
-            cancel: &mut cancel,
-        });
-        cancel
-    }
-
-    /// Complete the failed hull teleport once its new position is public.
-    fn complete_cart_rider_rollback(
-        &mut self,
-        id: u32,
-        rollback: Option<CartRiderRollback>,
-    ) -> bool {
-        let Some(rollback) = rollback else {
-            return false;
-        };
-        let Some(cart) = self.entity(id) else {
-            return false;
-        };
-        self.entity_eject_passengers(cart);
-        if let Some(player) = self.player(rollback.player) {
-            let _ = self.player_teleport_checked(
-                player,
-                self.dim.id(),
-                rollback.pos,
-                Some(rollback.rotation),
-            );
-        }
+        self.complete_vehicle_rider_recovery(id, rider_rollback);
         true
     }
 

@@ -56,7 +56,7 @@ impl Game<'_> {
     }
 
     /// The first denied rider in passenger-tree order and their rollback request.
-    pub(in crate::game) fn ridden_cart_move_denial(
+    pub(in crate::game) fn ridden_hull_move_denial(
         &self,
         vehicle: u32,
         from: Vec3,

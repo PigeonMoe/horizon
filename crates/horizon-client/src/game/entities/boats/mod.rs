@@ -8,9 +8,11 @@ mod friction_tests;
 #[cfg(test)]
 mod lifetime_tests;
 mod placement;
+#[cfg(test)]
+mod rollback_tests;
 pub(super) use placement::OutlineFluidRay;
 
-use super::native_hooks::BlockClickAnswer;
+use super::native_hooks::{BlockClickAnswer, VehicleRiderRecovery};
 use super::{Game, Hit, InteractTarget, entity::Entity, entity_culling::at, view_vector};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
@@ -767,7 +769,15 @@ impl Game<'_> {
         b.fall_distance
     }
     /// `AbstractBoat.tick` for one boat (`controlled` when the player rides it).
-    pub(super) fn tick_boat(&mut self, mut b: Boat, controlled: bool) -> Boat {
+    pub(super) fn tick_boat(&mut self, b: Boat, controlled: bool) -> Boat {
+        self.tick_boat_with_recovery(b, controlled).0
+    }
+
+    fn tick_boat_with_recovery(
+        &mut self,
+        mut b: Boat,
+        controlled: bool,
+    ) -> (Boat, Option<VehicleRiderRecovery>) {
         b.previous = b.position;
         b.previous_yaw = b.yaw;
         // Entity.baseTick ends with Leashable.tickLeash, on a server only
@@ -936,11 +946,24 @@ impl Game<'_> {
                 b.velocity.y = 0.0;
             }
         }
-        if !self.ridden_vehicle_move_allowed(b.id, b.previous, b.position) {
-            b.position = b.previous;
-            b.yaw = b.previous_yaw;
+        let mut recovery = None;
+        if let Some((player, paper_rollback)) =
+            self.ridden_hull_move_denial(b.id, b.previous, b.position)
+        {
             b.velocity = Vec3::ZERO;
             b.delta_rotation = 0.0;
+            if paper_rollback {
+                recovery = self.vehicle_recovery_if_rollback_denied(
+                    b.id,
+                    player,
+                    (b.position, [b.yaw, b.pitch]),
+                    (b.previous, [b.previous_yaw, b.pitch]),
+                );
+            }
+            if recovery.is_none() {
+                b.position = b.previous;
+                b.yaw = b.previous_yaw;
+            }
         }
         // AbstractBoat.tick's applyEffectsFromBlocks: powder snow or a cobweb makes the
         // boat stuck, which slows its next move, and resets its fall.
@@ -955,7 +978,7 @@ impl Game<'_> {
         );
         b.velocity = horizon_world::entity_move::scale_by_block_speed(b.velocity, factor);
         Self::tick_boat_paddles(&mut b, &mut self.audio);
-        b
+        (b, recovery)
     }
     /// `AbstractBoat.tick` advances the oars even when this client does not move the hull.
     pub(super) fn tick_boat_paddles(b: &mut Boat, audio: &mut super::Audio) {
@@ -1071,12 +1094,13 @@ impl Game<'_> {
                     let section_step = self.with_entity_held_out(id, |game| {
                         let b = game.boats[i].clone();
                         let from = b.position;
-                        let b = game.tick_boat(b, false);
+                        let (b, recovery) = game.tick_boat_with_recovery(b, false);
                         let to = b.position;
-                        game.store_boat_back(i, b).then_some((from, to))
+                        game.store_boat_back(i, b).then_some((from, to, recovery))
                     });
-                    if let Some((from, to)) = section_step {
+                    if let Some((from, to, recovery)) = section_step {
                         self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
+                        self.complete_vehicle_rider_recovery(id, recovery);
                     }
                     self.boat_server_passes(id, &driven, &ticking, &round);
                 }
@@ -2004,7 +2028,12 @@ impl Game<'_> {
             return Some(true);
         }
         let boat = &self.boats[i];
-        if !self.vehicle_damage_allowed(id, || boat.entity_type().into(), boat.position.components(), by) {
+        if !self.vehicle_damage_allowed(
+            id,
+            || boat.entity_type().into(),
+            boat.position.components(),
+            by,
+        ) {
             return None;
         }
         let mut cancel = false;

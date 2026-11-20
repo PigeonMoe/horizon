@@ -8,7 +8,7 @@ pub trait Hooks {
     /// A veto restores the source position. Server-driven living mounts keep
     /// their velocity. Boats, minecarts and validated driver packets stop their
     /// movement. A veto can also set `paper_rollback` to request a checked
-    /// same-level teleport for a server-driven minecart. If that attempt is
+    /// same-level teleport for a server-driven boat or minecart. If that attempt is
     /// vetoed, its direct passengers are ejected and the denied player is
     /// offered a checked return to the source. Other movers ignore the request.
     #[hook(

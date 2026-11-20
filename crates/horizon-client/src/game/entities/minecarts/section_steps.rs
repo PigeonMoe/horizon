@@ -5,7 +5,7 @@ pub(super) fn tick(
     id: u32,
     i: usize,
     index: &mut CartIndex,
-    rollback: &mut Option<CartRiderRollback>,
+    rollback: &mut Option<VehicleRiderRecovery>,
 ) -> (bool, Option<(Vec3, Vec3)>) {
     let loot = game.carts.update(i, |c| c.loot.take());
     let mut cart = game.carts[i].clone();
@@ -30,7 +30,7 @@ pub(super) fn tick_riding(
     id: u32,
     i: usize,
     intent: [f64; 2],
-    rollback: &mut Option<CartRiderRollback>,
+    rollback: &mut Option<VehicleRiderRecovery>,
 ) -> Option<(usize, bool, Option<(Vec3, Vec3)>, Option<(Vec3, Vec3)>)> {
     let mut cart = game.carts[i].clone();
     let from = cart.position;
