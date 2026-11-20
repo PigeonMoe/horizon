@@ -3,11 +3,11 @@
 //! `living_destroy_block`.
 use super::*;
 use mod_api::{
-    BlockPart, CanEntityDestroyEvent, Flow, Hooks, Host, LivingDestroyBlockEvent, Registrar,
-    ServerHost,
+    BlockPart, CanEntityDestroyEvent, ExplosionDetonateEvent, Flow, Hooks, Host,
+    LivingDestroyBlockEvent, Registrar, ServerHost,
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -18,6 +18,114 @@ impl BlockPart for May {
     fn can_entity_destroy(&self, _: &dyn Host, _: &mut CanEntityDestroyEvent) -> Option<bool> {
         Some(self.0)
     }
+}
+
+const PROTECTED_HEAD: [i32; 3] = [2, 70, 2];
+const OPEN_HEAD: [i32; 3] = [3, 70, 3];
+const OPEN_NECK: [i32; 3] = [8, 70, 2];
+const OPEN_BODY: [i32; 3] = [9, 70, 9];
+
+#[derive(Clone, Default)]
+struct ClaimExplosionPolicy {
+    deny: Arc<AtomicBool>,
+    batches: Arc<Mutex<Vec<Vec<[i32; 3]>>>>,
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for ClaimExplosionPolicy {
+    fn explosion_detonate(&self, _: &mut dyn ServerHost, event: &mut ExplosionDetonateEvent<'_>) {
+        assert_eq!(event.dimension, "minecraft:overworld");
+        assert_eq!(event.center, [8.5, 70.0, 8.5]);
+        assert!(event.entities.is_empty());
+        self.batches.lock().unwrap().push(event.blocks.clone());
+        if self.deny.load(Ordering::Relaxed) && event.blocks.contains(&PROTECTED_HEAD) {
+            event.blocks.clear();
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_protected_dragon_wall_preserves_its_batch_without_stopping_the_other_parts() {
+    use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+    use horizon_core::position::ChunkPos;
+
+    run_on_guest_stack(|| {
+        let policy = ClaimExplosionPolicy::default();
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "claim_wall",
+            Box::new(policy.clone()),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods.clone(), || {
+            crate::game::api_values::install_parts(&mods).unwrap();
+            with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                game.block_ticks
+                    .add_empty_chunk(ChunkPos::new(0, 0))
+                    .unwrap();
+                game.dragon.discard();
+                game.native_joins_skip();
+                game.spawn_mob_spawned(
+                    "minecraft:ender_dragon",
+                    [8.5, 70.0, 8.5],
+                    super::super::creatures::SpawnSite::Finalizing(
+                        horizon_client::mobs::spawn_rules::Reason::SpawnItemUse,
+                    ),
+                )
+                .unwrap();
+                let dragon = game.dragon.as_mut().unwrap();
+                dragon.parts[0].0 = Vec3::new(2.5, 70.25, 2.5);
+                dragon.parts[1].0 = Vec3::new(8.5, 70.25, 2.5);
+                dragon.parts[2].0 = Vec3::new(9.5, 70.25, 9.5);
+                assert!(
+                    game.ui
+                        .rules
+                        .set("mob_griefing", horizon_client::gamerules::Value::Bool(true))
+                );
+
+                let dirt = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:dirt")
+                    .unwrap();
+                for [x, y, z] in [PROTECTED_HEAD, OPEN_HEAD, OPEN_NECK, OPEN_BODY] {
+                    game.world.set(x, y, z, dirt).unwrap();
+                }
+                let air = game.world.air;
+                let dropped = game.dropped.len();
+                policy.deny.store(true, Ordering::Relaxed);
+                game.dragon_check_walls();
+                assert_eq!(
+                    std::mem::take(&mut *policy.batches.lock().unwrap()),
+                    [
+                        vec![PROTECTED_HEAD, OPEN_HEAD],
+                        vec![OPEN_NECK],
+                        vec![OPEN_BODY]
+                    ]
+                );
+                assert_eq!(game.world.block(2, 70, 2), dirt);
+                assert_eq!(game.world.block(3, 70, 3), dirt);
+                assert_eq!(game.world.block(8, 70, 2), air);
+                assert_eq!(game.world.block(9, 70, 9), air);
+                assert!(!game.dragon.as_ref().unwrap().in_wall);
+
+                policy.deny.store(false, Ordering::Relaxed);
+                game.dragon_check_walls();
+                assert_eq!(
+                    *policy.batches.lock().unwrap(),
+                    [vec![PROTECTED_HEAD, OPEN_HEAD]]
+                );
+                assert_eq!(game.world.block(2, 70, 2), air);
+                assert_eq!(game.world.block(3, 70, 3), air);
+                assert_eq!(game.dropped.len(), dropped);
+            });
+        });
+    });
 }
 struct Walls {
     keep: Arc<AtomicBool>,

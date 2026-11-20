@@ -29,6 +29,7 @@ horizon-client game::creatures::mob_pearl_hook_tests::gliding_impact_wears_the_r
 horizon-client game::creatures::snow_golem_form_tests::snow_trail_uses_formation_and_vibrates_only_after_writing lib daily resources
 horizon-client game::dedicated::tests::console_logging_survives_closed_stdout lib daily child-process
 horizon-client game::dispenser::decision_tests::crown_is_prepared_once_for_three_and_eight_dispenser_candidates lib daily resources
+horizon-client game::dragon::walls_tests::a_protected_dragon_wall_preserves_its_batch_without_stopping_the_other_parts lib daily resources
 horizon-client game::enchant_effects::frost_walker_tests::frost_walker_leaves_refused_source_water_and_places_the_neighbor lib daily resources
 horizon-client game::entity_inside_tests::a_boat_breaks_a_lily_pad_only_when_its_block_change_is_allowed lib daily resources
 horizon-client game::entity_sections::tests::a_real_mob_tick_tells_inside_each_position_write lib daily resources

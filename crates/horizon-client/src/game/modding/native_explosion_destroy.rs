@@ -102,7 +102,11 @@ impl Game<'_> {
         Ok(allowed)
     }
 
-    fn filter_explosion_targets(&mut self, center: [f64; 3], targets: &mut Vec<[i32; 3]>) {
+    pub(in crate::game) fn filter_explosion_targets(
+        &mut self,
+        center: [f64; 3],
+        targets: &mut Vec<[i32; 3]>,
+    ) {
         // The block-only event has no entity victims. Only original positions may remain.
         let mut told = targets.clone();
         self.native_explosion_detonate(self.dim.id(), center, &mut told, &mut Vec::new());
