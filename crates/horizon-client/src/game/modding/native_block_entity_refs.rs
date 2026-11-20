@@ -1,6 +1,8 @@
 //! Block entity handles: storage writes join the journal; explicit world notifications happen
 //! immediately and survive abort. Raw mod storage writes and restores synthesize no notice.
+//! Direct writes to a brewing stand's ingredient slot defer its vanilla container notice.
 use super::Game;
+use crate::game::transactions::After;
 use horizon_client::{
     block_entity_nbt,
     containers::{BlockEntity, ModBlockEntity},
@@ -390,21 +392,24 @@ impl Game<'_> {
         edit(block_entity);
     }
 
-    /// Read a configured mod holder's declared internal item slot, without automation policy.
+    /// Read a configured mod holder's internal item slot or a vanilla brewing ingredient.
     pub(super) fn block_entity_item_slot(
         &self,
         entity: BlockEntityRef,
         slot: u32,
     ) -> Result<Option<ItemStack>, BlockEntityItemError> {
-        let (world, BlockEntity::Mod(block_entity)) = self
+        let (world, block_entity) = self
             .native_block_entity_target(entity)
-            .ok_or(BlockEntityItemError::Stale)?
-        else {
-            return Err(BlockEntityItemError::Unavailable);
-        };
-        let [x, y, z] = entity.fields().position;
-        mod_item_slots(world, (x, y, z), slot)?;
-        Ok(block_entity.items.get(slot as usize).cloned().flatten())
+            .ok_or(BlockEntityItemError::Stale)?;
+        match block_entity {
+            BlockEntity::Mod(block_entity) => {
+                let [x, y, z] = entity.fields().position;
+                mod_item_slots(world, (x, y, z), slot)?;
+                Ok(block_entity.items.get(slot as usize).cloned().flatten())
+            }
+            BlockEntity::Brewing(_) if slot == 3 => Ok(block_entity.slots()[3].clone()),
+            _ => Err(BlockEntityItemError::Unavailable),
+        }
     }
 
     /// Replace internal storage under the existing transaction; external ITEMS routing is separate.
@@ -421,25 +426,25 @@ impl Game<'_> {
         let key = self
             .native_block_entity_write_key(entity)
             .ok_or(BlockEntityItemError::Stale)?;
+        if let Some(block_entity @ BlockEntity::Brewing(_)) = self.world.block_entities.get(&key)
+            && slot == 3
+        {
+            let limit = self.world.container_stack_limit(key).unwrap_or(99);
+            self.validate_direct_item_stack(&stack, limit)?;
+            let index = slot as usize;
+            if block_entity.slots()[index] == stack {
+                return Ok(false);
+            }
+            self.journal_block_entity_slot(key, index);
+            self.world.block_entities.get_mut(&key).unwrap().slots_mut()[index] = stack;
+            self.after_commit(After::Changed(key));
+            return Ok(true);
+        }
         let block_entity = self
             .mod_block_entity_write_target(key)
             .ok_or(BlockEntityItemError::Unavailable)?;
         let slots = mod_item_slots(&self.world, key, slot)?;
-        if let Some(stack) = &stack {
-            if stack.count == 0
-                || stack.item.as_ref() == "minecraft:air"
-                || self.items().get(&stack.item).is_none()
-            {
-                return Err(BlockEntityItemError::InvalidStack);
-            }
-            let limit = self.stack_max_size(stack);
-            if stack.count > limit {
-                return Err(BlockEntityItemError::StackTooLarge {
-                    count: stack.count,
-                    limit,
-                });
-            }
-        }
+        self.validate_direct_item_stack(&stack, u32::MAX)?;
         let index = slot as usize;
         if block_entity.items.get(index).and_then(Option::as_ref) == stack.as_ref() {
             return Ok(false);
@@ -459,6 +464,29 @@ impl Game<'_> {
             items[index] = stack;
         });
         Ok(true)
+    }
+
+    fn validate_direct_item_stack(
+        &self,
+        stack: &Option<ItemStack>,
+        container_limit: u32,
+    ) -> Result<(), BlockEntityItemError> {
+        if let Some(stack) = stack {
+            if stack.count == 0
+                || stack.item.as_ref() == "minecraft:air"
+                || self.items().get(&stack.item).is_none()
+            {
+                return Err(BlockEntityItemError::InvalidStack);
+            }
+            let limit = self.stack_max_size(stack).min(container_limit);
+            if stack.count > limit {
+                return Err(BlockEntityItemError::StackTooLarge {
+                    count: stack.count,
+                    limit,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Merges `data` into the block entity's saved data and loads it, as `/data merge block`
@@ -1372,6 +1400,102 @@ mod tests {
             // A stale handle reads None.
             game.world.block_entities.remove(&(7, 64, 0));
             assert_eq!(right.viewers(game), None);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn brewing_ingredient_direct_writes_keep_automation_filtered_and_roll_back() {
+        use super::super::native_entity_refs::tests::{run_fresh_cases, with_game_at};
+        use mod_api::{BlockUpdateFlags, ITEMS, ItemResource, prelude::ItemsHost};
+
+        if run_fresh_cases(
+            "game::native_block_entity_refs::tests::brewing_ingredient_direct_writes_keep_automation_filtered_and_roll_back",
+            "HORIZON_BREWING_INGREDIENT_CHILD",
+            &["vanilla"],
+        ) {
+            return;
+        }
+        let base = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let root = super::super::mods::content_root(&base, &Default::default())
+            .unwrap()
+            .prepared()
+            .to_path_buf();
+        with_game_at(root, |game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level("minecraft:overworld").unwrap();
+            let at = [1, 64, 1];
+            for (name, pos) in [
+                ("minecraft:stone", [1, 63, 1]),
+                ("minecraft:brewing_stand", at),
+            ] {
+                let state = game.pack.assets.registry.default_state(name).unwrap();
+                assert_eq!(
+                    game.level_set_block(level, pos, state, BlockUpdateFlags::NEIGHBORS),
+                    Ok(true)
+                );
+            }
+            let brewer = game.block_entity(level, at).unwrap();
+            let items = level.capability(game, &ITEMS, at, None).unwrap();
+            let key = game
+                .item_key(&mod_api::Identifier::parse("minecraft:dirt").unwrap())
+                .unwrap();
+            let dirt = mod_api::ItemStack::new(key, 3).unwrap();
+            let resource = ItemResource::of(&dirt);
+            assert_eq!(brewer.item_slot(game, 3), Ok(None));
+            assert_eq!(
+                brewer.item_slot(game, 4),
+                Err(BlockEntityItemError::Unavailable)
+            );
+            assert_eq!(items.capacity(game, 3, &resource), 0);
+            let set_limit_and_filter: Result<(), ()> = game.transaction(|game, tx| {
+                assert!(items.set_max_stack_size(game, tx, 4));
+                assert_eq!(items.insert(game, tx, 3, &resource, 1), 0);
+                assert_eq!(
+                    brewer.set_item_slot(game, tx, 4, Some(dirt.clone())),
+                    Err(BlockEntityItemError::Unavailable)
+                );
+                Ok(())
+            });
+            assert_eq!(set_limit_and_filter, Ok(()));
+            game.world.modified.clear();
+            let aborted: Result<(), ()> = game.transaction(|game, tx| {
+                assert_eq!(
+                    brewer.set_item_slot(game, tx, 3, Some(dirt.clone())),
+                    Ok(true)
+                );
+                assert_eq!(brewer.item_slot(game, 3), Ok(Some(dirt.clone())));
+                assert!(!game.world.modified.contains(&(0, 0)));
+                Err(())
+            });
+            assert_eq!(aborted, Err(()));
+            assert_eq!(brewer.item_slot(game, 3), Ok(None));
+            assert!(!game.world.modified.contains(&(0, 0)));
+
+            let committed: Result<(), ()> = game.transaction(|game, tx| {
+                assert_eq!(
+                    brewer.set_item_slot(game, tx, 3, resource.to_stack(5)),
+                    Err(BlockEntityItemError::StackTooLarge { count: 5, limit: 4 })
+                );
+                assert_eq!(
+                    brewer.set_item_slot(game, tx, 3, Some(dirt.clone())),
+                    Ok(true)
+                );
+                assert_eq!(
+                    brewer.set_item_slot(game, tx, 3, resource.to_stack(4)),
+                    Ok(true)
+                );
+                assert!(!game.world.modified.contains(&(0, 0)));
+                Ok(())
+            });
+            assert_eq!(committed, Ok(()));
+            assert!(game.world.modified.contains(&(0, 0)));
+            assert_eq!(brewer.item_slot(game, 3), Ok(resource.to_stack(4)));
+            assert_eq!(items.amount(game, 3), 4);
+            assert_eq!(items.amount(game, 4), 0);
         });
     }
 

@@ -92,7 +92,8 @@ pub trait BlockEntitiesBackend {
     #[access(WorldOnly)]
     fn block_entity_data_slots(&self, entity: BlockEntityRef) -> Option<Vec<i32>>;
     /// Side: both.
-    /// Read a configured mod holder's declared internal item slot, without automation policy.
+    /// Read a configured mod holder's declared internal item slot or a vanilla brewing
+    /// stand's ingredient slot (3), without automation policy.
     /// Removed, replaced or reloaded holders return BlockEntityItemError::Stale.
     #[access(WorldOnly)]
     fn block_entity_item_slot(
@@ -194,8 +195,11 @@ pub trait BlockEntitiesBackendMut {
         values: Vec<i32>,
     ) -> Result<bool, BlockEntityDataError>;
     /// Side: server.
-    /// Replace internal storage silently under the existing transaction; ITEMS routing is
-    /// separate. Removed, replaced or reloaded holders return BlockEntityItemError::Stale.
+    /// Replace a configured mod holder's internal storage silently under the existing
+    /// transaction, or write a vanilla brewing stand's ingredient slot (3), with a
+    /// normal container change notice at commit. This does not apply ITEMS automation
+    /// filters or authorise a transfer. Removed, replaced or reloaded holders return
+    /// BlockEntityItemError::Stale.
     #[access(WorldOnly)]
     fn block_entity_set_item_slot(
         &mut self,

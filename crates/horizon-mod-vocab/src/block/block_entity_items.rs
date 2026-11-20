@@ -1,13 +1,13 @@
-//! Refusals when accessing a mod block entity's internal item slots.
+//! Refusals when accessing a block entity's internal item slots.
 
-/// Why a mod block entity's internal item slot could not be read or written.
+/// Why a block entity's internal item slot could not be read or written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
 pub enum BlockEntityItemError {
     /// The handle no longer identifies a loaded entity in the requested level.
     Stale,
-    /// The entity is vanilla, not a configured mod holder, or not writable here.
+    /// The entity or slot does not expose direct item storage, or is not writable here.
     Unavailable,
     /// The index is outside the current container's declared slots.
     SlotOutOfBounds {
@@ -19,7 +19,7 @@ pub enum BlockEntityItemError {
     /// The incoming stack has an unregistered item, air or zero count.
     /// Use None to clear a slot.
     InvalidStack,
-    /// The incoming count exceeds the registered or component-overridden limit.
+    /// The incoming count exceeds the applicable item or container limit.
     StackTooLarge {
         /// Submitted count, without clamping.
         count: u32,
