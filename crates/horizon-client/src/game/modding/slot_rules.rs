@@ -4,10 +4,49 @@
 //! answers stay in what it planned. A menu type no part answers is never asked, and nothing is
 //! converted for it.
 use super::*;
-use crate::game::api_values::TryIntoApi;
+use crate::game::api_values::{TryIntoApi, TryIntoEngine};
 use horizon_client::menu::{SlotContext, SlotRules};
 
 impl SlotRules for Game<'_> {
+    fn listens_to_brewing_clicks(&self) -> bool {
+        mod_api::__private::listened(mod_api::HookId::BrewingStandClick)
+    }
+
+    fn brewing_click(
+        &self,
+        player: Option<u128>,
+        slot: usize,
+        player_slot: bool,
+        hotbar_swap: bool,
+        clicked: Option<&ItemStack>,
+        carried: Option<&ItemStack>,
+    ) -> std::result::Result<(), Option<horizon_client::text::Text>> {
+        let clicked = clicked.and_then(|stack| stack.try_into_api().ok());
+        let carried = carried.and_then(|stack| stack.try_into_api().ok());
+        let mut notice = None;
+        let mut cancel = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.native_brewing_stand_click(mod_api::__private::BrewingStandClickCall {
+                player,
+                slot,
+                player_slot,
+                hotbar_swap,
+                clicked: clicked.as_ref(),
+                carried: carried.as_ref(),
+                notice: &mut notice,
+                cancel: &mut cancel,
+            });
+        }));
+        if result.is_err() {
+            log::error!("brewing_stand_click: a listener failed for slot {slot}");
+            Ok(())
+        } else if cancel {
+            Err(notice.and_then(|text| text.try_into_engine(&()).ok()))
+        } else {
+            Ok(())
+        }
+    }
+
     fn recipe_result_allowed(
         &self,
         player: Option<u128>,

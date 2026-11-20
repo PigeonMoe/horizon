@@ -83,6 +83,25 @@ pub trait SlotRules {
     ) -> bool {
         true
     }
+
+    /// Whether a listener checks player clicks in a brewing stand.
+    fn listens_to_brewing_clicks(&self) -> bool {
+        false
+    }
+
+    /// Checks the current contents and action before a brewing stand click.
+    /// A refusal may carry a message for the clicking player.
+    fn brewing_click(
+        &self,
+        _player: Option<u128>,
+        _slot: usize,
+        _player_slot: bool,
+        _hotbar_swap: bool,
+        _clicked: Option<&ItemStack>,
+        _carried: Option<&ItemStack>,
+    ) -> Result<(), Option<crate::text::Text>> {
+        Ok(())
+    }
 }
 
 /// What `AnvilUpdateEvent` asks about once `createResult` made vanilla's

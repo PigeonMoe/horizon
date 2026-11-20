@@ -612,6 +612,9 @@ impl Game<'_> {
         // makes maps itself.
         let predicting = self.remote.is_some();
         if !predicting {
+            if let Some(notice) = menu.brewing_click_notice.take() {
+                self.system_message(notice);
+            }
             self.register_exploration_maps(made);
             for (item, count) in std::mem::take(&mut menu.crafted_counts) {
                 self.award_stat("crafted", &item, count);

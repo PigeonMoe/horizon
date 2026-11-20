@@ -319,9 +319,7 @@ impl Game<'_> {
         {
             return false;
         }
-        let mut cancel = false;
-        self.native_inventory_move_item(source, destination, &stack.item, &mut cancel);
-        !cancel
+        !self.container_move_canceled(source, destination, stack)
     }
     /// The single residency boundary for typed server-level reads.
     pub(super) fn native_level_world_result(

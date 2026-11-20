@@ -174,6 +174,36 @@ impl Menu {
         if in_range(slot_index) && self.state.slots[slot_index as usize].role == Role::Hidden {
             return Ok(());
         }
+        if self.state.kind == Kind::Brewing
+            && env.loop_context.side() == LoopSide::Server
+            && in_range(slot_index)
+            && let Some(rules) = env
+                .slot_rules
+                .filter(|rules| rules.listens_to_brewing_clicks())
+        {
+            let slot = slot_index as usize;
+            let clicked = self.slot(slot);
+            let hotbar_swap = input == Input::Swap
+                && ((0..9).contains(&button) || button == 40)
+                && self.may_pickup(env, slot)
+                && self.state.containers[PLAYER][button as usize]
+                    .as_ref()
+                    .map_or_else(
+                        || clicked.is_some(),
+                        |stack| self.may_place(env, slot, stack),
+                    );
+            if let Err(notice) = rules.brewing_click(
+                env.player,
+                slot,
+                self.state.slots[slot].container == PLAYER,
+                hotbar_swap,
+                clicked,
+                self.state.carried.as_ref(),
+            ) {
+                self.state.brewing_click_notice = notice;
+                return Ok(());
+            }
+        }
         if matches!(input, Input::Pickup | Input::QuickMove) && (button == 0 || button == 1) {
             let primary = button == 0;
             if slot_index == -999 {
@@ -227,11 +257,17 @@ impl Menu {
             if !in_range(slot_index) {
                 return Err(OUT_OF_BOUNDS);
             }
-            if let Some(stack) = self.slot(slot_index as usize) {
+            let slot = slot_index as usize;
+            let role = self.state.slots[slot].role;
+            if matches!(role, Role::GrindResult | Role::CartoResult) && !self.may_pickup(env, slot)
+            {
+                return Ok(());
+            }
+            if let Some(stack) = self.slot(slot) {
                 let mut copy = stack.clone();
                 copy.count = Self::max_stack(env, stack);
                 // The cartography result's safeClone runs onCraftedBy.
-                if self.state.slots[slot_index as usize].role == Role::CartoResult {
+                if role == Role::CartoResult {
                     Self::map_crafted(env.maps, &mut copy);
                 }
                 self.state.carried = Some(copy);

@@ -1344,10 +1344,33 @@ impl Game<'_> {
         .unwrap_or(0)
     }
     /// `InventoryMoveItemEvent` before the selected stack leaves `source`.
-    fn container_move_canceled(&self, source: [i32; 3], destination: [i32; 3], item: &str) -> bool {
+    pub(in crate::game) fn container_move_canceled(
+        &self,
+        source: [i32; 3],
+        destination: [i32; 3],
+        stack: &ItemStack,
+    ) -> bool {
+        use super::api_values::TryIntoApi;
         let mut cancel = false;
-        self.native_inventory_move_item(source, destination, item, &mut cancel);
+        self.native_inventory_move_item(source, destination, &stack.item, &mut cancel);
+        if !cancel
+            && mod_api::__private::listened(mod_api::HookId::InventoryStackMove)
+            && let Ok(stack) = stack.try_into_api()
+        {
+            self.native_inventory_stack_move(mod_api::__private::InventoryStackMoveCall {
+                dimension: self.dim.id(),
+                source,
+                destination,
+                stack: &stack,
+                cancel: &mut cancel,
+            });
+        }
         cancel
+    }
+
+    fn listens_to_inventory_moves() -> bool {
+        mod_api::__private::listened(mod_api::HookId::InventoryMoveItem)
+            || mod_api::__private::listened(mod_api::HookId::InventoryStackMove)
     }
     /// `HopperBlockEntity.ejectItems`: one root attempt across source slots, restoring each
     /// refused slot directly. Only the caller's final cooldown mark changes the hopper.
@@ -1368,18 +1391,17 @@ impl Game<'_> {
         mod_api::run_transaction(self, |game, tx| {
             use super::api_values::TryIntoApi;
             for slot in 0..hopper.len() {
-                let Some(snapshot) = game
-                    .containers()
-                    .get(hopper, slot)
-                    .and_then(|stack| stack.try_into_api().ok())
-                else {
+                let containers = game.containers();
+                let Some(stack) = containers.get(hopper, slot) else {
                     continue;
                 };
-                let resource = ItemResource::of(&snapshot);
-                let item = mod_api::__private::item_key_id(snapshot.item()).unwrap();
-                if game.container_move_canceled(from, at, item) {
+                let Ok(snapshot) = stack.try_into_api() else {
+                    continue;
+                };
+                if game.container_move_canceled(from, at, stack) {
                     continue;
                 }
+                let resource = ItemResource::of(&snapshot);
                 let (source, index) = hopper.locate(slot).ok_or(())?;
                 game.journal_block_entity_slot(source, index);
                 let Some(mut one) = game.take_one(hopper, slot) else {
@@ -1418,9 +1440,7 @@ impl Game<'_> {
             let Ok(one) = resource.as_stack().try_into_engine(self.items()) else {
                 continue;
             };
-            if part.amount(self, slot) == 0
-                || self.container_move_canceled(at, destination, &one.item)
-            {
+            if part.amount(self, slot) == 0 || self.container_move_canceled(at, destination, &one) {
                 continue;
             }
             let moved = mod_api::run_transaction(self, |game, tx| {
@@ -1523,21 +1543,18 @@ impl Game<'_> {
         source: &View,
         destination: &View,
     ) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::InventoryMoveItem) {
+        if !Self::listens_to_inventory_moves() {
             return false;
         }
         let containers = self.containers();
         let Some(stack) = containers.get(holder, slot) else {
             return false;
         };
-        let mut cancel = false;
-        self.native_inventory_move_item(
+        self.container_move_canceled(
             self.container_world_pos(source),
             self.container_world_pos(destination),
-            &stack.item,
-            &mut cancel,
-        );
-        cancel
+            stack,
+        )
     }
     /// The rest of `HopperBlockEntity.ejectItems`: one item into `target`.
     fn eject_into(&mut self, pos: Pos, hopper: &View, target: &View, face: Direction) -> bool {
@@ -1651,11 +1668,11 @@ impl Game<'_> {
             // room, the setItem putting the bone meal back into the detached
             // container (whose bone meal is lost with it).
             let bone_meal = bone_meal_stack().clone();
-            if mod_api::__private::listened(mod_api::HookId::InventoryMoveItem)
+            if Self::listens_to_inventory_moves()
                 && self.container_move_canceled(
                     [above.0, above.1, above.2],
                     destination,
-                    &bone_meal.item,
+                    &bone_meal,
                 )
             {
                 return Some(false);
@@ -1679,7 +1696,7 @@ impl Game<'_> {
         destination: [i32; 3],
     ) -> bool {
         let mut prepared = None;
-        let policy = mod_api::__private::listened(mod_api::HookId::InventoryMoveItem);
+        let policy = Self::listens_to_inventory_moves();
         let source_position = policy.then(|| self.container_world_pos(source));
         for slot in source.slots_for_face_iter(Some(Direction::Down)) {
             self.unpack_next_inventory_part(source, slot, &mut prepared);
@@ -1694,7 +1711,7 @@ impl Game<'_> {
                 stack
             };
             if source_position
-                .is_some_and(|pos| self.container_move_canceled(pos, destination, &stack.item))
+                .is_some_and(|pos| self.container_move_canceled(pos, destination, &stack))
             {
                 continue;
             }
@@ -2122,7 +2139,7 @@ impl Game<'_> {
                 if game.container_move_canceled(
                     [pos.x, pos.y, pos.z],
                     [target.0, target.1, target.2],
-                    &stack.item,
+                    &stack,
                 ) {
                     return ControlFlow::Break(());
                 }
@@ -3202,7 +3219,7 @@ mod dispenser_selection_tests {
 #[cfg(test)]
 mod double_chest_transfer_tests {
     use super::*;
-    use mod_api::{Flow, Hooks, Host, InventoryMoveItemEvent, ModEntry};
+    use mod_api::{Flow, Hooks, Host, InventoryMoveItemEvent, InventoryStackMoveEvent, ModEntry};
     use std::sync::{Arc, Mutex};
 
     type Endpoints = ([i32; 3], [i32; 3]);
@@ -3226,6 +3243,87 @@ mod double_chest_transfer_tests {
                 Flow::Continue
             }
         }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn hopper_inventory_stack_move_keeps_marked_bottles_in_the_source() {
+        struct Guard(Arc<Mutex<Vec<(i32, bool)>>>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Guard {
+            fn inventory_move_item(
+                &self,
+                _: &dyn Host,
+                event: &mut InventoryMoveItemEvent<'_>,
+            ) -> Flow {
+                if event.destination[0] == 8 {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+
+            fn inventory_stack_move(
+                &self,
+                _: &dyn Host,
+                event: &mut InventoryStackMoveEvent<'_>,
+            ) -> Flow {
+                let marked = event.stack.components().is_some_and(|components| {
+                    components
+                        .as_nbt()
+                        .get(&"minecraft:custom_data".into())
+                        .is_some()
+                });
+                self.0.lock().unwrap().push((event.destination[0], marked));
+                if marked { Flow::Cancel } else { Flow::Continue }
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let guard = ModEntry::new("stack_move_guard", Box::new(Guard(seen.clone())));
+        mod_platform::testing::with_mods(vec![guard].into(), || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let registry = game.pack.assets.registry;
+                let brew_state = registry.default_state("minecraft:brewing_stand").unwrap();
+                let hopper_state = crate::game::native_hooks::with_property(
+                    registry,
+                    registry.default_state("minecraft:hopper").unwrap(),
+                    "facing",
+                    "east",
+                )
+                .unwrap();
+                for (x, marked, moves) in [(4, true, false), (6, false, true), (8, false, false)] {
+                    let hopper = x - 1;
+                    game.world.set(x, 64, 4, brew_state).unwrap();
+                    game.world.set(hopper, 64, 4, hopper_state).unwrap();
+                    let stand = BlockEntity::for_block("minecraft:brewing_stand").unwrap();
+                    game.world.block_entities.insert((x, 64, 4), stand);
+                    let bottle = if marked {
+                        horizon_items::item_data::parse_stack(
+                            r#"{id:"minecraft:glass_bottle",count:1,components:{"minecraft:custom_data":{test_marker:1b}}}"#,
+                        )
+                        .unwrap()
+                        .unwrap()
+                    } else {
+                        ItemStack::new("minecraft:glass_bottle", 1)
+                    };
+                    let mut slots = vec![None; 5];
+                    slots[0] = Some(bottle);
+                    game.world
+                        .block_entities
+                        .insert((hopper, 64, 4), BlockEntity::Chest(slots));
+                    game.tick_hopper((hopper, 64, 4));
+                    let slots = |pos| game.world.block_entities.get(&pos).unwrap().slots();
+                    assert_eq!(slots((hopper, 64, 4))[0].is_none(), moves);
+                    assert_eq!(slots((x, 64, 4))[0].is_some(), moves);
+                }
+            });
+        });
+        assert_eq!(*seen.lock().unwrap(), [(4, true), (6, false)]);
     }
 
     #[test]

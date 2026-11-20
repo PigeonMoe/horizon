@@ -365,6 +365,15 @@ impl Game<'_> {
             .update(gi, |guest| store_player(menu, guest));
         let guest = &host.hub.guests[gi];
         let (conn, uuid, entity_id) = (guest.conn, guest.uuid, guest.entity_id);
+        if let Some(notice) = menu.brewing_click_notice.take() {
+            host.hub.send_to(
+                conn,
+                &C::SystemChat(play::SystemChat {
+                    content: horizon_client::lan::data::component_nbt(&notice.component()),
+                    overlay: false,
+                }),
+            );
+        }
         // `ItemStack.onCraftedBy`'s `Stats.ITEM_CRAFTED` count, before the
         // recipe the take used.
         if !crafted_counts.is_empty() {

@@ -139,6 +139,8 @@ pub struct State {
     /// Potions taken from a brewing stand's bottle slots
     /// (`PotionSlot.onTake`), for the caller.
     pub brewed: Vec<ItemStack>,
+    /// System message for the player whose brewing stand click was refused.
+    pub brewing_click_notice: Option<crate::text::Text>,
     /// Set by a server caller when a mod listens: every stack taken from a
     /// brewing stand's bottle slots then goes to `brewed_potion_takes`.
     pub brewed_potion_hook: bool,

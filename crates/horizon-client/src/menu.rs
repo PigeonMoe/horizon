@@ -886,6 +886,7 @@ impl Menu {
                 crafted_counts: Vec::new(),
                 merchant_remove_count: 0,
                 brewed: Vec::new(),
+                brewing_click_notice: None,
                 brewed_potion_hook: false,
                 brewed_potion_takes: Vec::new(),
                 item_smelted_hook: false,
@@ -3949,8 +3950,11 @@ pub(crate) mod tests {
                 menu.set_slot(&env, 1, Some(second.clone()));
                 let preview = stack(output, 1);
                 menu.load_slot(2, preview.clone());
-                for input in [Input::Pickup, Input::QuickMove] {
-                    menu.click(&env, 2, 0, input).unwrap();
+                menu.creative = true;
+                for (input, button) in
+                    [(Input::Pickup, 0), (Input::QuickMove, 0), (Input::Clone, 2)]
+                {
+                    menu.click(&env, 2, button, input).unwrap();
                     assert_eq!(menu.slot(0), first.as_ref());
                     assert_eq!(menu.slot(1), Some(&second));
                     assert_eq!(menu.slot(2), preview.as_ref());
@@ -3959,6 +3963,91 @@ pub(crate) mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn a_brewing_click_sees_the_original_cursor_and_player_inventory() {
+        struct BrewingRules;
+        impl SlotRules for BrewingRules {
+            fn listens(&self, _: &str) -> bool {
+                false
+            }
+
+            fn rule(
+                &self,
+                _: &str,
+                _: usize,
+                _: &ItemStack,
+                _: SlotContext<'_>,
+                _: &mut bool,
+                _: &mut u32,
+            ) {
+            }
+
+            fn listens_to_brewing_clicks(&self) -> bool {
+                true
+            }
+
+            fn brewing_click(
+                &self,
+                player: Option<u128>,
+                _: usize,
+                player_slot: bool,
+                hotbar_swap: bool,
+                clicked: Option<&ItemStack>,
+                carried: Option<&ItemStack>,
+            ) -> Result<(), Option<crate::text::Text>> {
+                assert_eq!(player, Some(7));
+                let offered = if player_slot { clicked } else { carried };
+                if hotbar_swap {
+                    Err(None)
+                } else if offered.is_some_and(|stack| stack.damage == 1) {
+                    Err(Some(crate::text::Text::literal("test denial")))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        bare_env(|base| {
+            let env = Env {
+                slot_rules: Some(&BrewingRules),
+                ..*base
+            };
+            let mut menu = Menu::new(Kind::Brewing);
+            let normal = stack("glass_bottle", 1).unwrap();
+            let marked = ItemStack {
+                damage: 1,
+                ..normal.clone()
+            };
+            menu.carried = Some(marked.clone());
+            menu.click(&env, 0, 0, Input::Pickup).unwrap();
+            assert_eq!(menu.carried.as_ref(), Some(&marked));
+            assert!(menu.slot(0).is_none());
+            assert!(menu.brewing_click_notice.take().is_some());
+
+            menu.carried = None;
+            menu.set_player_item(0, Some(marked.clone()));
+            let player_slot = menu
+                .state
+                .slots
+                .iter()
+                .position(|slot| slot.container == PLAYER && slot.index == 0)
+                .unwrap() as i32;
+            menu.click(&env, player_slot, 0, Input::QuickMove).unwrap();
+            assert_eq!(menu.slot(player_slot as usize), Some(&marked));
+            assert!(menu.slot(0).is_none());
+            assert!(menu.brewing_click_notice.take().is_some());
+
+            menu.set_player_item(0, Some(normal.clone()));
+            menu.click(&env, 0, 0, Input::Swap).unwrap();
+            assert_eq!(menu.slot(player_slot as usize), Some(&normal));
+            assert!(menu.slot(0).is_none());
+            assert!(menu.brewing_click_notice.is_none());
+            menu.click(&env, player_slot, 0, Input::QuickMove).unwrap();
+            assert!(menu.slot(player_slot as usize).is_none());
+            assert_eq!(menu.slot(0), Some(&normal));
+        });
     }
 
     /// A smithing result taken is recorded for `ItemSmithedEvent` while a mod
