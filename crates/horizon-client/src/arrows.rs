@@ -400,6 +400,11 @@ pub struct ArrowScene<'a, 'r> {
 }
 /// `EntityReference.getEntity` for an owner the arrow only knows by UUID.
 pub trait OwnerLookup {
+    /// The real player owner can interact with this block, if it resolves.
+    fn player_may_interact(&self, _uuid: [i32; 4], _pos: BlockPos) -> Option<bool> {
+        None
+    }
+
     /// A loaded entity other than a player has this UUID.
     fn non_player_entity(&self, uuid: [i32; 4]) -> bool;
 }
@@ -1124,7 +1129,7 @@ impl Ticker<'_, '_, '_, '_> {
         // Projectile.onHitBlock: BlockState.onProjectileHit.
         if !self.client
             && self.st.on_fire()
-            && let Some(reaction) = self.block_reaction(state)
+            && let Some(reaction) = self.block_reaction(pos, state)
         {
             self.st.events.push(ArrowEvent::Block {
                 pos,
@@ -1156,10 +1161,20 @@ impl Ticker<'_, '_, '_, '_> {
         self.st.pierce = 0;
         self.st.pierced.clear();
     }
-    /// `Projectile.mayInteract`: a mob's arrows need `mob_griefing`, or a
-    /// mod's yes for the owner (NeoForge's `canEntityGrief(level, owner)`).
-    fn may_interact(&self) -> bool {
+    /// `Projectile.mayInteract`: a player's arrow checks the player's
+    /// block access. A mob's needs `mob_griefing` or a mod's permission.
+    fn may_interact(&self, pos: BlockPos) -> bool {
+        if let Some(allowed) = self
+            .p
+            .owner_uuid
+            .and_then(|uuid| self.scene.owners.player_may_interact(uuid, pos))
+        {
+            return allowed;
+        }
         match self.p.owner {
+            // A guest's temporary collision ID is not a mob owner. An
+            // unresolved player owner follows the ownerless rule.
+            Some(Who::Mob(_)) if self.p.guest.is_some() => true,
             Some(Who::Mob(owner)) => match self.scene.mob_hooks {
                 Some(hooks) => hooks.can_grief(owner, self.scene.mob_griefing),
                 None => self.scene.mob_griefing,
@@ -1175,7 +1190,7 @@ impl Ticker<'_, '_, '_, '_> {
         }
     }
     /// `onProjectileHit` of the blocks a burning projectile lights.
-    fn block_reaction(&self, state: BlockStateId) -> Option<BlockReaction> {
+    fn block_reaction(&self, pos: BlockPos, state: BlockStateId) -> Option<BlockReaction> {
         let name = self.scene.registry.state(state)?.name.as_str();
         let flag = |key: &str| self.scene.property(state, key) == Some("true");
         let lit = || {
@@ -1184,11 +1199,11 @@ impl Ticker<'_, '_, '_, '_> {
             self.scene.registry.id(&definition)
         };
         match name {
-            "minecraft:tnt" if self.may_interact() && self.scene.tnt_explodes => {
+            "minecraft:tnt" if self.may_interact(pos) && self.scene.tnt_explodes => {
                 Some(BlockReaction::PrimeTnt)
             }
             "minecraft:campfire" | "minecraft:soul_campfire"
-                if self.may_interact() && !flag("lit") && !flag("waterlogged") =>
+                if self.may_interact(pos) && !flag("lit") && !flag("waterlogged") =>
             {
                 lit().map(BlockReaction::Light)
             }

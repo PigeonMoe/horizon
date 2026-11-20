@@ -227,13 +227,33 @@ fn a_guarded_projectile_keeps_the_flower_and_pot_while_other_impact_types_still_
         });
     });
 }
+const SHOOTER: u128 = 177;
+const SHOOTER_CONN: u32 = 12;
+const SHOOTER_ENTITY: u32 = 101;
+
+fn bind_guest_shooter(game: &mut Game<'_>) {
+    use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player};
+
+    game.lan_acting = Some(SHOOTER_CONN);
+    game.lan_acting_entity = Some(SHOOTER_ENTITY);
+    game.lan_acting_uuid = Some(SHOOTER);
+    game.lan_acting_name = Some("Shooter".into());
+    bind_acting_guest(game);
+    game.lan
+        .as_mut()
+        .unwrap()
+        .hub
+        .update_guest(SHOOTER_CONN, |guest| guest.permission = 2)
+        .unwrap();
+    game.lan_acting = None;
+    bind_local_player(game, 100, 188);
+    game.lan_acting_name = Some("Host".into());
+}
+
 #[test]
 #[ignore = "daily"]
 fn a_flaming_arrow_checks_ignition_with_its_resolved_player_owner() {
-    use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player};
     use mod_api::{BlockIgniteEvent, LevelHost, PlayerBlockIgnitePreEvent};
-
-    const SHOOTER: u128 = 177;
 
     #[derive(Clone, Default)]
     struct GuardIgnition {
@@ -274,20 +294,8 @@ fn a_flaming_arrow_checks_ignition_with_its_resolved_player_owner() {
     }
 
     with_game(|game| {
-        game.lan_acting = Some(12);
-        game.lan_acting_entity = Some(101);
-        game.lan_acting_uuid = Some(SHOOTER);
-        game.lan_acting_name = Some("Shooter".into());
-        bind_acting_guest(game);
-        game.lan
-            .as_mut()
-            .unwrap()
-            .hub
-            .update_guest(12, |guest| guest.permission = 2)
-            .unwrap();
-        game.lan_acting = None;
-        bind_local_player(game, 100, 188);
-        game.lan_acting_name = Some("Host".into());
+        bind_guest_shooter(game);
+        assert!(game.run_command("gamerule mob_griefing false"));
 
         let guard = GuardIgnition::default();
         let mods = vec![ModEntry::new("guarded-ignition", Box::new(guard.clone()))].into();
@@ -325,6 +333,59 @@ fn a_flaming_arrow_checks_ignition_with_its_resolved_player_owner() {
                 ]
             );
         });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guests_flaming_arrow_preserves_the_tnt_blast_owner() {
+    use horizon_core::nbt::Tag;
+
+    with_game(|game| {
+        bind_guest_shooter(game);
+        assert!(game.run_command("gamerule tnt_explodes true"));
+        assert!(game.run_command("gamerule mob_griefing false"));
+        source(game, 8, 4, "tnt");
+        source(game, 12, 4, "tnt");
+        assert!(game.run_command(
+            "summon minecraft:skeleton 12.5 205 8.5 {UUID:[I;0,0,0,178],NoAI:1b,NoGravity:1b}"
+        ));
+        let skeleton = game
+            .mobs
+            .iter()
+            .find(|mob| game.persist.uuid_of(mob.id) == Some([0, 0, 0, 178]))
+            .unwrap()
+            .id;
+        assert!(game.run_command(
+            "summon minecraft:arrow 8.5 202.5 4.5 {NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s,Owner:[I;0,0,0,177]}"
+        ));
+        assert!(game.run_command(
+            "summon minecraft:arrow 12.5 202.5 4.5 {NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s,Owner:[I;0,0,0,178]}"
+        ));
+        assert!(
+            game.creatures
+                .projectiles
+                .iter()
+                .any(|p| p.owner == Some(Who::Mob(skeleton)))
+        );
+        game.tick_projectiles().unwrap();
+
+        assert!(game.run_command("execute if block 8 200 4 air"));
+        assert!(game.run_command("execute if block 12 200 4 tnt"));
+        assert_eq!(game.tnts.len(), 1);
+        assert_eq!(
+            game.tnt_nbt(0).get("owner").cloned(),
+            Some(Tag::IntArray(
+                horizon_client::lan::playerdata::uuid_ints(SHOOTER).to_vec()
+            ))
+        );
+        game.set_tnt_blast_owner(game.tnts[0].id);
+        assert!(game.combat.blast_owner_player);
+        assert_eq!(game.combat.blast_guest, Some(SHOOTER_CONN));
+        assert_eq!(
+            game.combat.blast_owner.as_ref().map(|(id, _)| *id),
+            Some(SHOOTER_ENTITY)
+        );
     });
 }
 

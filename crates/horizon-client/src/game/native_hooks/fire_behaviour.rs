@@ -24,6 +24,28 @@ impl Game<'_> {
         })
     }
 
+    /// Resolves a burning arrow's real player owner in this level. Collision
+    /// can temporarily represent a remote shooter as a mob entity ID.
+    pub(in crate::game) fn arrow_block_player_owner(
+        &self,
+        owner_uuid: Option<[i32; 4]>,
+    ) -> Option<(u128, Option<u32>)> {
+        let uuid = horizon_client::lan::playerdata::ints_uuid(owner_uuid?);
+        match self.target_by_uuid(uuid) {
+            Some(Target::Player) if self.player.is_some() && !self.lan_acting_fake => {
+                Some((uuid, self.lan_acting))
+            }
+            Some(Target::Guest(conn))
+                if self
+                    .command_guest(conn)
+                    .is_some_and(|guest| guest.placed_in(self.dim.id())) =>
+            {
+                Some((uuid, Some(conn)))
+            }
+            _ => None,
+        }
+    }
+
     /// Paper resolves a burning arrow's owner for BlockIgniteEvent.
     pub(in crate::game) fn arrow_block_ignite_allowed(
         &mut self,
@@ -34,15 +56,9 @@ impl Game<'_> {
         if !self.checks_block_ignition() {
             return true;
         }
-        let player = owner_uuid
-            .map(horizon_client::lan::playerdata::ints_uuid)
-            .filter(|uuid| match self.target_by_uuid(*uuid) {
-                Some(Target::Player) => self.player.is_some() && !self.lan_acting_fake,
-                Some(Target::Guest(conn)) => self
-                    .command_guest(conn)
-                    .is_some_and(|guest| guest.placed_in(self.dim.id())),
-                _ => false,
-            });
+        let player = self
+            .arrow_block_player_owner(owner_uuid)
+            .map(|(uuid, _)| uuid);
         // The Paper cause switch uses ARROW for a plain arrow and its
         // FLINT_AND_STEEL fallback for a spectral arrow.
         let cause = if kind == "minecraft:arrow" {

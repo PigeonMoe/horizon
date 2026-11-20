@@ -5139,7 +5139,18 @@ impl Game<'_> {
                     if self.mob_block_change_allowed(projectile, kind, [pos.x, pos.y, pos.z])
                         && self.tnt_prime_allowed(pos)
                     {
-                        self.spawn_primed_tnt(pos, false, owner, None);
+                        let (owner, guest) =
+                            if let Some((_, guest)) = self.arrow_block_player_owner(owner_uuid) {
+                                (Some(Who::Player), guest)
+                            } else {
+                                let mob = owner.filter(|owner| {
+                                    matches!(*owner, Who::Mob(id) if self.mobs.iter().any(|mob| {
+                                        mob.id == id && !mob.removed
+                                    }))
+                                });
+                                (mob, None)
+                            };
+                        self.spawn_primed_tnt(pos, false, owner, guest);
                         self.with_level(|b, level, ticks| b.remove_block(level, ticks, pos, false));
                         let _ = self.process_level_events();
                     }
@@ -9857,6 +9868,18 @@ mod dye_mix_tests {
 }
 
 impl horizon_client::arrows::OwnerLookup for Game<'_> {
+    fn player_may_interact(&self, uuid: [i32; 4], pos: BlockPos) -> Option<bool> {
+        let (uuid, guest) = self.arrow_block_player_owner(Some(uuid))?;
+        let spawn_protection = match guest {
+            Some(conn) if Some(conn) != self.lan_acting => self
+                .lan
+                .as_ref()
+                .and_then(|host| self.spawn_protection_for(host, uuid)),
+            _ => self.lan_acting_spawn_protection,
+        };
+        Some(self.player_may_interact_at(pos, spawn_protection))
+    }
+
     fn non_player_entity(&self, uuid: [i32; 4]) -> bool {
         let found = self.target_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid));
         !matches!(

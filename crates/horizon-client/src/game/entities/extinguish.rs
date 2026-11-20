@@ -10,10 +10,18 @@ impl Game<'_> {
     /// under spawn protection or outside the world border may not change the
     /// block (`ServerPlayer.mayInteract`). The fire goes out either way.
     pub(super) fn may_interact_at(&self, pos: BlockPos) -> bool {
+        self.player_may_interact_at(pos, self.lan_acting_spawn_protection)
+    }
+
+    pub(super) fn player_may_interact_at(
+        &self,
+        pos: BlockPos,
+        spawn_protection: Option<i32>,
+    ) -> bool {
         self.border
             .geometry()
             .is_within_bounds(f64::from(pos.x), f64::from(pos.z), 0.0)
-            && !self.lan_acting_spawn_protection.is_some_and(|radius| {
+            && !spawn_protection.is_some_and(|radius| {
                 self.spawn_protects(radius, self.dim.id(), [pos.x, pos.y, pos.z])
             })
     }
