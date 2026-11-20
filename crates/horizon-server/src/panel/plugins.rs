@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::HashSet, fs::File, io::Read, path::Path};
 
+mod config;
+
 const MAX_MANIFEST: u64 = 64 * 1024;
 
 #[derive(Deserialize, Serialize)]
@@ -20,6 +22,8 @@ struct Card {
     description: String,
     #[serde(default)]
     actions: Vec<Action>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<config::Editor>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -77,6 +81,7 @@ impl Card {
         let mut action_ids = HashSet::new();
         let valid = label(&card.title, 80)
             && (card.description.is_empty() || label(&card.description, 200))
+            && card.config.as_ref().is_none_or(config::Editor::valid)
             && card.actions.len() <= 16
             && card.actions.iter().all(|action| {
                 valid_id(&action.id)
@@ -88,6 +93,10 @@ impl Card {
             });
         valid.then_some(card)
     }
+}
+
+pub(super) fn settings(shared: &Shared, plugin: &str, body: Option<&[u8]>) -> Response {
+    config::handle(shared, plugin, body)
 }
 
 pub(super) fn list(shared: &Shared) -> Response {

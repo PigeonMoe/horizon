@@ -24,6 +24,8 @@ getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
+toml_edit = "0.25"
+yaml-rust2 = { version = "0.13", default-features = false }
 # Updates: the release from GitHub, checked against the SHA-256 in its signed checksums (both already in the
 # lockfile, ureq through horizon-server-files).
 horizon-release-sign = { path = "../horizon-release-sign" }

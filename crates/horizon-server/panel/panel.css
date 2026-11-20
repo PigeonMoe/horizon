@@ -425,3 +425,25 @@ button.destructive-fill { background: color-mix(in srgb, var(--danger) 80%, blac
 button.destructive-fill:hover { background: color-mix(in srgb, var(--danger) 90%, black); }
 .mono { font-family: var(--mono); }
 .facts dt.mono { font-size: 12px; }
+
+.settings-form {
+  display: grid;
+  gap: 18px;
+}
+.settings-form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 14px 0;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 14px 20px;
+}
+.settings-form legend { font-weight: 600; }
+.settings-form label { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.settings-form label > input, .settings-form label > select { width: 100%; }
+.settings-form label > small { color: var(--ink-60); }
+.settings-form button { justify-self: start; }
+.settings-form button:disabled { opacity: 0.55; cursor: default; }
+.note.error { color: var(--danger); }

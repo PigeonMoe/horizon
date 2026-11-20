@@ -1,13 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark light">
-<title>Horizon server</title>
+<title>Horizon 服务端</title>
 <link rel="icon" href="/mark.png">
 <link rel="stylesheet" href="/panel.css">
+<script src="/zh-cn.js" defer></script>
 <script src="/panel.js" defer></script>
 </head>
 <body>
@@ -48,72 +49,73 @@
   <aside class="side">
     <div class="brand">
       <img src="/mark.png" alt="" width="28" height="28">
-      <span>Horizon <b>server</b></span>
+      <span>Horizon <b><span data-t="server"></span></b></span>
     </div>
 
     <div class="server-card plate">
-      <div class="server-name" id="server-name">Server</div>
+      <div class="server-name" id="server-name"><span data-t="Server"></span></div>
       <div class="server-address" id="server-address"></div>
       <div class="server-state"><span id="phase" class="state">…</span><span id="uptime" class="faint"></span></div>
     </div>
 
-    <nav class="nav" aria-label="Pages">
-      <a href="#overview" data-page="overview"><svg><use href="#i-dashboard-square-01"/></svg>Overview</a>
-      <a href="#players" data-page="players"><svg><use href="#i-user-multiple-02"/></svg>Players<span class="count" id="nav-players"></span></a>
-      <a href="#console" data-page="console"><svg><use href="#i-computer-terminal-01"/></svg>Console</a>
-      <a href="#backups" data-page="backups"><svg><use href="#i-folder-01"/></svg>Backups</a>
-      <a href="#plugins" data-page="plugins"><svg><use href="#i-puzzle"/></svg>Plugins</a>
-      <a href="#reports" data-page="reports"><svg><use href="#i-information-circle"/></svg>Crash reports<span class="count warn" id="nav-reports"></span></a>
+    <nav class="nav" data-t-aria-label="Pages">
+      <a href="#overview" data-page="overview"><svg><use href="#i-dashboard-square-01"/></svg><span data-t="Overview"></span></a>
+      <a href="#players" data-page="players"><svg><use href="#i-user-multiple-02"/></svg><span data-t="Players"></span><span class="count" id="nav-players"></span></a>
+      <a href="#console" data-page="console"><svg><use href="#i-computer-terminal-01"/></svg><span data-t="Console"></span></a>
+      <a href="#backups" data-page="backups"><svg><use href="#i-folder-01"/></svg><span data-t="Backups"></span></a>
+      <a href="#settings" data-page="settings"><svg><use href="#i-globe-02"/></svg><span data-t="Server settings"></span></a>
+      <a href="#plugins" data-page="plugins"><svg><use href="#i-puzzle"/></svg><span data-t="Plugins"></span></a>
+      <a href="#reports" data-page="reports"><svg><use href="#i-information-circle"/></svg><span data-t="Crash reports"></span><span class="count warn" id="nav-reports"></span></a>
     </nav>
 
     <div class="side-foot">
       <span id="version" class="faint"></span>
-      <button type="button" class="ghost small" id="sign-out">Sign out</button>
+      <button type="button" class="ghost small" id="sign-out"><span data-t="Sign out"></span></button>
     </div>
   </aside>
 
   <div class="content">
     <header class="top">
       <div>
-        <h1 id="page-title">Overview</h1>
+        <h1 id="page-title"><span data-t="Overview"></span></h1>
         <p id="page-lead" class="lead"></p>
       </div>
-      <div class="power" role="group" aria-label="Server">
-        <button type="button" id="start" class="primary" hidden><svg><use href="#i-play"/></svg>Start</button>
-        <button type="button" id="restart"><svg><use href="#i-refresh"/></svg>Restart</button>
-        <button type="button" id="stop" class="destructive"><svg><use href="#i-stop"/></svg>Stop</button>
+      <div class="power" role="group" data-t-aria-label="Server">
+        <button type="button" id="start" class="primary" hidden><svg><use href="#i-play"/></svg><span data-t="Start"></span></button>
+        <button type="button" id="restart"><svg><use href="#i-refresh"/></svg><span data-t="Restart"></span></button>
+        <button type="button" id="stop" class="destructive"><svg><use href="#i-stop"/></svg><span data-t="Stop"></span></button>
       </div>
     </header>
 
     <div id="update" class="banner plate" role="status" hidden>
       <span class="dot accent"></span>
       <span id="update-text"></span>
-      <button id="update-button" type="button" class="primary small" hidden>Update now</button>
+      <button id="update-button" type="button" class="primary small" hidden><span data-t="Update now"></span></button>
     </div>
 
     <!-- Overview -->
     <section class="page" data-page="overview">
       <div class="stats">
-        <article class="stat plate"><header><span>TPS</span><b id="tps-now">–</b></header><canvas id="tps"></canvas><footer id="tps-note" class="faint">target 20</footer></article>
-        <article class="stat plate"><header><span>Tick time</span><b id="mspt-now">–</b></header><canvas id="mspt"></canvas><footer id="mspt-note" class="faint">budget 50 ms</footer></article>
-        <article class="stat plate"><header><span>Players</span><b id="players-now">–</b></header><canvas id="players-chart"></canvas><footer id="players-note" class="faint"></footer></article>
-        <article class="stat plate"><header><span>Memory</span><b id="ram-now">–</b></header><canvas id="ram"></canvas><footer id="cpu-note" class="faint"></footer></article>
+        <article class="stat plate"><header><span>TPS</span><b id="tps-now">–</b></header><canvas id="tps"></canvas><footer id="tps-note" class="faint"><span data-t="target 20"></span></footer></article>
+        <article class="stat plate"><header><span><span data-t="Tick time"></span></span><b id="mspt-now">–</b></header><canvas id="mspt"></canvas><footer id="mspt-note" class="faint"><span data-t="budget 50 ms"></span></footer></article>
+        <article class="stat plate"><header><span><span data-t="Players"></span></span><b id="players-now">–</b></header><canvas id="players-chart"></canvas><footer id="players-note" class="faint"></footer></article>
+        <article class="stat plate"><header><span><span data-t="Memory"></span></span><b id="ram-now">–</b></header><canvas id="ram"></canvas><footer id="cpu-note" class="faint"></footer></article>
       </div>
 
       <div class="grid-2">
         <article class="plate card">
-          <header class="card-head"><h2>Online now</h2><a href="#players" class="link">All players</a></header>
+          <header class="card-head"><h2><span data-t="Online now"></span></h2><a href="#players" class="link"><span data-t="All players"></span></a></header>
           <ul class="rows" id="overview-players"></ul>
-          <p class="empty" id="overview-no-players">Nobody is online.</p>
+          <p class="empty" id="overview-no-players"><span data-t="Nobody is online."></span></p>
         </article>
         <article class="plate card">
-          <header class="card-head"><h2>This server</h2></header>
+          <header class="card-head"><h2><span data-t="This server"></span></h2></header>
           <dl class="facts" id="facts"></dl>
         </article>
       </div>
 
       <article class="plate card">
-        <header class="card-head"><h2>Latest in the console</h2><a href="#console" class="link">Open console</a></header>
+        <header class="card-head"><h2><span data-t="Latest in the console"></span></h2><a href="#console" class="link"><span data-t="Open console"></span></a></header>
         <pre class="log short" id="log-tail"></pre>
       </article>
     </section>
@@ -121,20 +123,20 @@
     <!-- Players -->
     <section class="page" data-page="players" hidden>
       <article class="plate card">
-        <header class="card-head"><h2>Online</h2></header>
+        <header class="card-head"><h2><span data-t="Online"></span></h2></header>
         <ul class="rows" id="players-online"></ul>
-        <p class="empty" id="players-none">Nobody is online. Players show up here as they join.</p>
+        <p class="empty" id="players-none"><span data-t="Nobody is online. Players show up here as they join."></span></p>
       </article>
 
       <article class="plate card">
-        <header class="card-head"><h2>Banned players</h2></header>
+        <header class="card-head"><h2><span data-t="Banned players"></span></h2></header>
         <form class="inline-form" id="ban-form">
-          <input name="target" placeholder="Player name" maxlength="16" required autocomplete="off" spellcheck="false" aria-label="Player name">
-          <input name="reason" placeholder="Reason (optional)" maxlength="200" autocomplete="off" aria-label="Reason">
-          <button type="submit" class="destructive">Ban</button>
+          <input name="target" data-t-placeholder="Player name" maxlength="16" required autocomplete="off" spellcheck="false" data-t-aria-label="Player name">
+          <input name="reason" data-t-placeholder="Reason (optional)" maxlength="200" autocomplete="off" data-t-aria-label="Reason">
+          <button type="submit" class="destructive"><span data-t="Ban"></span></button>
         </form>
         <ul class="rows" id="bans"></ul>
-        <p class="empty" id="bans-none">Nobody is banned.</p>
+        <p class="empty" id="bans-none"><span data-t="Nobody is banned."></span></p>
       </article>
     </section>
 
@@ -142,11 +144,11 @@
     <section class="page console-page" data-page="console" hidden>
       <article class="plate console">
         <pre class="log" id="log" tabindex="0" aria-live="off"></pre>
-        <button type="button" class="jump small" id="jump" hidden><svg><use href="#i-arrow-down-01"/></svg>Latest</button>
+        <button type="button" class="jump small" id="jump" hidden><svg><use href="#i-arrow-down-01"/></svg><span data-t="Latest"></span></button>
         <form class="command" id="command-form">
           <span class="prompt" aria-hidden="true">/</span>
-          <input id="command" placeholder="A command, like list or say Hello" autocomplete="off" spellcheck="false" aria-label="Console command">
-          <button type="submit" class="primary">Run</button>
+          <input id="command" data-t-placeholder="A command, like list or say Hello" autocomplete="off" spellcheck="false" data-t-aria-label="Console command">
+          <button type="submit" class="primary"><span data-t="Run"></span></button>
         </form>
       </article>
     </section>
@@ -155,20 +157,36 @@
     <section class="page" data-page="backups" hidden>
       <article class="plate card">
         <form class="inline-form" id="backup-form">
-          <input id="backup-name" placeholder="Name (optional)" maxlength="40" pattern="[A-Za-z0-9_.\-]*" autocomplete="off" aria-label="Backup name">
-          <button type="submit" class="primary"><svg><use href="#i-folder-01"/></svg>Back up now</button>
+          <input id="backup-name" data-t-placeholder="Name (optional)" maxlength="40" pattern="[A-Za-z0-9_.\-]*" autocomplete="off" data-t-aria-label="Backup name">
+          <button type="submit" class="primary"><svg><use href="#i-folder-01"/></svg><span data-t="Back up now"></span></button>
         </form>
         <p class="faint note" id="backup-schedule"></p>
         <ul class="rows" id="backups"></ul>
-        <p class="empty" id="no-backups">No backups yet.</p>
+        <p class="empty" id="no-backups"><span data-t="No backups yet."></span></p>
+      </article>
+    </section>
+
+    <section class="page" data-page="settings" hidden>
+      <article class="plate card">
+        <form class="settings-form" id="server-settings"></form>
+        <p id="settings-status" class="note" role="status" data-t="Loading settings…"></p>
       </article>
     </section>
 
     <section class="page" data-page="plugins" hidden>
       <article class="plate card">
         <ul class="rows" id="plugins"></ul>
-        <p class="empty" id="plugin-status" role="status">Loading plugins…</p>
+        <p class="empty" id="plugin-status" role="status"><span data-t="Loading plugins…"></span></p>
         <pre class="log short" id="plugin-output" role="status" tabindex="0" hidden></pre>
+      </article>
+      <article class="plate card" id="plugin-settings" hidden>
+        <header class="card-head">
+          <h2 id="plugin-settings-title"></h2>
+          <button type="button" class="ghost small" id="plugin-settings-close"><span data-t="Close"></span></button>
+        </header>
+        <p class="note" id="plugin-settings-note"></p>
+        <form class="settings-form" id="plugin-settings-form"></form>
+        <p class="note" id="plugin-settings-status" role="status"></p>
       </article>
     </section>
 
@@ -177,10 +195,10 @@
       <div class="split">
         <article class="plate card">
           <ul class="rows" id="crashes"></ul>
-          <p class="empty" id="no-crashes">No crash reports.</p>
+          <p class="empty" id="no-crashes"><span data-t="No crash reports."></span></p>
         </article>
         <article class="plate card viewer" id="crash-viewer" hidden>
-          <header class="card-head"><h2 id="crash-name"></h2><button type="button" class="ghost small" id="crash-copy"><svg><use href="#i-copy-01"/></svg>Copy</button></header>
+          <header class="card-head"><h2 id="crash-name"></h2><button type="button" class="ghost small" id="crash-copy"><svg><use href="#i-copy-01"/></svg><span data-t="Copy"></span></button></header>
           <pre class="log" id="crash-text" tabindex="0"></pre>
         </article>
       </div>
@@ -191,14 +209,13 @@
 <main id="signed-out" class="gate" hidden>
   <div class="plate gate-card">
     <img src="/mark.png" alt="" width="48" height="48">
-    <h1>Sign in to your server</h1>
-    <p id="login-link-help" hidden>Run <code>horizon-server panel</code> in the server's folder and open the link it prints.
-      A link works once, for 10 minutes.</p>
+    <h1><span data-t="Sign in to your server"></span></h1>
+    <p id="login-link-help" hidden><span data-t="login.run"></span> <code>horizon-server panel</code><span data-t="login.link"></span></p>
     <form id="key-login" action="/login" method="post" hidden>
-      <label for="access-key">Panel access key</label>
+      <label for="access-key"><span data-t="Panel access key"></span></label>
       <input id="access-key" type="password" autocomplete="current-password" maxlength="128" required>
       <p id="login-error" role="alert" hidden></p>
-      <button id="login-submit" class="primary" type="submit">Sign in</button>
+      <button id="login-submit" class="primary" type="submit"><span data-t="Sign in"></span></button>
     </form>
   </div>
 </main>
@@ -206,8 +223,8 @@
 <main id="gone" class="gate" hidden>
   <div class="plate gate-card">
     <img src="/mark.png" alt="" width="48" height="48">
-    <h1>The server isn't answering</h1>
-    <p>It may have stopped. Start it again with <code>horizon-server start</code>; this page reconnects by itself.</p>
+    <h1><span data-t="The server isn't answering"></span></h1>
+    <p><span data-t="gone.run"></span> <code>horizon-server start</code><span data-t="gone.reconnect"></span></p>
   </div>
 </main>
 
@@ -217,8 +234,8 @@
     <p id="dialog-text"></p>
     <div id="dialog-fields"></div>
     <div class="dialog-actions">
-      <button value="cancel" type="submit" class="ghost" formnovalidate>Cancel</button>
-      <button value="ok" type="submit" id="dialog-ok" class="primary">OK</button>
+      <button value="cancel" type="submit" class="ghost" formnovalidate><span data-t="Cancel"></span></button>
+      <button value="ok" type="submit" id="dialog-ok" class="primary"><span data-t="OK"></span></button>
     </div>
   </form>
 </dialog>

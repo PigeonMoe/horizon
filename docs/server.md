@@ -751,6 +751,31 @@ Each action runs a fixed, one-line console command starting with the package ID 
 The panel checks that the package is loaded when it runs an action. Install manifests from plugins you
 trust, since they define commands executed with console permissions. Edits take effect on the next refresh.
 
+The panel opens in Simplified Chinese. **服务端设置** edits common settings through the same validation and
+live updates as `horizon-server config set`; after saving, it lists the settings that require a restart.
+
+An installed plugin manifest can also expose selected configuration fields under **编辑配置**:
+
+```toml
+[config]
+file = "config/example-server.toml"
+world_override = true
+note = "保存后自动重新读取配置。"
+
+[[config.fields]]
+id = "limit"
+key = "network.limit"
+label = "网络上限"
+kind = "integer"
+min = 1
+max = 1000
+```
+
+The editor supports `boolean` and bounded `integer` fields already present in `config/*.toml` or in a
+`plugins/<folder>/config.yml` (or `config.yaml`) block mapping. Use `world_override` for a TOML server
+config that can be overridden by the active world's `serverconfig/` copy. Settings are saved to disk, and
+the plugin's usual reload behavior applies. Use `note` to explain what the operator must do after saving.
+
 ## 7. Backups, updates and crash restart
 
 - **Backups.** The supervisor runs `save-off`, then `save-all flush`, then zips the world plus the vanilla

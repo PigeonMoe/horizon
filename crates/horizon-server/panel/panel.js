@@ -5,6 +5,15 @@
 
 const $ = (id) => document.getElementById(id);
 
+function localizeDocument() {
+  for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+  for (const attribute of ["placeholder", "aria-label"]) {
+    for (const el of document.querySelectorAll(`[data-t-${attribute}]`)) {
+      el.setAttribute(attribute, t(el.getAttribute(`data-t-${attribute}`)));
+    }
+  }
+}
+
 // --- Talking to the server -------------------------------------------------------------------------------
 
 class SignedOut extends Error {}
@@ -19,11 +28,11 @@ async function api(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    throw new Error("the server isn't answering");
+    throw new Error(t("the server isn't answering"));
   }
   if (response.status === 401) throw new SignedOut();
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(value.error || `error ${response.status}`);
+  if (!response.ok) throw new Error(value.error ? t(value.error) : t("error {status}", { status: response.status }));
   return value;
 }
 
@@ -32,11 +41,11 @@ async function act(method, path, body, done) {
   try {
     const reply = await api(method, path, body);
     const said = reply && Array.isArray(reply.output) ? reply.output.join("\n") : "";
-    toast(said || done || "Done.");
+    toast(said || done || t("Done."));
     return reply;
   } catch (e) {
     if (e instanceof SignedOut) show("signed-out");
-    toast(e.message, true);
+    else toast(e.message, true);
     return null;
   }
 }
@@ -79,9 +88,9 @@ function button(label, action, { kind, iconName, small = true, title } = {}) {
 function duration(seconds) {
   if (seconds == null) return "";
   const d = Math.floor(seconds / 86400), hr = Math.floor(seconds / 3600) % 24, m = Math.floor(seconds / 60) % 60;
-  if (d) return `${d} d ${hr} h`;
-  if (hr) return `${hr} h ${m} min`;
-  return m ? `${m} min` : `${seconds} s`;
+  if (d) return t("{d} d {hr} h", { d, hr });
+  if (hr) return t("{hr} h {m} min", { hr, m });
+  return m ? t("{m} min", { m }) : t("{seconds} s", { seconds });
 }
 
 function bytes(n) {
@@ -99,13 +108,13 @@ function backupParts(name) {
   return { when, label: m[7] };
 }
 
-const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const dateFormat = new Intl.DateTimeFormat(document.documentElement.lang, { dateStyle: "medium", timeStyle: "short" });
 function ago(date) {
   const s = Math.round((Date.now() - date.getTime()) / 1000);
-  if (s < 90) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-  return `${Math.round(s / 86400)} d ago`;
+  if (s < 90) return t("just now");
+  if (s < 3600) return t("{minutes} min ago", { minutes: Math.round(s / 60) });
+  if (s < 86400) return t("{hours} h ago", { hours: Math.round(s / 3600) });
+  return t("{days} d ago", { days: Math.round(s / 86400) });
 }
 
 /// A steady colour per player name, for the letter avatar (the panel loads no skins from elsewhere).
@@ -137,7 +146,7 @@ function toast(text, error) {
 }
 
 /// Asks before a change: resolves to the fields' values (an object), or null when cancelled.
-function ask({ title, text, ok = "OK", danger = false, fields = [] }) {
+function ask({ title, text, ok = t("OK"), danger = false, fields = [] }) {
   const dialog = $("dialog");
   $("dialog-title").textContent = title;
   $("dialog-text").textContent = text || "";
@@ -166,12 +175,13 @@ function ask({ title, text, ok = "OK", danger = false, fields = [] }) {
 // --- Pages ----------------------------------------------------------------------------------------------
 
 const PAGES = {
-  overview: ["Overview", "How the server is doing right now."],
-  players: ["Players", "Who is online, who may join and who is banned."],
-  console: ["Console", "The server's log as it happens. Commands run as if typed in the server's console."],
-  backups: ["Backups", "Zips of the world and the settings in backups/. Restoring keeps the current world as a backup."],
-  plugins: ["Plugins", ""],
-  reports: ["Crash reports", "The game writes one each time it stops unexpectedly."],
+  overview: [t("Overview"), t("How the server is doing right now.")],
+  players: [t("Players"), t("Who is online, who may join and who is banned.")],
+  console: [t("Console"), t("The server's log as it happens. Commands run as if typed in the server's console.")],
+  backups: [t("Backups"), t("Zips of the world and the settings in backups/. Restoring keeps the current world as a backup.")],
+  settings: [t("Server settings"), t("settings.lead")],
+  plugins: [t("Plugins"), ""],
+  reports: [t("Crash reports"), t("The game writes one each time it stops unexpectedly.")],
 };
 let page = "overview";
 let loginModeLoaded = false;
@@ -186,7 +196,7 @@ function route() {
   }
   $("page-title").textContent = PAGES[page][0];
   $("page-lead").textContent = PAGES[page][1];
-  document.title = `${PAGES[page][0]} · ${state.config ? state.config.server.motd : "Horizon server"}`;
+  document.title = `${PAGES[page][0]} · ${state.config?.server.motd || t("Horizon server")}`;
   if (page === "console") scrollLog(true);
   if (page === "plugins" && !$('app').hidden) refreshPlugins();
   if (state.status) renderUpdate(state.status.update);
@@ -225,9 +235,9 @@ const state = {
 function renderStatus(status) {
   state.status = status;
   const phase = $("phase");
-  phase.textContent = status.phase;
+  phase.textContent = t(`phase.${status.phase}`);
   phase.className = `state ${status.phase}`;
-  $("uptime").textContent = status.engine_uptime_seconds != null ? `· up ${duration(status.engine_uptime_seconds)}` : "";
+  $("uptime").textContent = status.engine_uptime_seconds != null ? t("\u00b7 up {duration}", { duration: duration(status.engine_uptime_seconds) }) : "";
   $("version").textContent = `horizon-server ${status.version}`;
   const stopped = status.phase === "stopped";
   $("start").hidden = !stopped;
@@ -243,8 +253,8 @@ function renderStatus(status) {
 function renderUpdate(update) {
   const offer = update && !update.busy && update.available;
   let text = "";
-  if (update && update.busy) text = `Updating: ${update.busy}…`;
-  else if (offer) text = `Horizon ${update.available} is out. This server runs ${update.installed}.`;
+  if (update && update.busy) text = t("Updating: {version}\u2026", { version: update.busy });
+  else if (offer) text = t("Horizon {available} is out. This server runs {installed}.", { available: update.available, installed: update.installed });
   else if (update && update.last && !update.ok) text = update.last;
   $("update").hidden = !text || page !== "overview";
   $("update").classList.toggle("failed", Boolean(update && update.last && !update.ok && !update.busy && !offer));
@@ -327,13 +337,13 @@ function renderCharts() {
   $("tps-now").className = tps == null ? "none" : tps < 15 ? "bad" : tps < 19.5 ? "meh" : "";
   $("mspt-now").textContent = mspt == null ? "–" : `${mspt.toFixed(1)} ms`;
   $("mspt-now").className = mspt == null ? "none" : mspt > 50 ? "bad" : mspt > 40 ? "meh" : "";
-  $("mspt-note").textContent = last.mspt_p95 != null ? `95 % of ticks under ${last.mspt_p95.toFixed(1)} ms · budget 50 ms` : "budget 50 ms";
+  $("mspt-note").textContent = last.mspt_p95 != null ? t("95 % of ticks under {p95} ms \u00b7 budget 50 ms", { p95: last.mspt_p95.toFixed(1) }) : t("budget 50 ms");
   const online = onlinePlayers().length, cap = maxPlayers();
   $("players-now").textContent = state.status && state.status.sample && state.status.sample.game ? `${online}${cap ? ` / ${cap}` : ""}` : "–";
   const peak = Math.max(0, ...s.map((x) => x.players || 0));
-  $("players-note").textContent = s.length ? `peak ${peak} in the last ${Math.max(1, Math.round(s.length / 60))} min` : "";
+  $("players-note").textContent = s.length ? t("peak {peak} in the last {minutes} min", { peak, minutes: Math.max(1, Math.round(s.length / 60)) }) : "";
   $("ram-now").textContent = bytes(last.rss_bytes);
-  $("cpu-note").textContent = last.cpu_percent == null ? "" : `CPU ${Math.round(last.cpu_percent)} % of a core`;
+  $("cpu-note").textContent = last.cpu_percent == null ? "" : t("CPU {percent} % of a core", { percent: Math.round(last.cpu_percent) });
   sparkline("tps", s.map((x) => x.tps), { max: 20, line: 20 });
   sparkline("mspt", s.map((x) => x.mspt), { max: 50, line: 50 });
   sparkline("players-chart", s.map((x) => x.players), { max: cap || 1 });
@@ -345,29 +355,27 @@ function renderCharts() {
 function renderOnline() {
   const players = onlinePlayers();
   $("nav-players").textContent = state.status && state.status.sample && state.status.sample.game ? String(players.length) : "";
-  fill("overview-players", "overview-no-players", players.slice(0, 6).map((p) => h("li", {}, avatar(p.name), h("span", { class: "row-main" }, h("b", {}, p.name), isOp(p.name) && h("small", {}, "Operator")), ping(p.ping_ms))));
+  fill("overview-players", "overview-no-players", players.slice(0, 6).map((p) => h("li", {}, avatar(p.name), h("span", { class: "row-main" }, h("b", {}, p.name), isOp(p.name) && h("small", {}, t("Operator"))), ping(p.ping_ms))));
   if (page === "players") renderPlayers();
 }
 
 function renderFacts() {
   const c = state.config, s = state.status;
   if (!c || !s) return;
-  $("server-name").textContent = c.server.motd || "Horizon server";
-  $("server-address").textContent = c.server.bind ? `${c.server.bind}:${c.server.port}` : `port ${c.server.port}`;
+  $("server-name").textContent = c.server.motd || t("Horizon server");
+  $("server-address").textContent = c.server.bind ? `${c.server.bind}:${c.server.port}` : t("port {port}", { port: c.server.port });
   const last = state.backups.map((b) => backupParts(b.name).when).filter(Boolean).sort((a, b) => b - a)[0];
   const facts = [
-    ["Game", `${cap(c.world.game_mode)}, ${c.world.difficulty}${c.world.hardcore ? ", hardcore" : ""}`],
-    ["World", c.world.name],
-    ["Who can join", c.server.whitelist ? "Whitelisted players" : "Everyone"],
-    ["Accounts", c.server.online_mode ? "Checked with Minecraft" : "Not checked (offline mode)"],
-    ["Last backup", last ? `${ago(last)} · every ${c.backups.every}` : `none yet · every ${c.backups.every}`],
-    ["Supervisor up", duration(s.uptime_seconds)],
+    [t("Game"), [t(`mode.${c.world.game_mode}`), t(`difficulty.${c.world.difficulty}`), c.world.hardcore && t("hardcore")].filter(Boolean).join(" · ")],
+    [t("World"), c.world.name],
+    [t("Who can join"), c.server.whitelist ? t("Whitelisted players") : t("Everyone")],
+    [t("Accounts"), c.server.online_mode ? t("Checked with Minecraft") : t("Not checked (offline mode)")],
+    [t("Last backup"), last ? t("{ago} \u00b7 every {interval}", { ago: ago(last), interval: c.backups.every }) : t("none yet \u00b7 every {interval}", { interval: c.backups.every })],
+    [t("Supervisor up"), duration(s.uptime_seconds)],
   ];
-  if (s.crashes) facts.push(["Crashes", `${s.crashes} since the supervisor started`]);
+  if (s.crashes) facts.push([t("Crashes"), t("{count} since the supervisor started", { count: s.crashes })]);
   $("facts").replaceChildren(...facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
 }
-
-const cap = (text) => (text ? text[0].toUpperCase() + text.slice(1) : "");
 
 // --- Players --------------------------------------------------------------------------------------------
 
@@ -376,18 +384,18 @@ function isOp(name) {
 }
 
 async function kick(name) {
-  const answer = await ask({ title: `Kick ${name}?`, text: "They can join again straight away.", ok: "Kick", danger: true, fields: [{ name: "reason", label: "Reason (optional)", placeholder: "Shown to the player" }] });
-  if (answer) await act("POST", "/api/v1/players/kick", { name, reason: answer.reason || undefined }, `Kicked ${name}.`);
+  const answer = await ask({ title: t("Kick {name}?", { name }), text: t("They can join again straight away."), ok: t("Kick"), danger: true, fields: [{ name: "reason", label: t("Reason (optional)"), placeholder: t("Shown to the player") }] });
+  if (answer) await act("POST", "/api/v1/players/kick", { name, reason: answer.reason || undefined }, t("Kicked {name}.", { name }));
 }
 
 async function ban(name) {
-  const answer = await ask({ title: `Ban ${name}?`, text: "They are kicked and can't join until you pardon them.", ok: "Ban", danger: true, fields: [{ name: "reason", label: "Reason (optional)", placeholder: "Shown to the player" }] });
-  if (answer && (await act("POST", "/api/v1/players/ban", { name, reason: answer.reason || undefined }, `Banned ${name}.`))) refreshLists();
+  const answer = await ask({ title: t("Ban {name}?", { name }), text: t("They are kicked and can't join until you pardon them."), ok: t("Ban"), danger: true, fields: [{ name: "reason", label: t("Reason (optional)"), placeholder: t("Shown to the player") }] });
+  if (answer && (await act("POST", "/api/v1/players/ban", { name, reason: answer.reason || undefined }, t("Banned {name}.", { name })))) refreshLists();
 }
 
 async function toggleOp(name) {
   const op = isOp(name);
-  if (await act("POST", op ? "/api/v1/players/deop" : "/api/v1/players/op", { name }, op ? `${name} is no longer an operator.` : `${name} is now an operator.`)) refreshLists();
+  if (await act("POST", op ? "/api/v1/players/deop" : "/api/v1/players/op", { name }, op ? t("{name} is no longer an operator.", { name }) : t("{name} is now an operator.", { name }))) refreshLists();
 }
 
 function renderPlayers() {
@@ -396,24 +404,24 @@ function renderPlayers() {
   fill("players-online", "players-none", online.map((p) => h(
     "li", {},
     avatar(p.name),
-    h("span", { class: "row-main" }, h("b", {}, p.name), h("small", {}, isOp(p.name) ? "Operator" : "Player")),
+    h("span", { class: "row-main" }, h("b", {}, p.name), h("small", {}, isOp(p.name) ? t("Operator") : t("Player"))),
     ping(p.ping_ms),
     h("span", { class: "row-actions" },
-      button(isOp(p.name) ? "Deop" : "Op", () => toggleOp(p.name), { kind: "ghost" }),
-      button("Kick", () => kick(p.name), { kind: "ghost" }),
-      button("Ban", () => ban(p.name), { kind: "destructive" })),
+      button(isOp(p.name) ? t("Deop") : t("Op"), () => toggleOp(p.name), { kind: "ghost" }),
+      button(t("Kick"), () => kick(p.name), { kind: "ghost" }),
+      button(t("Ban"), () => ban(p.name), { kind: "destructive" })),
   )));
   if (!lists) return;
   const banRow = (title, detail, tag, pardon) => h(
     "li", {}, h("span", { class: "file-icon" }, icon("user")),
     h("span", { class: "row-main" }, h("b", {}, title), h("small", {}, detail)),
     h("span", { class: "tag danger" }, tag),
-    h("span", { class: "row-actions" }, button("Pardon", pardon, { kind: "ghost" })),
+    h("span", { class: "row-actions" }, button(t("Pardon"), pardon, { kind: "ghost" })),
   );
-  const since = (b) => [b.reason || "No reason given", b.created ? `since ${b.created.slice(0, 10)}` : null, b.expires ? `until ${b.expires.slice(0, 10)}` : null].filter(Boolean).join(" · ");
+  const since = (b) => [b.reason || t("No reason given"), b.created ? t("since {date}", { date: b.created.slice(0, 10) }) : null, b.expires ? t("until {date}", { date: b.expires.slice(0, 10) }) : null].filter(Boolean).join(" · ");
   fill("bans", "bans-none", [
-    ...lists.bans.map((b) => banRow(b.name, since(b), "Player", async () => {
-      if (await act("POST", "/api/v1/players/pardon", { name: b.name }, `Pardoned ${b.name}.`)) refreshLists();
+    ...lists.bans.map((b) => banRow(b.name, since(b), t("Player"), async () => {
+      if (await act("POST", "/api/v1/players/pardon", { name: b.name }, t("Pardoned {name}.", { name: b.name }))) refreshLists();
     })),
   ]);
 }
@@ -475,7 +483,7 @@ let historyAt = 0;
 function renderBackups() {
   const list = [...state.backups].sort((a, b) => (backupParts(b.name).when || 0) - (backupParts(a.name).when || 0));
   const c = state.config;
-  $("backup-schedule").textContent = c ? (c.backups.every === "0" ? "Automatic backups are off." : `Automatic backup every ${c.backups.every}, the last ${c.backups.keep} kept.`) : "";
+  $("backup-schedule").textContent = c ? (c.backups.every === "0" ? t("Automatic backups are off.") : t("Automatic backup every {interval}, the last {keep} kept.", { interval: c.backups.every, keep: c.backups.keep })) : "";
   fill("backups", "no-backups", list.map((b) => {
     const { when, label } = backupParts(b.name);
     const title = label || (when ? dateFormat.format(when) : b.name);
@@ -485,19 +493,19 @@ function renderBackups() {
       h("span", { class: "row-main" }, h("b", {}, title), h("small", {}, detail || b.name)),
       h("span", { class: "row-side" }, bytes(b.bytes)),
       h("span", { class: "row-actions" },
-        button("Restore", () => restore(b.name), { kind: "ghost" })),
+        button(t("Restore"), () => restore(b.name), { kind: "ghost" })),
     );
   }));
 }
 
 async function restore(name) {
   const answer = await ask({
-    title: "Restore this backup?",
-    text: "The server restarts with it; players are disconnected for a moment. The current world is kept in backups/.",
-    ok: "Restore",
+    title: t("Restore this backup?"),
+    text: t("The server restarts with it; players are disconnected for a moment. The current world is kept in backups/."),
+    ok: t("Restore"),
     danger: true,
   });
-  if (answer) await act("POST", "/api/v1/restore", { name }, `Restoring ${name}: the server is restarting.`);
+  if (answer) await act("POST", "/api/v1/restore", { name }, t("Restoring {name}: the server is restarting.", { name }));
 }
 
 // --- Crash reports ------- -----------------------------------------------------------------------------
@@ -516,7 +524,7 @@ function renderCrashes() {
     const li = h(
       "li", { class: r.name === crashShown ? "selected" : "" }, h("span", { class: "file-icon" }, icon("information-circle")),
       h("span", { class: "row-main" }, h("b", {}, crashTitle(r.name)), h("small", {}, `${r.name} · ${bytes(r.bytes)}`)),
-      h("span", { class: "row-actions" }, button("Read", () => readCrash(r.name), { kind: "ghost" })),
+      h("span", { class: "row-actions" }, button(t("Read"), () => readCrash(r.name), { kind: "ghost" })),
     );
     return li;
   }));
@@ -525,15 +533,114 @@ function renderCrashes() {
 async function readCrash(name) {
   try {
     const response = await fetch(`/api/v1/crash-reports/read?name=${encodeURIComponent(name)}`, { credentials: "same-origin", headers: { "X-Horizon": "1" } });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `error ${response.status}`);
+    if (response.status === 401) throw new SignedOut();
+    if (!response.ok) throw new Error(t((await response.json().catch(() => ({}))).error || "error {status}", { status: response.status }));
     crashShown = name;
     $("crash-name").textContent = name;
     $("crash-text").textContent = await response.text();
     $("crash-viewer").hidden = false;
     renderCrashes();
   } catch (e) {
-    toast(e.message, true);
+    if (e instanceof SignedOut) show("signed-out");
+    else toast(e.message, true);
   }
+}
+
+// --- Settings -------------------------------------------------------------------------------------------
+
+const SERVER_SETTINGS = [
+  ["settings.general", [
+    ["server.motd", "text", { maxlength: 255 }],
+    ["server.max_players", "integer", { min: 1, max: 1000 }],
+    ["server.whitelist", "boolean"],
+    ["server.enforce_whitelist", "boolean"],
+  ]],
+  ["settings.world", [
+    ["world.difficulty", "choice", { options: ["peaceful", "easy", "normal", "hard"].map((v) => [v, t(`difficulty.${v}`)]) }],
+    ["world.game_mode", "choice", { options: ["survival", "creative", "adventure", "spectator"].map((v) => [v, t(`mode.${v}`)]) }],
+    ["server.view_distance", "integer", { min: 2, max: 32 }],
+    ["server.simulation_distance", "integer", { min: 2, max: 32 }],
+  ]],
+  ["Backups", [
+    ["backups.every", "text", { maxlength: 20 }],
+    ["backups.keep", "integer", { min: 1, max: 1000 }],
+  ]],
+];
+
+function settingsStatus(id, text, error = false) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle("error", error);
+  el.hidden = !text;
+}
+
+function configEditor(form, groups, original, statusId, save) {
+  const inputs = [];
+  const sections = groups.map(([title, fields]) => {
+    const labels = fields.filter((field) => Object.hasOwn(original, field.id)).map((field) => {
+      const value = original[field.id];
+      const options = field.kind === "boolean"
+        ? [["true", t("Enabled")], ["false", t("Disabled")]] : field.options;
+      const input = options
+        ? h("select", { name: field.id }, options.map(([v, label]) => h("option", { value: v }, label)))
+        : h("input", { name: field.id, type: field.kind === "integer" ? "number" : "text",
+          min: field.min, max: field.max, maxlength: field.maxlength, required: field.kind === "integer" });
+      input.value = value;
+      const read = () => field.kind === "boolean" ? input.value === "true"
+        : field.kind === "integer" ? input.valueAsNumber : input.value;
+      inputs.push([field.id, input, read]);
+      return h("label", {}, field.label, input, field.description && h("small", {}, field.description));
+    });
+    return labels.length && h("fieldset", {}, title && h("legend", {}, title), labels);
+  }).filter(Boolean);
+  const submit = h("button", { type: "submit", class: "primary", disabled: true }, t("Save changes"));
+  form.replaceChildren(...sections, ...(inputs.length ? [submit] : []));
+  const changes = () => Object.fromEntries(inputs.map(([id, , read]) => [id, read()])
+    .filter(([id, value]) => original[id] !== value));
+  const refreshSubmit = () => { submit.disabled = !Object.keys(changes()).length; };
+  form.oninput = refreshSubmit;
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const update = changes();
+    submit.disabled = true;
+    for (const [, input] of inputs) input.disabled = true;
+    settingsStatus(statusId, t("Saving…"));
+    try {
+      const message = await save(update);
+      Object.assign(original, update);
+      if (submit.isConnected) settingsStatus(statusId, message);
+    } catch (e) {
+      if (e instanceof SignedOut) show("signed-out");
+      else if (submit.isConnected) settingsStatus(statusId, e.message, true);
+    } finally {
+      for (const [, input] of inputs) input.disabled = false;
+      refreshSubmit();
+    }
+  };
+  return inputs.length > 0;
+}
+
+function renderServerSettings() {
+  const form = $("server-settings");
+  if (form.childElementCount) return;
+  const values = {};
+  const groups = SERVER_SETTINGS.map(([section, fields]) => [t(section), fields.map(([id, kind, options]) => {
+    const [group, key] = id.split(".");
+    const value = state.config[group]?.[key];
+    if (value != null) values[id] = value;
+    return { id, kind, label: t(id), description: t(`${id}.help`), ...options };
+  })]);
+  configEditor(form, groups, values, "settings-status", async (changes) => {
+    const result = await api("PATCH", "/api/v1/config", { changes });
+    await loadConfig();
+    const applied = result.applied.map((id) => t(id)).join("、");
+    const restart = result.restart.map((id) => t(id)).join("、");
+    if (!result.running) return t("settings.nextStart");
+    return [applied && t("settings.applied", { applied }), restart && t("settings.restart", { restart })]
+      .filter(Boolean).join(" ") || t("settings.saved");
+  });
+  settingsStatus("settings-status", "");
 }
 
 // --- Plugins --------------------------------------------------------------------------------------------
@@ -556,13 +663,14 @@ async function refreshPlugins() {
           card && h("small", {}, card.description ? `${id} · ${card.description}` : id),
         ),
         h("span", { class: "row-side" }, version),
-        card && card.actions.length > 0 && h("span", { class: "row-actions" }, card.actions.map((action) =>
-          button(action.label, () => pluginAction(id, card.title, action), { kind: "ghost" }),
-        )),
+        card && h("span", { class: "row-actions" },
+          card.config && button(t("Edit settings"), () => openPluginSettings(id, card), { kind: "primary" }),
+          card.actions.map((action) => button(action.label, () => pluginAction(id, card.title, action), { kind: "ghost" })),
+        ),
       )));
     }
     status.hidden = plugins.length > 0;
-    if (!status.hidden) status.textContent = "No plugins loaded.";
+    if (!status.hidden) status.textContent = t("No plugins loaded.");
   } catch (e) {
     if (e instanceof SignedOut) show("signed-out");
     pluginKey = undefined;
@@ -574,12 +682,39 @@ async function refreshPlugins() {
   }
 }
 
+let pluginEditorRequest = 0;
+async function openPluginSettings(id, card) {
+  const request = ++pluginEditorRequest;
+  const path = `/api/v1/panel/plugins/config?plugin=${encodeURIComponent(id)}`;
+  const editor = $("plugin-settings");
+  const form = $("plugin-settings-form");
+  $("plugin-settings-title").textContent = t("plugin.settings", { title: card.title });
+  $("plugin-settings-note").textContent = card.config.note;
+  form.replaceChildren();
+  editor.hidden = false;
+  settingsStatus("plugin-settings-status", t("Loading settings…"));
+  editor.scrollIntoView({ block: "nearest" });
+  try {
+    let { revision, values } = await api("GET", path);
+    if (request !== pluginEditorRequest) return;
+    const available = configEditor(form, [["", card.config.fields]], values, "plugin-settings-status", async (changes) => {
+      ({ revision } = await api("PATCH", path, { revision, changes }));
+      return t("settings.saved");
+    });
+    settingsStatus("plugin-settings-status", available ? "" : t("plugin.noEditable"));
+    if (available) form.querySelector("input, select").focus({ preventScroll: true });
+  } catch (e) {
+    if (e instanceof SignedOut) show("signed-out");
+    else if (request === pluginEditorRequest) settingsStatus("plugin-settings-status", e.message, true);
+  }
+}
+
 async function pluginAction(plugin, title, action) {
-  if (!await ask({ title: `${action.label}?`, text: title, ok: "Run" })) return;
+  if (!await ask({ title: t("{action}?", { action: action.label }), text: title, ok: t("Run") })) return;
   const output = $("plugin-output");
   try {
     const reply = await api("POST", "/api/v1/panel/plugins/action", { plugin, action: action.id });
-    output.textContent = (reply.output || []).join("\n") || "Done.";
+    output.textContent = (reply.output || []).join("\n") || t("Done.");
     output.hidden = false;
   } catch (e) {
     output.hidden = true;
@@ -618,9 +753,11 @@ async function loadConfig() {
     state.config = (await api("GET", "/api/v1/config")).config;
     renderFacts();
     renderBackups();
+    renderServerSettings();
     route();
   } catch (e) {
     if (e instanceof SignedOut) show("signed-out");
+    else if (!state.config) settingsStatus("settings-status", e.message, true);
   }
 }
 
@@ -658,7 +795,7 @@ async function poll() {
       wasDown = true;
       show(state.status ? "app" : "gone");
       if (state.status) {
-        $("phase").textContent = "not answering";
+        $("phase").textContent = t("not answering");
         $("phase").className = "state down";
       }
     }
@@ -668,25 +805,31 @@ async function poll() {
 // --- Wiring ---------------------------------------------------------------------------------------------
 
 function setUp() {
+  localizeDocument();
   window.addEventListener("hashchange", route);
   window.addEventListener("resize", renderCharts);
+  $("plugin-settings-close").addEventListener("click", () => {
+    pluginEditorRequest++;
+    $("plugin-settings-form").replaceChildren();
+    $("plugin-settings").hidden = true;
+  });
 
-  $("start").addEventListener("click", () => act("POST", "/api/v1/start", undefined, "Starting…"));
+  $("start").addEventListener("click", () => act("POST", "/api/v1/start", undefined, t("Starting…")));
   $("restart").addEventListener("click", async () => {
-    if (await ask({ title: "Restart the game?", text: "Players are disconnected for a moment and can join again once it's up.", ok: "Restart" })) {
-      await act("POST", "/api/v1/restart", undefined, "Restarting…");
+    if (await ask({ title: t("Restart the game?"), text: t("Players are disconnected for a moment and can join again once it's up."), ok: t("Restart") })) {
+      await act("POST", "/api/v1/restart", undefined, t("Restarting…"));
     }
   });
   $("stop").addEventListener("click", async () => {
-    if (await ask({ title: "Stop the server?", text: "The game saves and stops, and this panel goes with it. Start it again on the server with horizon-server start.", ok: "Stop", danger: true })) {
-      await act("POST", "/api/v1/stop", undefined, "Stopping…");
+    if (await ask({ title: t("Stop the server?"), text: t("The game saves and stops, and this panel goes with it. Start it again on the server with horizon-server start."), ok: t("Stop"), danger: true })) {
+      await act("POST", "/api/v1/stop", undefined, t("Stopping…"));
     }
   });
   $("update-button").addEventListener("click", async () => {
     const update = state.status && state.status.update;
     if (!update || !update.available) return;
-    if (await ask({ title: `Update to ${update.available}?`, text: `The world is backed up, then the game restarts on the new release. If it doesn't come up, the server goes back to ${update.installed} by itself.`, ok: "Update" })) {
-      await act("POST", "/api/v1/update", {}, "Updating…");
+    if (await ask({ title: t("Update to {version}?", { version: update.available }), text: t("The world is backed up, then the game restarts on the new release. If it doesn't come up, the server goes back to {version} by itself.", { version: update.installed }), ok: t("Update") })) {
+      await act("POST", "/api/v1/update", {}, t("Updating…"));
     }
   });
   $("sign-out").addEventListener("click", async () => {
@@ -718,7 +861,7 @@ function setUp() {
     event.preventDefault();
     const target = event.target.target.value.trim();
     const reason = event.target.reason.value.trim() || undefined;
-    const reply = await act("POST", "/api/v1/players/ban", { name: target, reason }, `Banned ${target}.`);
+    const reply = await act("POST", "/api/v1/players/ban", { name: target, reason }, t("Banned {name}.", { name: target }));
     if (reply) {
       event.target.reset();
       refreshLists();
@@ -756,10 +899,10 @@ function setUp() {
   $("backup-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const name = $("backup-name").value.trim();
-    toast("Backing up…");
-    const made = await act("POST", "/api/v1/backups", name ? { name } : {}, "Backed up.");
+    toast(t("Backing up…"));
+    const made = await act("POST", "/api/v1/backups", name ? { name } : {}, t("Backed up."));
     if (made) {
-      toast(`Backed up to backups/${made.name}`);
+      toast(t("Backed up to backups/{name}", { name: made.name }));
       $("backup-name").value = "";
       refreshLists();
     }
@@ -769,9 +912,9 @@ function setUp() {
   $("crash-copy").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText($("crash-text").textContent);
-      toast("Copied the report.");
+      toast(t("Copied the report."));
     } catch (e) {
-      toast("Couldn't copy: select the text instead.", true);
+      toast(t("Couldn't copy: select the text instead."), true);
     }
   });
 

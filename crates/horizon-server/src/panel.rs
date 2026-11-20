@@ -37,6 +37,7 @@ const SESSIONS: usize = 32;
 
 const PAGE: &str = include_str!("../panel/index.html");
 const SCRIPT: &str = include_str!("../panel/panel.js");
+const ZH_CN: &str = include_str!("../panel/zh-cn.js");
 const STYLE: &str = include_str!("../panel/panel.css");
 
 /// The fonts and the mark the page uses, from horizon-theme (Geist and Bricolage Grotesque, SIL OFL).
@@ -251,8 +252,13 @@ fn reachable(address: SocketAddr) -> SocketAddr {
 }
 
 fn page_error(status: u16, message: &str) -> Response {
+    let message = match status {
+        429 => "登录失败次数过多，请等一分钟再试。",
+        403 => "登录链接已使用或已失效。请运行 horizon-server panel 获取新链接。",
+        _ => message,
+    };
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Horizon server</title>\
+        "<!doctype html><html lang=zh-CN><meta charset=utf-8><title>Horizon 服务端</title>\
          <link rel=stylesheet href=/panel.css><main class=message><p>{}</p></main>",
         message
             .replace('&', "&amp;")
@@ -343,6 +349,9 @@ fn handle(shared: &Arc<Shared>, address: SocketAddr, request: &Request) -> Respo
         ("GET", "/panel.js") => {
             return Response::text(200, "text/javascript; charset=utf-8", SCRIPT);
         }
+        ("GET", "/zh-cn.js") => {
+            return Response::text(200, "text/javascript; charset=utf-8", ZH_CN);
+        }
         ("GET", "/panel.css") => return Response::text(200, "text/css; charset=utf-8", STYLE),
         ("GET", _) if let Some((_, kind, body)) = ASSETS.iter().find(|(p, _, _)| *p == path) => {
             return asset(kind, body);
@@ -403,6 +412,11 @@ fn handle(shared: &Arc<Shared>, address: SocketAddr, request: &Request) -> Respo
     match (method, path) {
         ("GET", "/api/v1/panel/plugins") => plugins::list(shared),
         ("POST", "/api/v1/panel/plugins/action") => plugins::run(shared, &request.body),
+        ("GET" | "PATCH", "/api/v1/panel/plugins/config") => plugins::settings(
+            shared,
+            request.param("plugin").unwrap_or_default(),
+            (method == "PATCH").then_some(request.body.as_slice()),
+        ),
         _ => api::route(shared, request),
     }
 }
