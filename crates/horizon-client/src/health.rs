@@ -1165,6 +1165,59 @@ impl PlayerMotion {
         can_harm_player: bool,
         armor_weapon: Option<ArmorWeapon>,
     ) -> Result<PausedHurt> {
+        self.start_hurt_with(
+            level,
+            resources,
+            rules,
+            source,
+            amount,
+            blocking,
+            living_cause,
+            causing,
+            creative_source,
+            helmet,
+            can_harm_player,
+            armor_weapon,
+            false,
+        )
+    }
+
+    /// Start a FoodData starvation hit, preserving its combat flags, and ask
+    /// whether damage reaches the Paper environment reaction.
+    pub fn start_starvation_hurt(
+        &mut self,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+        amount: f32,
+    ) -> Result<(PausedHurt, Option<f32>)> {
+        let source = resources
+            .damage
+            .id("minecraft:starve")
+            .expect("validated starvation source");
+        let mut hit = self.start_hurt_with(
+            level, resources, rules, source, amount, None, false, 0, false, false, true, None, true,
+        )?;
+        let admitted = self.admitted_reaction_damage(level, resources, rules, &mut hit)?;
+        Ok((hit, admitted))
+    }
+
+    fn start_hurt_with(
+        &mut self,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+        source: DamageTypeId,
+        amount: f32,
+        blocking: Option<Blocking>,
+        living_cause: bool,
+        causing: i32,
+        creative_source: bool,
+        helmet: bool,
+        can_harm_player: bool,
+        armor_weapon: Option<ArmorWeapon>,
+        starvation: bool,
+    ) -> Result<PausedHurt> {
         let mut hit = PausedHurt {
             pending: None,
             invulnerability_checked: None,
@@ -1182,9 +1235,10 @@ impl PlayerMotion {
             armor_weapon,
             // The invulnerability refusal's inputs (arismoko/horizon#916), kept as the hit
             // was, for the Environment the pipeline's own rule reads.
-            invulnerable: self.invulnerable,
-            permanently_invulnerable: self.health.permanently_invulnerable,
-            invulnerable_time: self.health.invulnerable_time > 0,
+            invulnerable: self.invulnerable || (starvation && self.spectator),
+            permanently_invulnerable: !starvation && self.health.permanently_invulnerable,
+            invulnerable_time: !starvation && self.health.invulnerable_time > 0,
+            starvation,
             creative_source,
             blocking,
             blocked: 0.0,
@@ -1382,8 +1436,8 @@ impl PlayerMotion {
             fully_blocked: hit.fully_blocked,
             block_sound: hit.block_sound,
             knocked: hit.knocked,
-            totem: h.totem_ready,
-            totem_off_hand: h.totem_off_hand,
+            totem: !hit.starvation && h.totem_ready,
+            totem_off_hand: !hit.starvation && h.totem_off_hand,
             totem_fired: hit.totem_fired,
             canceled: hit.canceled,
             dealt: hit.dealt,
@@ -1521,6 +1575,8 @@ pub struct PausedHurt {
     permanently_invulnerable: bool,
     /// `Entity.invulnerableTime > 0` at the hit's start (arismoko/horizon#916).
     invulnerable_time: bool,
+    /// The food tick does not lend a held totem to its raw starvation hit.
+    starvation: bool,
     /// The hit is a creative player's (`isCreativePlayer`, arismoko/horizon#916).
     creative_source: bool,
     blocking: Option<Blocking>,

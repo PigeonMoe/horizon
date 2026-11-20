@@ -4,8 +4,8 @@
 use crate::{
     Result,
     health::{
-        Attributes, DamageLevel, Environment, HealthEvent, HealthResources, HealthRules, State,
-        Updates,
+        Attributes, DamageLevel, Environment, HealthEvent, HealthResources, HealthRules,
+        PausedHurt, State, Updates,
     },
     motion::{MotionEvent, PlayerMotion},
 };
@@ -82,9 +82,34 @@ impl PlayerMotion {
         resources: &HealthResources,
         rules: HealthRules,
     ) -> Result<()> {
+        self.food_tick_inner(context, level, resources, rules, false)?;
+        Ok(())
+    }
+
+    /// Finish the FoodData tick and return the due starvation strike, if any,
+    /// so the authoritative game can lend the struck player's state to a hook.
+    pub fn plan_food_tick(
+        &mut self,
+        context: &LoopContext,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+    ) -> Result<Option<f32>> {
+        self.food_tick_inner(context, level, resources, rules, true)
+    }
+
+    fn food_tick_inner(
+        &mut self,
+        context: &LoopContext,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+        defer_starvation: bool,
+    ) -> Result<Option<f32>> {
         if self.client_side {
-            return Ok(());
+            return Ok(None);
         }
+        let mut starvation = None;
         let victim = self.victim();
         let h = &mut self.health;
         let mut world = TickWorld {
@@ -107,8 +132,25 @@ impl PlayerMotion {
             events: &mut self.events,
             status: self.status.clone(),
             random: &mut self.random,
+            deferred_starvation: defer_starvation.then_some(&mut starvation),
         };
-        h.food.tick(&mut world)
+        h.food.tick(&mut world)?;
+        Ok(starvation)
+    }
+
+    pub fn finish_starvation_hurt(
+        &mut self,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+        hit: PausedHurt,
+        amount: f32,
+    ) -> Result<()> {
+        if self.finish_hurt(level, resources, rules, hit)?.hurt {
+            self.events
+                .push(MotionEvent::Health(HealthEvent::StarvationDamage(amount)));
+        }
+        Ok(())
     }
 }
 struct TickWorld<'a> {
@@ -133,6 +175,7 @@ struct TickWorld<'a> {
     /// starvation hurt is a `LivingEntity.hurtServer` like any other, so its
     /// `onMobHurt` (Infested) and magic absorb see them.
     status: crate::effects::StatusFlags,
+    deferred_starvation: Option<&'a mut Option<f32>>,
     random: &'a mut horizon_core::random::EntityRandom,
 }
 impl FoodWorld for TickWorld<'_> {
@@ -181,6 +224,10 @@ impl FoodWorld for TickWorld<'_> {
             .expect("validated health field"))
     }
     fn hurt_starvation(&mut self, _: (), food: &mut FoodData, amount: f32) -> Result<()> {
+        if let Some(deferred) = &mut self.deferred_starvation {
+            **deferred = Some(amount);
+            return Ok(());
+        }
         let id = self
             .resources
             .damage

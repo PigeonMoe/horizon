@@ -15,6 +15,8 @@ mod fire_contact;
 mod fall_contact;
 #[path = "tests/sprint_attempt.rs"]
 mod sprint_attempt;
+#[path = "tests/starvation.rs"]
+mod starvation;
 
 #[test]
 #[ignore = "daily"]

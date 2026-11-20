@@ -52,6 +52,55 @@ pub(super) fn initialize(resources: &MotionResources, guest: &mut Guest) -> bool
 }
 
 impl Game<'_> {
+    fn guest_food_tick(&mut self) {
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let rules = self.world.health_rules;
+        let resources = &self.health_resources;
+        let _ = player.peaceful_regeneration(&self.loop_context, rules);
+        if !mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre) {
+            let _ = player.food_tick(
+                &self.loop_context,
+                crate::game::entity::damage_level_of!(self),
+                resources,
+                rules,
+            );
+            return;
+        }
+        let level = crate::game::entity::damage_level_of!(self);
+        let Ok(Some(amount)) = player.plan_food_tick(&self.loop_context, level, resources, rules)
+        else {
+            return;
+        };
+        let Ok((hit, admitted)) = player.start_starvation_hurt(level, resources, rules, amount)
+        else {
+            return;
+        };
+        let mut cancel = false;
+        if let Some(damage) = admitted.filter(|damage| *damage > 0.0)
+            && let Some(player) = self.native_acting_player()
+        {
+            self.native_player_environment_damage_pre(
+                mod_api::__private::PlayerEnvironmentDamagePreCall {
+                    player,
+                    damage_type: "minecraft:starve",
+                    damage,
+                    cancel: &mut cancel,
+                },
+            );
+        }
+        if !cancel && let Some(player) = self.player.as_mut() {
+            let _ = player.finish_starvation_hurt(
+                crate::game::entity::damage_level_of!(self),
+                &self.health_resources,
+                rules,
+                hit,
+                amount,
+            );
+        }
+    }
+
     fn motion_world_for_guest(
         &mut self,
         just_stopped_gliding: bool,
@@ -132,21 +181,15 @@ impl Game<'_> {
                 if !loaded {
                     return;
                 }
-                let rules = game.world.health_rules;
-                let Some(player) = game.player.as_mut() else {
-                    return;
-                };
-                // Entity.baseTick's clocks (hurtTime, invulnerableTime) run too.
-                player.health.advance_clock();
-                let _ = player.peaceful_regeneration(&game.loop_context, rules);
-                let _ = player.food_tick(
-                    &game.loop_context,
-                    crate::game::entity::damage_level_of!(game),
-                    &game.health_resources,
-                    rules,
-                );
-                let events = std::mem::take(&mut player.events);
-                game.record_combat(&events);
+                if let Some(player) = game.player.as_mut() {
+                    // Entity.baseTick's clocks (hurtTime, invulnerableTime) run too.
+                    player.health.advance_clock();
+                }
+                game.guest_food_tick();
+                if let Some(player) = game.player.as_mut() {
+                    let events = std::mem::take(&mut player.events);
+                    game.record_combat(&events);
+                }
             });
             return;
         }
@@ -163,8 +206,6 @@ impl Game<'_> {
         let in_wall = !sleeping && self.in_wall(conn, at, dimensions);
         let mut soul = None;
         let events = self.as_guest(conn, |game| {
-            let (rules, motion) = (game.world.health_rules, game.motion);
-            let health = &motion.health;
             let leather_boots = super::super::worn_boots::leather_boots(&game.armor);
             let freeze_immune = game.wears_freeze_immune();
             let burn_immune = game.wears_burn_from_stepping_immunity();
@@ -360,16 +401,10 @@ impl Game<'_> {
             // and tick effects); its particle goes to the players around.
             soul = game.tick_soul_speed();
             game.handle_shoulder_entities();
+            game.guest_food_tick();
             let Some(player) = game.player.as_mut() else {
                 return (Vec::new(), None);
             };
-            let _ = player.peaceful_regeneration(&game.loop_context, rules);
-            let _ = player.food_tick(
-                &game.loop_context,
-                crate::game::entity::damage_level_of!(game),
-                health,
-                rules,
-            );
             events.append(&mut player.events);
             player.carry_client_movement(tick_movement);
             let _ = MotionWorld {
