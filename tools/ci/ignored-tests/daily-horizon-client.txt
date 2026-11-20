@@ -63,6 +63,7 @@ horizon-client game::item_pickup_shape_tests::a_lifted_item_is_visible_at_its_ac
 horizon-client game::item_use::interact_vibration_tests::removed_potion_remainder_never_reaches_the_hand_or_inventory lib daily resources
 horizon-client game::lan_actions::boat_holder_movement_tests::a_leash_knot_click_checks_the_fence_before_transferring_the_leash lib daily resources
 horizon-client game::lan_actions::pickups::orb_merge_contract_tests::orb_xp_listener_only_changes_the_remainder_after_mending lib daily resources
+horizon-client game::lan_actions::projectile_lifecycle_tests::a_guest_arrow_pickup_veto_keeps_both_arrow_and_inventory lib daily resources
 horizon-client game::lan_actions::tests::sneak_release_in_the_same_packet_batch_does_not_change_a_block_click lib daily resources
 horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_mount_position_before_replacing_a_menu lib daily resources
 horizon-client game::lan_stations::tests::table_proposal_pays_once_and_keeps_both_book_enchantment_components lib daily resources
@@ -163,6 +164,7 @@ horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::act
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::bed_leave_carries_the_wake_flags_before_the_sleep_clears lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_missing_bed_death_and_bed_rule_keep_their_distinct_literal_pairs lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::guest_wake_counters_match_the_same_reasons_without_listeners lib daily game-boot
+horizon-client game::native_hooks::player_drop_pre::tests::cancelled_manual_drops_preserve_the_stack_and_resync_the_menu lib daily resources
 horizon-client game::native_hooks::player_drop_pre::tests::specialized_windows_check_drop_permission_before_a_slot_or_cursor_changes lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::redstone_activation_checks_real_players_and_other_entities_per_trigger lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one lib daily resources

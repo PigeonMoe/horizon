@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires prepared 26.3 resources"]
+    #[ignore = "daily"]
     fn knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads() {
         crate::entry::install_client_hooks();
         let seen = Arc::new(Mutex::new(Vec::new()));

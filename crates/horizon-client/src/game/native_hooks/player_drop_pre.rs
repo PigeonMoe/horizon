@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires prepared 26.3 resources"]
+    #[ignore = "daily"]
     fn cancelled_manual_drops_preserve_the_stack_and_resync_the_menu() {
         crate::entry::install_client_hooks();
         let seen = Arc::new(Mutex::new(Vec::new()));
