@@ -5128,11 +5128,16 @@ impl Game<'_> {
             ArrowEvent::Block {
                 pos,
                 reaction,
+                projectile,
+                kind,
                 owner,
             } => match reaction {
                 BlockReaction::PrimeTnt => {
-                    // `TntBlock.onProjectileHit`: the arrow's owner lights it.
-                    if self.tnt_prime_allowed(pos) {
+                    // Paper's `TntBlock.onProjectileHit` checks the projectile's
+                    // EntityChangeBlockEvent before TNTPrimeEvent.
+                    if self.mob_block_change_allowed(projectile, kind, [pos.x, pos.y, pos.z])
+                        && self.tnt_prime_allowed(pos)
+                    {
                         self.spawn_primed_tnt(pos, false, owner, None);
                         self.with_level(|b, level, ticks| b.remove_block(level, ticks, pos, false));
                         let _ = self.process_level_events();

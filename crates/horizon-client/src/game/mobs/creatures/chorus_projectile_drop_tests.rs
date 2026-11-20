@@ -229,6 +229,59 @@ fn a_guarded_projectile_keeps_the_flower_and_pot_while_other_impact_types_still_
 }
 #[test]
 #[ignore = "daily"]
+fn a_guarded_flaming_arrow_hit_keeps_the_tnt_and_still_sticks() {
+    with_game(|game| {
+        let guard = GuardedHit(Arc::default());
+        let mods = vec![ModEntry::new("guarded-impact", Box::new(guard.clone()))].into();
+        with_mods(mods, || {
+            assert!(game.run_command("gamerule tnt_explodes true"));
+            let mut hits = Vec::new();
+            for (x, kind) in [(4, "arrow"), (8, "spectral_arrow")] {
+                source(game, x, 4, "tnt");
+                assert!(game.run_command(&format!(
+                    "summon minecraft:{kind} {x}.5 202.5 4.5 {{UUID:[I;116,0,0,{x}],NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s}}"
+                )));
+                let projectile = game
+                    .creatures
+                    .projectiles
+                    .iter()
+                    .find(|p| game.persist.uuid_of(p.id) == Some([116, 0, 0, x]))
+                    .unwrap();
+                assert_eq!(
+                    projectile.position,
+                    Vec3::new(f64::from(x) + 0.5, 202.5, 4.5)
+                );
+                assert_eq!(projectile.velocity, Vec3::new(0.0, -2.0, 0.0));
+                assert!(projectile.no_gravity && projectile.arrow.as_ref().unwrap().on_fire());
+                let id = projectile.id;
+                game.tick_projectiles().unwrap();
+                assert!(
+                    game.creatures
+                        .projectiles
+                        .iter()
+                        .find(|p| p.id == id)
+                        .unwrap()
+                        .arrow
+                        .as_ref()
+                        .unwrap()
+                        .in_ground
+                );
+                hits.push((id, format!("minecraft:{kind}"), [x, 200, 4]));
+                if x == 4 {
+                    assert!(game.run_command("execute if block 4 200 4 tnt"));
+                    assert!(game.tnts.is_empty());
+                } else {
+                    assert!(game.run_command("execute if block 8 200 4 air"));
+                    assert_eq!(game.tnts.len(), 1);
+                }
+            }
+            assert_eq!(*guard.0.lock().unwrap(), hits);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn denied_hits_other_blocks_and_direct_destroy_keep_their_drop_contracts() {
     with_game(|game| {
         source(game, 4, 4, "chorus_flower");

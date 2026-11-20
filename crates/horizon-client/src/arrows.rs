@@ -119,6 +119,8 @@ pub enum ArrowEvent {
     Block {
         pos: BlockPos,
         reaction: BlockReaction,
+        projectile: u32,
+        kind: &'static str,
         /// The arrow's owner (`Projectile.getOwner`), who owns a TNT it primes.
         owner: Option<Who>,
     },
@@ -1125,6 +1127,12 @@ impl Ticker<'_, '_, '_, '_> {
             self.st.events.push(ArrowEvent::Block {
                 pos,
                 reaction,
+                projectile: self.p.id,
+                kind: if self.st.is_spectral_type() {
+                    "minecraft:spectral_arrow"
+                } else {
+                    self.p.entity_type()
+                },
                 owner: self.p.owner,
             });
         }
