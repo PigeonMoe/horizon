@@ -1789,6 +1789,12 @@ impl Game<'_> {
     ) {
         self.fire_player_commands_sent(player, name, names);
     }
+    pub(in crate::game) fn native_player_sprint_pre(
+        &mut self,
+        call: mod_api::__private::PlayerSprintPreCall<'_>,
+    ) {
+        self.fire_player_sprint_pre(call);
+    }
     /// A server player's sprint started or stopped: their client sent
     /// `START_SPRINTING` or `STOP_SPRINTING` (the sprint key, a double tap
     /// forward, or letting go) and the server's player is now `sprinting`

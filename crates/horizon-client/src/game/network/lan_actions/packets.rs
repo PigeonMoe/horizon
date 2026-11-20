@@ -667,16 +667,40 @@ impl Game<'_> {
                     g.native_resource_pack_status(uuid, &name, r.action);
                 });
             }
-            // START_SPRINTING and STOP_SPRINTING: the hub has set the sprint
-            // and sends the packet on when it changed it.
+            // With a pre-listener, the hub paused before applying this packet.
+            // Otherwise the hub already changed the sprint state and this is the post notification.
             S::PlayerCommand(p) if matches!(p.action, 1 | 2) => {
                 let Some(host) = self.lan.as_ref() else {
                     return;
                 };
                 let guest = &host.hub.guests[gi];
                 let (uuid, name) = (guest.uuid, guest.name.clone());
+                let sprinting = p.action == 1;
+                if host.hub.sprint_attempts_listened {
+                    let mut cancel = true;
+                    self.as_guest(conn, |game| {
+                        if let Some(player) = game.native_acting_player() {
+                            cancel = false;
+                            game.native_player_sprint_pre(
+                                mod_api::__private::PlayerSprintPreCall {
+                                    player,
+                                    sprinting,
+                                    cancel: &mut cancel,
+                                },
+                            );
+                        }
+                    });
+                    if cancel
+                        || !self
+                            .lan
+                            .as_mut()
+                            .is_some_and(|host| host.hub.accept_sprint_command(conn, sprinting))
+                    {
+                        return;
+                    }
+                }
                 self.as_guest(conn, |g| {
-                    g.native_player_sprint(uuid, &name, p.action == 1);
+                    g.native_player_sprint(uuid, &name, sprinting);
                 });
             }
             S::ContainerButtonClick(p) => {

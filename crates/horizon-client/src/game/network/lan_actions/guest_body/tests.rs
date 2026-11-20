@@ -11,6 +11,10 @@ use std::sync::{Arc, atomic::AtomicI32, mpsc};
 mod fall_reset;
 #[path = "tests/fire_contact.rs"]
 mod fire_contact;
+#[path = "tests/fall_contact.rs"]
+mod fall_contact;
+#[path = "tests/sprint_attempt.rs"]
+mod sprint_attempt;
 
 #[test]
 #[ignore = "daily"]

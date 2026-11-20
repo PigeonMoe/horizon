@@ -346,6 +346,8 @@ pub struct Hub {
     pending_kicks: Vec<HostEvent>,
     /// A native mod listens to `player_move`: a changed report waits for the game ([`pending_move`]).
     pub moves_listened: bool,
+    /// Each sprint command waits for pre-admission on the installed player.
+    pub sprint_attempts_listened: bool,
     /// `[transfer]` on (a dedicated server's `--transfers`): the players a proxy
     /// said would arrive (`player-expect`). None while it is off.
     pub transfers: Option<super::arrivals::Transfers>,
@@ -844,6 +846,7 @@ impl Hub {
             deferred_payloads: Default::default(),
             pending_kicks: Vec::new(),
             moves_listened: false,
+            sprint_attempts_listened: false,
             transfers: None,
             native_tracking: Vec::new(),
             attachment_snapshots: Vec::new(),
@@ -3969,6 +3972,21 @@ impl Hub {
         });
     }
 
+    /// Commit an accepted sprint command and report whether the state changed.
+    pub fn accept_sprint_command(&mut self, conn: u32, sprinting: bool) -> bool {
+        let Some(i) = self.guests.connection_index(conn) else {
+            return false;
+        };
+        if !self.guests[i].client_loaded() || self.guests[i].dead {
+            return false;
+        }
+        let changed = self.guests[i].sprinting != sprinting;
+        self.set_sprinting(i, sprinting);
+        let tick = self.ticks;
+        self.guests.update(i, |guest| guest.last_action_tick = tick);
+        changed
+    }
+
     fn process_inbox(
         &mut self,
         i: usize,
@@ -4032,7 +4050,9 @@ impl Hub {
                 self.guests[i].vehicle_good,
                 |to| self.moved_far(i, to),
             );
-            if acted {
+            let sprint_pre = self.sprint_attempts_listened
+                && matches!(&packet, S::PlayerCommand(p) if matches!(p.action, 1 | 2));
+            if acted && !sprint_pre {
                 {
                     let value = self.ticks;
                     self.guests
@@ -4290,6 +4310,11 @@ impl Hub {
                 }
                 S::PlayerCommand(p) => match p.action {
                     1 | 2 => {
+                        if sprint_pre {
+                            events.push(HostEvent::Packet(conn, Box::new(S::PlayerCommand(p))));
+                            events.push(HostEvent::InputCredits(credits));
+                            return true;
+                        }
                         let sprinting = p.action == 1;
                         let changed = self.guests[i].sprinting != sprinting;
                         self.set_sprinting(i, sprinting);

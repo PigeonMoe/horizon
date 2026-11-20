@@ -72,7 +72,9 @@ horizon-client game::mods::tests::a_shared_missing_jar_stops_native_load_and_ref
 horizon-client game::mods::tests::content_overlay_validates_dependencies_and_orders_layers lib daily child-process
 horizon-client game::mods::tests::native_content_follows_the_build_and_misplaced_content_follows_its_selection lib daily child-process
 horizon-client game::lan_actions::guest_body::tests::accepted_fall_dispatches_one_reaction_at_the_actual_landing lib daily resources
+horizon-client game::lan_actions::guest_body::tests::fall_contact::fall_reaction_reads_the_real_barefoot_guest_after_protection_and_equipment lib daily resources
 horizon-client game::lan_actions::guest_body::tests::fire_contact::fire_contact_reacts_after_admission_and_consumes_authoritative_storage lib daily resources
+horizon-client game::lan_actions::guest_body::tests::sprint_attempt::repeated_sprint_commands_are_admitted_in_order_before_state_changes lib daily resources
 horizon-client game::mounts::tests::a_camel_husk_keeps_itself_once_clicked lib daily game-boot
 horizon-client game::mounts::tests::a_chest_on_a_donkey_or_mule_plays_its_own_sound_at_full_volume lib daily game-boot
 horizon-client game::mounts::tests::feeding_a_mount_draws_from_its_own_random_and_posts_eat lib daily game-boot

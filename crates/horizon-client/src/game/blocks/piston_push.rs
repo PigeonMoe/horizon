@@ -581,7 +581,7 @@ impl Game<'_> {
     fn shulker_push_player(&mut self, mover: MoverType, movement: Vec3) {
         let entities = self.player_entity_collisions();
         if let Some(player) = self.player.as_mut() {
-            let _ = MotionWorld {
+            let mut motion = MotionWorld {
                 landing_equipment: acting_landing_equipment!(self, false),
                 entities: &entities,
                 player,
@@ -594,8 +594,15 @@ impl Game<'_> {
                 damage_hooks: &self.damage_hooks,
                 tag_items: Some(world_items!(self)),
                 block_registries: Some(&self.pack.block_registries),
+            };
+            let _ = motion.lid_push(mover, movement);
+            if let Some(fall) = motion
+                .landing_equipment
+                .as_mut()
+                .and_then(|gear| gear.take_paused_fall())
+            {
+                self.resolve_player_fall_damage(fall);
             }
-            .lid_push(mover, movement);
         }
     }
 

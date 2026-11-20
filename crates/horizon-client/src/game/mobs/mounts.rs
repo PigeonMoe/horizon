@@ -955,7 +955,7 @@ impl Game<'_> {
             return;
         };
         let events_before = player.events.len();
-        let _ = MotionWorld {
+        let mut motion = MotionWorld {
             landing_equipment: acting_landing_equipment!(self, false),
             entities: &[],
             player,
@@ -968,8 +968,15 @@ impl Game<'_> {
             damage_hooks: &self.damage_hooks,
             tag_items: Some(world_items!(self)),
             block_registries: Some(&self.pack.block_registries),
+        };
+        let _ = motion.cause_mount_fall(distance, modifier);
+        if let Some(fall) = motion
+            .landing_equipment
+            .as_mut()
+            .and_then(|gear| gear.take_paused_fall())
+        {
+            self.resolve_player_fall_damage(fall);
         }
-        .cause_mount_fall(distance, modifier);
         let Some(player) = self.player.as_mut() else {
             return;
         };

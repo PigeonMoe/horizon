@@ -234,6 +234,17 @@ impl Game<'_> {
                     }
                     w.check_movement_statistics(movement)
                 })();
+                if let Some(fall) = w
+                    .landing_equipment
+                    .as_mut()
+                    .and_then(|gear| gear.take_paused_fall())
+                {
+                    game.resolve_player_fall_damage(fall);
+                    let Some(motion) = game.motion_world_for_guest(just_stopped_gliding) else {
+                        return (Vec::new(), None);
+                    };
+                    w = motion;
+                }
                 if let Some(reaction) =
                     horizon_client::landing::take_fall_reaction(&mut w.player.events, events_before)
                 {

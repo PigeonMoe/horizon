@@ -208,6 +208,17 @@ pub struct LandingEquipment<'a> {
     boots: Option<PlayerFootwear<'a>>,
     helmet: Option<FlightHelmet<'a>>,
     origin: Option<Vec3>,
+    check_environment_damage: bool,
+    paused_fall: Option<Box<PausedFallDamage>>,
+}
+
+/// A landing hit admitted by vanilla, incoming damage listeners and the player's equipment.
+/// The hit borrows nothing, so its continuation can release the movement borrow for the host.
+pub struct PausedFallDamage {
+    pub damage: f32,
+    pub position: Vec3,
+    pub event_index: usize,
+    pub hit: crate::health::PausedHurt,
 }
 
 struct FlightHelmet<'a> {
@@ -242,6 +253,36 @@ pub enum LandingReaction {
     },
 }
 
+impl LandingReaction {
+    /// Describe the equipment's deferred level work at the accepted impact position.
+    pub fn effect_at(self, at: Vec3, dimensions: crate::pose::Dimensions) -> Option<MotionEvent> {
+        let Self::Effect {
+            player,
+            reaction,
+            damage,
+            sound,
+        } = self
+        else {
+            return None;
+        };
+        let bounds = dimensions.bounds(at);
+        use horizon_core::geometry::Axis;
+        let axes = [Axis::X, Axis::Y, Axis::Z];
+        Some(MotionEvent::Fall(FallEvent::EquipmentEffect {
+            player,
+            reaction,
+            origin: [at.x, at.y, at.z],
+            bounds: [
+                axes.map(|axis| bounds.min(axis)),
+                axes.map(|axis| bounds.max(axis)),
+            ],
+            eye: [at.x, at.y + f64::from(dimensions.eye_height), at.z],
+            damage,
+            sound,
+        }))
+    }
+}
+
 impl<'a> LandingEquipment<'a> {
     pub fn new(
         uuid: Option<u128>,
@@ -249,6 +290,7 @@ impl<'a> LandingEquipment<'a> {
         armor: &'a mut [Option<crate::items::ItemStack>; 4],
         saved: Option<&'a horizon_core::nbt::Tag>,
         just_stopped_gliding: bool,
+        check_environment_damage: bool,
     ) -> Option<Self> {
         let [head, _, _, feet] = armor;
         let boots = PlayerFootwear::new(uuid, mode, feet.as_ref(), saved);
@@ -262,11 +304,18 @@ impl<'a> LandingEquipment<'a> {
         } else {
             None
         };
-        (boots.is_some() || helmet.is_some()).then_some(Self {
+        let check_environment_damage = uuid.is_some() && check_environment_damage;
+        (boots.is_some() || helmet.is_some() || check_environment_damage).then_some(Self {
             boots,
             helmet,
             origin: None,
+            check_environment_damage,
+            paused_fall: None,
         })
+    }
+
+    pub fn take_paused_fall(&mut self) -> Option<PausedFallDamage> {
+        self.paused_fall.take().map(|fall| *fall)
     }
 
     /// Position at the end of the physical move being replayed. The authoritative
@@ -1074,26 +1123,66 @@ impl MotionWorld<'_, '_, '_> {
             });
         let reaction = std::cell::Cell::new(LandingReaction::None);
         let rules = self.scene.health_rules;
-        self.player.hurt(
-            &mut crate::health::DamageLevel::of(
-                self.scene,
-                self.assets.registry,
-                self.tag_items,
-                self.block_registries,
-                self.damage_hooks,
-            )
-            .with_landing_impact(
-                boots,
-                helmet,
-                self.loop_context,
-                action.unwrap_or(""),
-                &reaction,
-            ),
-            self.health,
-            rules,
-            source,
-            amount,
-        )?;
+        let pause_at = self.landing_equipment.as_ref().and_then(|gear| {
+            (action == Some("fall_damage") && gear.check_environment_damage)
+                .then_some(gear.origin.unwrap_or(self.player.position))
+        });
+        let mut level = crate::health::DamageLevel::of(
+            self.scene,
+            self.assets.registry,
+            self.tag_items,
+            self.block_registries,
+            self.damage_hooks,
+        )
+        .with_landing_impact(
+            boots,
+            helmet,
+            self.loop_context,
+            action.unwrap_or(""),
+            &reaction,
+        );
+        let paused_fall = if let Some(position) = pause_at {
+            let mut hit = self.player.start_hurt(
+                &mut level,
+                self.health,
+                rules,
+                source,
+                amount,
+                None,
+                false,
+                0,
+                false,
+                false,
+                true,
+                None,
+            )?;
+            match self
+                .player
+                .admitted_reaction_damage(&mut level, self.health, rules, &mut hit)?
+            {
+                Some(damage) if level.fall_equipment_cancels(damage) => None,
+                Some(damage) if damage > 0.0 => Some(PausedFallDamage {
+                    damage,
+                    position,
+                    event_index: self.player.events.len(),
+                    hit,
+                }),
+                _ => {
+                    self.player
+                        .finish_hurt(&mut level, self.health, rules, hit)?;
+                    None
+                }
+            }
+        } else {
+            self.player
+                .hurt(&mut level, self.health, rules, source, amount)?;
+            None
+        };
+        if let Some(fall) = paused_fall
+            && let Some(gear) = self.landing_equipment.as_mut()
+        {
+            gear.paused_fall = Some(Box::new(fall));
+        }
         match reaction.get() {
             LandingReaction::Footwear(Some(sound)) => {
                 self.fall_event(FallEvent::FootwearSound(sound))
@@ -1106,36 +1195,15 @@ impl MotionWorld<'_, '_, '_> {
                     self.wear_impact_helmet();
                 }
             }
-            LandingReaction::Effect {
-                player,
-                reaction,
-                damage,
-                sound,
-            } => {
+            effect @ LandingReaction::Effect { .. } => {
                 let at = self
                     .landing_equipment
                     .as_ref()
                     .and_then(|gear| gear.origin)
                     .unwrap_or(self.player.position);
-                let dimensions = self.player.dimensions;
-                let bounds = dimensions.bounds(at);
-                let axes = [
-                    horizon_core::geometry::Axis::X,
-                    horizon_core::geometry::Axis::Y,
-                    horizon_core::geometry::Axis::Z,
-                ];
-                self.fall_event(FallEvent::EquipmentEffect {
-                    player,
-                    reaction,
-                    origin: [at.x, at.y, at.z],
-                    bounds: [
-                        axes.map(|axis| bounds.min(axis)),
-                        axes.map(|axis| bounds.max(axis)),
-                    ],
-                    eye: [at.x, at.y + f64::from(dimensions.eye_height), at.z],
-                    damage,
-                    sound,
-                });
+                self.player
+                    .events
+                    .extend(effect.effect_at(at, self.player.dimensions));
             }
             _ => {}
         }

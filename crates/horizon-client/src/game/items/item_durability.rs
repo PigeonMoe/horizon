@@ -51,6 +51,15 @@ impl Game<'_> {
         let helmet = self.armor[0]
             .as_ref()
             .is_some_and(|s| s.count > 0 && &*s.item != "minecraft:air");
+        // Paper's FALL is environmental. A /damage command with an explicit
+        // direct entity is instead classified by that entity.
+        let ambient_fall = attack.direct.unwrap_or(causing) == 0
+            && self
+                .health_resources
+                .damage
+                .definition(source)
+                .is_some_and(|definition| definition.name == "minecraft:fall");
+        let footwear_action = footwear_action.or(ambient_fall.then_some("fall_damage"));
         let level = crate::game::entity::damage_level_of!(self, attack);
         let reaction = std::cell::Cell::new(horizon_client::landing::LandingReaction::None);
         let footwear =
@@ -81,6 +90,39 @@ impl Game<'_> {
                 !self.combat.refuse_player_hit,
                 armor_weapon,
             )?;
+        if ambient_fall {
+            let observes_environment =
+                mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre);
+            let resources = &self.health_resources;
+            let admitted = if footwear.is_some() || observes_environment {
+                self.player
+                    .as_mut()
+                    .ok_or("missing damage target")?
+                    .admitted_reaction_damage(&mut level, resources, rules, &mut hit)?
+            } else {
+                None
+            };
+            let footwear_canceled =
+                admitted.is_some_and(|damage| level.fall_equipment_cancels(damage));
+            if !matches!(
+                reaction.get(),
+                horizon_client::landing::LandingReaction::None
+            ) {
+                self.direct_fall_footwear_effect(reaction.get());
+            }
+            if footwear_canceled
+                || admitted.is_some_and(|damage| {
+                    observes_environment
+                        && damage > 0.0
+                        && self.player_environment_damage_cancels("minecraft:fall", damage)
+                })
+            {
+                return Ok(horizon_client::health::BlockOutcome {
+                    canceled: true,
+                    ..Default::default()
+                });
+            }
+        }
         if let Some(damage) = hit.helmet_damage() {
             let hit_source = hit.source(attack);
             self.hurt_helmet(&hit_source, damage);

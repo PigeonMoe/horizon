@@ -52,6 +52,7 @@ macro_rules! acting_landing_equipment {
             &mut $game.armor,
             $game.level.player_extra.as_ref(),
             $stopped_gliding,
+            mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre),
         )
     };
 }

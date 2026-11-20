@@ -305,6 +305,21 @@ impl<'a> DamageLevel<'a> {
                 && crate::native_client_hooks::player_fall_reaction_listened()
         })
     }
+
+    #[doc(hidden)]
+    pub fn fall_equipment_cancels(&self, damage: f32) -> bool {
+        let Some(impact) = self.fall_equipment() else {
+            return false;
+        };
+        let Some(reaction) = impact
+            .boots
+            .and_then(|boots| boots.fall_reaction(impact.context, damage))
+        else {
+            return false;
+        };
+        impact.reaction.set(reaction);
+        true
+    }
     /// Runs `push` as the short entry of `LivingEntity.knockback` (power and direction), which
     /// delegates to the full entry: the knockback hook, fired once inside the full entry, tells
     /// its listener the push came in as [`mod_api::KnockbackEntry::Short`]. A direct call of the
@@ -1092,14 +1107,11 @@ impl PlayerMotion {
             true,
             None,
         )?;
-        if let Some(impact) = level.fall_equipment()
+        if level.fall_equipment().is_some()
             && let Some(damage) =
                 self.admitted_reaction_damage(level, resources, rules, &mut hit)?
-            && let Some(reaction) = impact
-                .boots
-                .and_then(|boots| boots.fall_reaction(impact.context, damage))
+            && level.fall_equipment_cancels(damage)
         {
-            impact.reaction.set(reaction);
             return Ok(BlockOutcome {
                 canceled: true,
                 ..BlockOutcome::default()
@@ -1110,7 +1122,8 @@ impl PlayerMotion {
 
     /// A Paper-style reaction can see a hit after the ordinary protection and
     /// cooldown gates, before the unmodified health/armor continuation.
-    pub(crate) fn admitted_reaction_damage(
+    #[doc(hidden)]
+    pub fn admitted_reaction_damage(
         &mut self,
         level: &mut DamageLevel<'_>,
         resources: &HealthResources,
