@@ -1148,7 +1148,8 @@ mod tests {
         }
 
         run_on_guest_stack(|| {
-            let mods = [ModEntry::new("cooler_backing", Box::new(CoolerBacking))].into();
+            let mods: mod_api::Mods =
+                vec![ModEntry::new("cooler_backing", Box::new(CoolerBacking))].into();
             crate::game::api_values::install_parts(&mods).unwrap();
             mod_platform::testing::with_mods(mods, || {
                 with_base_game(|game| {
@@ -1171,7 +1172,8 @@ mod tests {
                     player.inventory[0] = Some(cooler);
                     player.inventory[2] = Some(serving);
                     game.lan.as_mut().unwrap().hub.guests.push(player);
-                    let window = game
+                    let host: &mut dyn ServerHost = game;
+                    let window = host
                         .open_menu(
                             123,
                             3,
