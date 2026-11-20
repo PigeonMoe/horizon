@@ -3728,9 +3728,11 @@ impl Game<'_> {
                     p.on_ground,
                     MovePacket::Teleport,
                 );
-                // handleTeleportEntity: the mount this client moves is put
-                // there at once.
-                if self.driven_mount().is_some_and(|m| m.id as i32 == p.id) {
+                // Locally driven vehicles ignore position interpolation.
+                // Apply explicit teleports before the next outgoing vehicle move.
+                let id = p.id as u32;
+                let driven_boat = self.controls_boat(id) && self.boats.iter().any(|b| b.id == id);
+                if driven_boat || self.driven_mount().is_some_and(|m| m.id == id) {
                     self.remote_move_vehicle(position, p.yaw);
                 }
                 self.entity_section_moved_id(p.id as u32);
@@ -10813,6 +10815,51 @@ pub(crate) mod tests {
 
     mod predicted_block_notice_tests {
         include!("predicted_block_notice_tests.rs");
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn an_explicit_boat_teleport_corrects_the_drivers_next_move() {
+        use super::{C, S, Vec3, play};
+        use crate::game::boats::Boat;
+
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let (client, _server) = horizon_protocol::connection::Pipe::pair();
+            game.connect_local(client, "BoatTeleportTest").unwrap();
+            game.remote.as_mut().unwrap().entity_id = 1;
+            let outside = Vec3::new(0.5, 69.5, 6.2);
+            let predicted = Vec3::new(0.5, 69.5, 5.8);
+            let mut boat = Boat::new(3, "oak".into(), predicted, 180.0);
+            boat.velocity = Vec3::new(0.0, 0.0, -0.4);
+            game.boats.push(boat);
+
+            let teleport = || {
+                C::TeleportEntity(play::TeleportEntity {
+                    id: 3,
+                    position: outside.components(),
+                    delta: [0.0; 3],
+                    yaw: 180.0,
+                    pitch: 0.0,
+                    relatives: 0,
+                    on_ground: false,
+                })
+            };
+            game.remote_set_passengers(3, &[2, 1]);
+            game.handle_packet(teleport()).unwrap();
+            assert_eq!(game.boats[0].position, predicted);
+            assert!(game.remote_vehicle_packets().is_empty());
+
+            game.remote_set_passengers(3, &[1, 2]);
+            game.handle_packet(teleport()).unwrap();
+            assert_eq!(game.boats[0].position, outside);
+            assert_eq!(game.boats[0].previous, outside);
+            assert_eq!(game.boats[0].velocity, Vec3::ZERO);
+            let packets = game.remote_vehicle_packets();
+            let S::MoveVehicle(next) = &packets[0] else {
+                panic!("the first rider must report the boat's position");
+            };
+            assert_eq!(next.position, outside.components());
+        });
     }
 
     #[test]
