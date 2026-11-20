@@ -174,6 +174,7 @@ horizon-client game::native_hooks::player_drop_pre::tests::cancelled_manual_drop
 horizon-client game::native_hooks::player_drop_pre::tests::specialized_windows_check_drop_permission_before_a_slot_or_cursor_changes lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::redstone_activation_checks_real_players_and_other_entities_per_trigger lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one lib daily resources
+horizon-client game::native_hooks::entity_item_place_pre::tests::item_placement_veto_uses_the_final_entity_position_and_keeps_the_stack lib daily resources
 horizon-client game::native_hooks::player_leash_change_pre::tests::knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads lib daily resources
 horizon-client game::native_hooks::runtime_environment::server_data_version_tests::host_data_version_matches_a_freshly_saved_chunk lib daily resources
 horizon-client game::native_level_events::tests::native_and_wasm_break_effects_use_the_supplied_state_without_breaking_a_block lib daily resources

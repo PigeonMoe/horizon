@@ -4252,9 +4252,12 @@ impl Game<'_> {
             f64::from(above[1]),
             f64::from(above[2]),
         );
+        let at = Vec3::new(x + 0.5, y, z + 0.5);
+        if self.entity_item_place_cancelled("minecraft:end_crystal", at, None) {
+            return true;
+        }
         // EndCrystal's constructor: `this.random.nextInt(100000)`, the crystal's own random.
         let drawn = random_source::entity().next_int_bound(100_000).unwrap_or(0);
-        let at = Vec3::new(x + 0.5, y, z + 0.5);
         let time = Crystal::start_time(at, drawn, self.clock.still());
         // EndCrystal's constructor takes an id from the entity counter, so
         // the crystal is an entity a command can name (`@e[type=end_crystal]`).

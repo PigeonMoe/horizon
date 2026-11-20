@@ -1800,13 +1800,17 @@ impl Game<'_> {
             }
         }
         let boat = self.boat_from_hit(wood, chest, hit)?;
+        let kind = boat.entity_type();
+        if self.entity_item_place_cancelled(&kind, boat.position, Some(stack)) {
+            return Some(true);
+        }
         self.next_entity += 1;
         let key = (
             boat.position.x.floor() as i32 >> 4,
             boat.position.z.floor() as i32 >> 4,
         );
         self.world.modified.insert(key);
-        let (id, kind, yaw) = (boat.id, boat.entity_type(), boat.yaw);
+        let (id, yaw) = (boat.id, boat.yaw);
         self.boats.push(boat);
         self.apply_item_stack_config(super::commands::Target::Boat(id), &kind, stack, true);
         // BoatItem.use: setYRot(player.getYRot()) after the stack's config.

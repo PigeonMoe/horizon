@@ -2290,6 +2290,9 @@ impl Game<'_> {
             f64::from(hit.pos[1]) + 0.0625 + offset,
             f64::from(hit.pos[2]) + 0.5,
         );
+        if self.entity_item_place_cancelled(kind.id(), at, Some(stack)) {
+            return true;
+        }
         self.next_entity += 1;
         let cart = Minecart::new(self.next_entity, kind, at);
         self.world
