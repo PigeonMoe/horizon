@@ -356,7 +356,9 @@ impl Game<'_> {
                 .ok();
             consumed = used.is_some_and(|u| u.1);
             restore_hand = used.is_some_and(|(_, consumed, placement, failed)| {
-                placement && (!consumed || failed)
+                // A failed use can leave a predicted change even for a non-block item
+                // such as a fire charge the client spent trying to ignite a block.
+                failed || (placement && !consumed)
             });
             let swung = used.map(|u| u.0);
             self.lan_swing_back(conn, swung);

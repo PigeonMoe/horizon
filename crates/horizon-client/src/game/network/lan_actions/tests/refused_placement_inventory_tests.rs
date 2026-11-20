@@ -54,15 +54,22 @@ fn refused_placement_inventory_isolated() {
             player.position = [4.5, 64.0, 3.5];
             player.loaded = true;
             player.selected = 6;
-            player.inventory[6] = Some(Stack::new("minecraft:oak_planks", 3));
-            player.offhand = Some(Stack::new("minecraft:oak_planks", 5));
             player.sender = PlayerSender::new(tx, Arc::default());
             game.lan.as_mut().unwrap().hub.guests.push(player);
             let conn = game.lan.as_ref().unwrap().hub.guests[0].conn;
-            game.lan.as_mut().unwrap().hub.send_inventory(0);
-            packets.try_iter().for_each(drop);
-
-            for (hand, slot, count) in [(Hand::Main, 42, 3), (Hand::Off, 45, 5)] {
+            for (item, hand, slot, count) in [
+                ("minecraft:oak_planks", Hand::Main, 42, 3),
+                ("minecraft:oak_planks", Hand::Off, 45, 5),
+                ("minecraft:fire_charge", Hand::Main, 42, 3),
+                ("minecraft:fire_charge", Hand::Off, 45, 5),
+            ] {
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.guests.update(0, |player| {
+                    player.inventory[6] = Some(Stack::new(item, 3));
+                    player.offhand = Some(Stack::new(item, 5));
+                });
+                hub.send_inventory(0);
+                packets.try_iter().for_each(drop);
                 let hit = Hit {
                     pos: [4, 63, 5],
                     face: [0, 1, 0],
@@ -96,7 +103,7 @@ fn refused_placement_inventory_isolated() {
                         }
                     })
                     .collect();
-                assert_eq!(restored, [(slot, i32::try_from(count).unwrap())]);
+                assert_eq!(restored, [(slot, i32::try_from(count).unwrap())], "{item}");
             }
         });
     });
