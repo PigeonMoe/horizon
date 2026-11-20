@@ -1490,7 +1490,13 @@ impl Game<'_> {
     }
     /// `EndCrystal.hurtServer`: remove it, blast only for non-explosion damage,
     /// then notify the dragon fight even when no blast was created.
-    fn destroy_crystal(&mut self, index: usize, by: Option<FightWho>, damage: CrystalDamage) {
+    fn destroy_crystal(
+        &mut self,
+        index: usize,
+        by: Option<FightWho>,
+        damage: CrystalDamage,
+        direct: Option<&Projectile>,
+    ) {
         if index >= self.crystals.len() || self.crystals[index].invulnerable {
             return;
         }
@@ -1503,6 +1509,11 @@ impl Game<'_> {
                 .iter()
                 .any(|p| p.distance_squared(c.position) < 0.01);
         if damage == CrystalDamage::Direct {
+            // A crystal's accepted damage is reported before its blast, so
+            // a listener can react to the arrow separately from the explosion.
+            if let Some(projectile) = direct {
+                self.note_arrow_contact(projectile, "damage");
+            }
             let at = [c.position.x, c.position.y, c.position.z];
             // The blast's damage source carries the player, so the dragon
             // remembers them before the blast can kill it.
@@ -1639,7 +1650,7 @@ impl Game<'_> {
             let by = by_player.then(|| self.acting_player());
             // A listener may allow a hit on an otherwise invulnerable crystal.
             self.crystals[index].invulnerable = false;
-            self.destroy_crystal(index, by, CrystalDamage::Direct);
+            self.destroy_crystal(index, by, CrystalDamage::Direct, direct);
             Hurt::Landed { full: true }
         } else if id >= SPECIAL {
             let by = by_player.then(|| self.acting_player());
@@ -1819,7 +1830,7 @@ impl Game<'_> {
             CrystalDamage::Direct
         };
         let player = self.command_player(cause);
-        self.destroy_crystal(index, player, damage);
+        self.destroy_crystal(index, player, damage, None);
         true
     }
     /// `hurt_dragon_part` with no projectile behind the hit.
@@ -4021,7 +4032,7 @@ impl Game<'_> {
                     continue;
                 }
                 self.crystals[i].invulnerable = false;
-                self.destroy_crystal(i, by, CrystalDamage::Explosion);
+                self.destroy_crystal(i, by, CrystalDamage::Explosion, None);
             }
         }
         let Some(d) = self.dragon.as_ref().filter(|d| self.combat.visits(d.id)) else {

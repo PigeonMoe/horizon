@@ -718,6 +718,101 @@ fn arrow_hits_name_the_projectile_on_players_mobs_and_the_dragon() {
 
 #[test]
 #[ignore = "daily"]
+fn an_admitted_arrow_contacts_a_crystal_before_it_explodes() {
+    use super::dragon::{CRYSTAL_IDS, Crystal};
+    use horizon_client::{
+        mobs::Who,
+        projectiles::{Hit, Projectile, ProjectileKind},
+    };
+    use mod_api::{ArrowContactPostEvent, ExplosionStartEvent, Flow, ServerHost};
+
+    #[derive(Debug, PartialEq)]
+    enum Reached {
+        Contact(u32, [f64; 3]),
+        Explosion,
+    }
+
+    struct CrystalProbe(Arc<Mutex<Vec<Reached>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for CrystalProbe {
+        fn arrow_contact_post(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut ArrowContactPostEvent<'_>,
+        ) {
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.owner, 0);
+            assert_eq!(event.contact, "damage");
+            self.0
+                .lock()
+                .unwrap()
+                .push(Reached::Contact(event.projectile, event.at));
+        }
+
+        fn explosion_start(&self, _: &mut dyn ServerHost, _: &mut ExplosionStartEvent<'_>) -> Flow {
+            self.0.lock().unwrap().push(Reached::Explosion);
+            Flow::Cancel
+        }
+    }
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+        "crystal_arrow_probe",
+        Box::new(CrystalProbe(observed.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            let at = Vec3::new(8.5, 70.0, 8.5);
+            game.crystals.push(Crystal {
+                attachment_lifetime: Default::default(),
+                join: Default::default(),
+                id: 42,
+                position: at,
+                show_bottom: false,
+                time: 0,
+                beam: None,
+                invulnerable: true,
+                fall: (false, 0.0),
+                motion: Vec3::ZERO,
+                rotation: [0.0; 2],
+            });
+            let mut arrow = Projectile::new(
+                ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                },
+                Vec3::new(7.5, 70.5, 8.5),
+                None,
+            );
+            arrow.id = 81;
+            arrow.velocity = Vec3::new(2.0, 0.0, 0.0);
+            let hit = Hit::Entity {
+                who: Who::Mob(CRYSTAL_IDS),
+                at: arrow.position,
+            };
+
+            game.projectile_hit(&arrow, hit).unwrap();
+            assert_eq!(game.crystals.len(), 1);
+            assert!(observed.lock().unwrap().is_empty());
+
+            game.crystals[0].invulnerable = false;
+            arrow.id = 82;
+            game.projectile_hit(&arrow, hit).unwrap();
+            assert!(game.crystals.is_empty());
+            assert_eq!(
+                observed.lock().unwrap().as_slice(),
+                &[Reached::Contact(82, [7.5, 70.5, 8.5]), Reached::Explosion]
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn snapshot_crosses_the_real_damage_hook_with_reductions() {
     let log = heard(|game| {
         let mut container = horizon_world::living_damage::DamageContainer::new(10.0);
