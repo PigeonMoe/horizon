@@ -1097,6 +1097,7 @@ fn guests_see_each_other_and_the_world_entities() {
         vertical_collision: false,
         horizontal_collision: false,
         needs_sync: false,
+        hurt_marked: false,
         sync_position: false,
         stepped: false,
         idle: false,

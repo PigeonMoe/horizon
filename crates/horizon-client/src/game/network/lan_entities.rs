@@ -722,6 +722,9 @@ impl Game<'_> {
             d.needs_sync = false;
         }
         self.tridents.iter_mut().for_each(|t| t.needs_sync = false);
+        if let Some(dragon) = self.dragon.as_mut() {
+            dragon.hurt_marked = false;
+        }
     }
 
     /// Gives the entities Horizon keeps without an id one (`Entity.id`, from

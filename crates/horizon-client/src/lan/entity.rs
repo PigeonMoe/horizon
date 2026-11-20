@@ -81,6 +81,9 @@ pub struct EntityState {
     pub horizontal_collision: bool,
     /// `Entity.needsSync`: send its changes this tick, due or not.
     pub needs_sync: bool,
+    /// `Entity.hurtMarked`: send actual motion even outside the update
+    /// interval, with no change threshold. The owning entity clears it.
+    pub hurt_marked: bool,
     /// `Entity.syncPosition`: a living entity bounced this tick; where it is
     /// becomes a step of the next move sent (`SteppedInterpolationTracker`).
     pub sync_position: bool,
@@ -134,6 +137,7 @@ impl EntityState {
         self.vertical_collision = false;
         self.horizontal_collision = false;
         self.needs_sync = false;
+        self.hurt_marked = false;
         self.sync_position = false;
         self.stepped = false;
         self.idle = false;
@@ -656,6 +660,12 @@ impl ServerEntity {
         }
         self.tick += 1;
         self.send_equipment(e, out);
+        if e.hurt_marked {
+            out.push(play::Clientbound::SetEntityMotion(SetEntityMotion {
+                id: e.id,
+                velocity: e.velocity,
+            }));
+        }
     }
 
     /// Leashable.setLeashedTo / dropLeash: sendToTrackingPlayers at once.
@@ -1189,7 +1199,7 @@ impl Entities {
     /// its first tick took it. Of the joined states, those of entities still
     /// in the level and not tracked yet are kept, with what this tick's own
     /// state carries for this tick alone (the minecart steps drained into it,
-    /// `needs_sync`).
+    /// `needs_sync`, or a post-join explicit motion write).
     pub fn joined_states(
         &self,
         entities: &[&EntityState],
@@ -1209,6 +1219,10 @@ impl Entities {
                 let e = now.get(&j.id)?;
                 j.minecart_steps.clone_from(&e.minecart_steps);
                 j.needs_sync = e.needs_sync;
+                if e.hurt_marked {
+                    j.hurt_marked = true;
+                    j.velocity = e.velocity;
+                }
                 Some((j.id, j))
             })
             .collect()
@@ -1773,6 +1787,7 @@ mod tests {
             vertical_collision: false,
             horizontal_collision: false,
             needs_sync: false,
+            hurt_marked: false,
             sync_position: false,
             stepped: false,
             idle: false,
@@ -2013,6 +2028,29 @@ mod tests {
         }
         let jump = changes(&mut s, &state(40.0));
         assert!(matches!(jump[0], play::Clientbound::EntityPositionSync(_)));
+    }
+
+    #[test]
+    fn a_dragon_velocity_write_bypasses_interval_and_delta_threshold() {
+        let mut dragon = state(0.0);
+        dragon.kind = "minecraft:ender_dragon".into();
+        dragon.on_ground = false;
+        dragon.velocity = [0.7, 0.9, -0.4];
+        let mut s = added(&dragon);
+        changes(&mut s, &dragon);
+        assert!(s.interval > 1);
+        // Same motion as its pairing. The explicit write is still told on
+        // the next pass without also forcing a position packet.
+        dragon.hurt_marked = true;
+        assert!(matches!(changes(&mut s, &dragon).as_slice(), [
+            play::Clientbound::SetEntityMotion(packet)
+        ] if packet.id == dragon.id && packet.velocity == dragon.velocity));
+        dragon.hurt_marked = false;
+        assert!(
+            !changes(&mut s, &dragon)
+                .iter()
+                .any(|packet| { matches!(packet, play::Clientbound::SetEntityMotion(_)) })
+        );
     }
 
     #[test]

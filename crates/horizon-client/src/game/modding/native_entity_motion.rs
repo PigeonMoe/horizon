@@ -71,6 +71,10 @@ impl Game<'_> {
     /// sent it (`Entity.lerpMotion`). API 379.
     pub(super) fn entity_velocity(&self, entity: EntityRef) -> Option<[f64; 3]> {
         let t = self.native_entity_read_target(entity)?;
+        if let Target::Dragon(id) = t {
+            let d = self.dragon.as_ref().filter(|d| d.id == id)?;
+            return Some([d.velocity.x, d.velocity.y, d.velocity.z]);
+        }
         if !self.is_logical_server() {
             // The client's copy: its own player's motion, and the motion the
             // server sent for an entity it tracks.
@@ -165,6 +169,14 @@ impl Game<'_> {
         }
         if matches!(target, Target::Player | Target::Guest(_)) {
             return self.change_player_velocity(target, |_| Vec3::new(x, y, z));
+        }
+        if let Target::Dragon(id) = target {
+            let Some(dragon) = self.dragon.as_mut().filter(|d| d.id == id) else {
+                return false;
+            };
+            dragon.velocity = Vec3::new(x, y, z);
+            dragon.hurt_marked = true;
+            return true;
         }
         let Some(h) = self.native_walk_entity(entity.id()) else {
             return false;
@@ -395,6 +407,36 @@ mod tests {
             super::ray_end([1.0, 2.0, 3.0], [0.6, 0.0, 0.8], 0.0),
             [1.0, 2.0, 3.0]
         );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn dragon_root_velocity_is_readable_and_marks_one_tracking_pass() {
+        use super::super::native_entity_refs::tests::with_game;
+        use crate::game::creatures::SpawnSite;
+
+        with_game(|game| {
+            let id = game
+                .spawn_dragon_spawned([0.0, 80.0, 0.0], SpawnSite::Plain)
+                .unwrap();
+            let root = game.entity(id).unwrap();
+            let part = game.entity(id + 1).unwrap();
+            assert_eq!(game.entity_velocity(root), Some([0.0; 3]));
+            assert!(!game.lan_dragon_state().unwrap().hurt_marked);
+            assert!(!game.entity_set_velocity(part, [0.0, 1.0, 0.0]));
+            assert!(!game.entity_set_velocity(root, [f64::NAN, 1.0, 0.0]));
+            assert!(!game.lan_dragon_state().unwrap().hurt_marked);
+
+            let velocity = [0.7, 0.9, -0.4];
+            assert!(game.entity_set_velocity(root, velocity));
+            assert_eq!(game.entity_velocity(root), Some(velocity));
+            let tracked = game.lan_dragon_state().unwrap();
+            assert_eq!(tracked.velocity, velocity);
+            assert!(tracked.hurt_marked);
+            game.lan_syncs_looked();
+            assert!(!game.lan_dragon_state().unwrap().hurt_marked);
+            assert_eq!(game.entity_velocity(root), Some(velocity));
+        });
     }
 
     #[test]
