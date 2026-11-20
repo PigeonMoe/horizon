@@ -241,15 +241,25 @@ impl Game<'_> {
             }
             self.remember_uuid(self.next_entity, uuid, &tag);
             let uuid = self.uuid_for(self.next_entity);
+            let origin = FallingBlock::origin_from_nbt(&tag);
+            let damage = horizon_client::falling_block::Damage::from_nbt(
+                &tag,
+                self.res.facts().get(state).name.ends_with("anvil"),
+            );
             self.falling.push(FallingBlock {
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
                 join: Default::default(),
                 id: self.next_entity,
                 state,
-                // DATA_START_POS is not persisted by vanilla.
-                start_pos: horizon_core::position::BlockPos::default(),
-                origin: FallingBlock::origin_from_nbt(&tag),
+                // DATA_START_POS is not persisted by vanilla. A visual-only
+                // mod spawn keeps its own recorded original model seed.
+                start_pos: if damage.discard_on_land {
+                    origin.map(|(_, pos)| pos).unwrap_or_default()
+                } else {
+                    Default::default()
+                },
+                origin,
                 position,
                 previous: position,
                 velocity,
@@ -264,10 +274,7 @@ impl Game<'_> {
                 fall_distance,
                 on_ground: entity_nbt::flag(&tag, "OnGround"),
                 stuck: Vec3::ZERO,
-                damage: horizon_client::falling_block::Damage::from_nbt(
-                    &tag,
-                    self.res.facts().get(state).name.ends_with("anvil"),
-                ),
+                damage,
                 saved: Some(Box::new((uuid, tag.clone()))),
             });
         }

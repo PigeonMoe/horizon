@@ -1324,6 +1324,7 @@ horizon-client game::native_falling::tests::falling_client_tick_commits_state_wi
 horizon-client game::native_falling::tests::falling_lifecycle_commands_unload_park_and_remote lib daily resources
 horizon-client game::native_falling::tests::falling_parked_swap_preserves_state_and_owner_until_discard lib daily resources
 horizon-client game::native_falling::tests::falling_tick_preserves_its_owner_on_success_and_collision_error lib daily resources
+horizon-client game::native_falling::tests::ghosts_keep_spawn_state_and_retire_without_block_effects lib daily resources
 horizon-client game::native_fire_odds_tests::a_block_part_answers_fire_odds_for_one_face lib daily resources
 horizon-client game::native_fishing_hook_refs::tests::a_cast_hook_narrows_reads_its_catch_and_goes_when_discarded lib daily resources
 horizon-client game::native_fishing_hook_refs::tests::a_hook_belongs_to_the_player_who_cast_it lib daily resources

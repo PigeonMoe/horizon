@@ -93,7 +93,8 @@ pub trait EntitiesServerHost {
     /// Throws a falling block of `state` from `pos` (its bottom centre) at
     /// `velocity` (blocks a tick) in the level in place, `dimension`: it
     /// falls, lands and places itself as sand does, or drops as an item
-    /// where it can't. The block at `pos` is left as it is: take it away first
+    /// where it can't. [`Falling::ghost`] keeps the trajectory and visual state
+    /// and instead disappears on landing. The block at `pos` is left as it is: take it away first
     /// with `native_set_block` to make a block fall out of the world. False,
     /// with nothing thrown, on a client's copy of the world, for another
     /// dimension, an air or unknown state, a chunk that isn't loaded, a value

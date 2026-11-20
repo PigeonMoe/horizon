@@ -258,12 +258,27 @@ pub struct Falling {
     /// `FallingBlockEntity.hurtEntities`, at 2 a block fallen and at most 40,
     /// an anvil's.
     pub hurts: bool,
+    /// Keeps the falling block's physics and appearance but quietly discards
+    /// it in place of its final placement or drop. Takes precedence over
+    /// `drop_item`, `hurts` and a block's usual broken-after-fall effects.
+    pub discard_on_land: bool,
 }
 impl Default for Falling {
     fn default() -> Self {
         Self {
             drop_item: true,
             hurts: false,
+            discard_on_land: false,
+        }
+    }
+}
+impl Falling {
+    /// A falling block which vanishes when it lands and never hurts or drops.
+    pub const fn ghost() -> Self {
+        Self {
+            drop_item: false,
+            hurts: false,
+            discard_on_land: true,
         }
     }
 }

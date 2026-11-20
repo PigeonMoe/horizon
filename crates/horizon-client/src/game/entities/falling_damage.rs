@@ -283,6 +283,9 @@ impl Game<'_> {
     /// `FallingBlockEntity.tick`: finish a landing, including the placed block
     /// entity and the carried `TileEntityData` applied through loadWithComponents.
     pub(super) fn finish_falling_block(&mut self, block: FallingBlock, pos: [i32; 3]) {
+        if block.damage.discard_on_land {
+            return;
+        }
         let name = self.res.facts().get(block.state).name.clone();
         let anvil = name.ends_with("anvil");
         // Fallable.onBrokenAfterFall: the anvil's, the pointed dripstone's and

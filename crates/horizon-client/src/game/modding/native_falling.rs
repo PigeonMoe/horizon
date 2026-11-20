@@ -68,7 +68,12 @@ impl Game<'_> {
         }
         let mut damage =
             horizon_client::falling_block::Damage::falling(&self.res.facts().get(state).name);
-        if falling.hurts {
+        if falling.discard_on_land {
+            damage = horizon_client::falling_block::Damage {
+                discard_on_land: true,
+                ..Default::default()
+            };
+        } else if falling.hurts {
             damage.hurt_entities = true;
             damage.per_distance = 2.0;
             damage.max = 40;
@@ -86,10 +91,10 @@ impl Game<'_> {
             position: at,
             previous: at,
             velocity,
-            age: 0,
+            age: i32::from(falling.discard_on_land),
             no_gravity: false,
             on_ground: false,
-            drop_item: falling.drop_item,
+            drop_item: falling.drop_item && !falling.discard_on_land,
             fall_distance: 0.0,
             stuck: Vec3::ZERO,
             damage,
@@ -117,6 +122,94 @@ mod tests {
         copy_on_death: false,
         sync: false,
     };
+
+    #[test]
+    #[ignore = "daily"]
+    fn ghosts_keep_spawn_state_and_retire_without_block_effects() {
+        use horizon_core::nbt::Tag;
+        use horizon_world::level::LevelEvent;
+
+        super::super::native_entity_refs::tests::with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            let registry = game.pack.assets.registry;
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            let air = registry.default_state("minecraft:air").unwrap();
+            let suspicious = registry.default_state("minecraft:suspicious_sand").unwrap();
+            let anvil = registry.default_state("minecraft:anvil").unwrap();
+            let sand = registry.default_state("minecraft:sand").unwrap();
+            let mut chunk = horizon_client::chunk::Chunk::empty(0, 0);
+            for x in [1, 3, 5, 7] {
+                chunk.set(x, 70, 1, stone.0 as _);
+            }
+            game.world.chunks.insert((0, 0), Arc::new(chunk));
+            let dimension = game.dim.id();
+            for (x, state, mode) in [
+                (1, suspicious, mod_api::Falling::ghost()),
+                (3, suspicious, mod_api::Falling::default()),
+                (5, anvil, mod_api::Falling::ghost()),
+                (7, sand, mod_api::Falling::default()),
+            ] {
+                assert!(game.spawn_falling_block(
+                    dimension,
+                    state,
+                    [f64::from(x) + 0.5, 71.0, 1.5],
+                    [0.0, 0.42, 0.0],
+                    mode,
+                ));
+            }
+            // Let the first ghost move up before encoding the same persistent
+            // motion/origin fields that the cross-dimension transfer uses.
+            game.tick_one_falling(0, &[]).unwrap();
+            let original = game.falling[0].clone();
+            assert!(original.position.y > 71.0);
+            assert_eq!(original.start_pos, BlockPos::new(1, 71, 1));
+            let keys = [(0, 0)].into_iter().collect();
+            let (_, tag) = game.save_falling(0, &keys).unwrap();
+            assert_eq!(
+                tag.get("horizon:falling_discard_on_land"),
+                Some(&Tag::Byte(1))
+            );
+            game.falling.retain(|falling| falling.id != original.id);
+            game.load_falling(tag, None);
+            let loaded = game.falling.last().unwrap();
+            assert_eq!(loaded.start_pos, original.start_pos);
+            assert_eq!(loaded.position, original.position);
+            assert_eq!(loaded.velocity, original.velocity);
+            assert!(loaded.damage.discard_on_land);
+            assert!(game.falling[1].damage.impact(10.0).is_none());
+            for _ in 0..45 {
+                for i in (0..game.falling.len()).rev() {
+                    game.tick_one_falling(i, &[]).unwrap();
+                }
+            }
+            assert!(game.falling.is_empty());
+            for x in [1, 3, 5] {
+                assert_eq!(game.world.block(x, 71, 1), air);
+                assert_eq!(game.world.block(x, 70, 1), stone);
+            }
+            assert_eq!(game.world.block(7, 71, 1), sand);
+            assert!(game.dropped.is_empty());
+            assert!(
+                !game
+                    .level_events
+                    .iter()
+                    .any(|event| { matches!(event, LevelEvent::LevelEvent { id: 1029, .. }) })
+            );
+            let broken: Vec<_> = game
+                .level_events
+                .iter()
+                .filter_map(|event| match event {
+                    LevelEvent::GameEvent {
+                        pos,
+                        event: "minecraft:block_destroy",
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(broken, [BlockPos::new(3, 71, 1)]);
+        });
+    }
 
     #[test]
     #[ignore = "daily"]

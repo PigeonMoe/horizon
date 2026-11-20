@@ -16,6 +16,8 @@ use {horizon_core::nbt::Tag, horizon_world::chunk::BlockState};
 pub struct Damage {
     pub hurt_entities: bool,
     pub cancel_drop: bool,
+    /// Explicit visual-only spawn, separate from vanilla CancelDrop.
+    pub discard_on_land: bool,
     pub per_distance: f32,
     pub max: i32,
 }
@@ -24,6 +26,7 @@ impl Default for Damage {
         Self {
             hurt_entities: false,
             cancel_drop: false,
+            discard_on_land: false,
             per_distance: 0.0,
             max: 40,
         }
@@ -54,6 +57,10 @@ impl Damage {
             // getBooleanOr: a number is true when its byte value is not 0.
             hurt_entities: crate::entity_nbt::flag_or(tag, "HurtEntities", anvil),
             cancel_drop: crate::entity_nbt::flag(tag, "CancelDrop"),
+            discard_on_land: matches!(
+                tag.get("horizon:falling_discard_on_land"),
+                Some(Tag::Byte(1))
+            ),
             per_distance: float(tag.get("FallHurtAmount")).unwrap_or(0.0) as f32,
             max: number(tag.get("FallHurtMax")).unwrap_or(40) as i32,
         }
@@ -67,9 +74,12 @@ impl Damage {
         ] {
             put(tag, key, value);
         }
+        if self.discard_on_land {
+            put(tag, "horizon:falling_discard_on_land", Tag::Byte(1));
+        }
     }
     pub fn impact(self, fall_distance: f64) -> Option<Impact> {
-        if !self.hurt_entities {
+        if self.discard_on_land || !self.hurt_entities {
             return None;
         }
         let steps = (fall_distance - 1.0).ceil() as i32;
@@ -380,6 +390,7 @@ mod tests {
         let damage = Damage {
             hurt_entities: true,
             cancel_drop: true,
+            discard_on_land: false,
             per_distance: 3.5,
             max: 17,
         };

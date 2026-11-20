@@ -323,11 +323,13 @@ impl Game<'_> {
         let y = next.y.floor() as i32;
         let outside = y <= self.world.bottom_y() || y >= self.world.top_y();
         if !on_ground && (f.age > 100 && outside || f.age > 600) {
-            return Ok(if f.drop_item && entity_drops {
-                FallStep::Dropped(next)
-            } else {
-                FallStep::Gone
-            });
+            return Ok(
+                if f.drop_item && entity_drops && !f.damage.discard_on_land {
+                    FallStep::Dropped(next)
+                } else {
+                    FallStep::Gone
+                },
+            );
         }
         if on_ground {
             let at = [
