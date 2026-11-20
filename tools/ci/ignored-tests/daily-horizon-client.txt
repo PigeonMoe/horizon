@@ -95,6 +95,7 @@ horizon-client game::native_config_files::tests::compiled_wasm_bulk_files_use_ac
 horizon-client game::native_config_files::tests::world_bulk_files_survive_save_reload_backup_and_world_deletion lib daily game-boot
 horizon-client game::native_damage_tests::a_player_damage_permission_query_does_not_damage_its_target lib daily resources
 horizon-client game::native_damage_tests::an_admitted_arrow_contacts_a_crystal_before_it_explodes lib daily resources
+horizon-client game::native_damage_tests::an_arrow_contacts_a_dragon_only_after_admitted_living_damage lib daily resources
 horizon-client game::native_damage_tests::armor_stand_sweeps_and_sourced_damage_check_the_living_target lib daily resources
 horizon-client game::native_damage_tests::damage_admission_checks_the_player_responsible_for_the_actual_hit lib daily resources
 horizon-client game::native_damage_tests::mob_drops_record_the_players_credit_on_an_environmental_death lib daily resources

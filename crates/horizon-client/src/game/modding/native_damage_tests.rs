@@ -813,6 +813,159 @@ fn an_admitted_arrow_contacts_a_crystal_before_it_explodes() {
 
 #[test]
 #[ignore = "daily"]
+fn an_arrow_contacts_a_dragon_only_after_admitted_living_damage() {
+    use horizon_client::{
+        mobs::Who,
+        projectiles::{Hit, Projectile, ProjectileKind},
+    };
+    use mod_api::{ArrowContactPostEvent, EntityDamageTargetPreEvent, Flow, ServerHost};
+
+    const PLAYER: u32 = 225026;
+    const DRAGON: i32 = 225027;
+    const ZEROED_ARROW: u32 = 86;
+    const CONTACT: Vec3 = Vec3::new(7.5, 71.0, 8.5);
+
+    #[derive(Debug, PartialEq)]
+    enum Reached {
+        Damage(i32, f32, bool),
+        Contact(u32),
+    }
+
+    struct DragonProbe(Arc<Mutex<Vec<Reached>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for DragonProbe {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.target_kind, "minecraft:ender_dragon");
+            assert_eq!(
+                event.player.map(|player| player.uuid),
+                Some(u128::from(PLAYER))
+            );
+            if event.position[0] < 10.0 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn living_damage_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut LivingDamagePreEvent<'_>,
+        ) {
+            if event.source.direct == ZEROED_ARROW as i32 {
+                event.container.set_new_damage(0.0);
+            }
+        }
+
+        fn living_damage_post(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut LivingDamagePostEvent<'_>,
+        ) {
+            assert_eq!(event.entity, DRAGON);
+            self.0.lock().unwrap().push(Reached::Damage(
+                event.source.direct,
+                event.container.health_damage(),
+                event.container.should_cause_side_effects(),
+            ));
+        }
+
+        fn arrow_contact_post(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut ArrowContactPostEvent<'_>,
+        ) {
+            assert_eq!(event.owner, PLAYER);
+            assert_eq!(event.at, CONTACT.components());
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert_eq!(event.contact, "damage");
+            self.0
+                .lock()
+                .unwrap()
+                .push(Reached::Contact(event.projectile));
+        }
+    }
+
+    super::native_entity_refs::tests::run_on_guest_stack(|| {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![mod_api::ModEntry::new(
+            "dragon-arrow-probe",
+            Box::new(DragonProbe(observed.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                survival_player(game, PLAYER);
+                let dragon = |x, flying| {
+                    let mut dragon = Dragon::new(Vec3::new(x, 70.0, 8.5), 0.0, 0);
+                    dragon.id = DRAGON as u32;
+                    if flying {
+                        dragon.set_native_phase(mod_api::DragonPhase::HoldingPattern);
+                    }
+                    dragon
+                };
+                let impact = |game: &mut super::Game<'_>, id, speed, owner, kind| {
+                    let mut projectile = Projectile::new(kind, CONTACT, owner);
+                    projectile.id = id;
+                    projectile.velocity = Vec3::new(speed, 0.0, 0.0);
+                    let hit = Hit::Entity {
+                        who: Who::Mob(SPECIAL),
+                        at: CONTACT,
+                    };
+                    game.projectile_hit(&projectile, hit).unwrap();
+                    game.dragon.as_ref().unwrap().health
+                };
+                let arrow = || ProjectileKind::Arrow {
+                    base_damage: 2.0,
+                    critical: false,
+                    effect: None,
+                };
+                let player = Some(Who::Player);
+
+                game.dragon.replace(dragon(8.5, true));
+                assert_eq!(impact(game, 80, 2.0, player, arrow()), 200.0);
+                game.dragon.replace(dragon(12.5, false));
+                assert_eq!(impact(game, 81, 2.0, player, arrow()), 200.0);
+                game.dragon.replace(dragon(12.5, true));
+                assert_eq!(impact(game, 82, 2.0, None, arrow()), 200.0);
+                assert!(observed.lock().unwrap().is_empty());
+
+                assert_eq!(impact(game, 83, 2.0, player, arrow()), 196.0);
+                assert_eq!(impact(game, 84, 1.0, player, arrow()), 196.0);
+                assert_eq!(impact(game, 85, 3.0, player, arrow()), 194.0);
+
+                game.dragon.replace(dragon(12.5, true));
+                assert_eq!(impact(game, ZEROED_ARROW, 2.0, player, arrow()), 200.0);
+                game.dragon.replace(dragon(12.5, true));
+                assert_eq!(
+                    impact(game, 87, 2.0, player, ProjectileKind::Trident),
+                    192.0
+                );
+            });
+        });
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &[
+                Reached::Damage(83, 4.0, true),
+                Reached::Contact(83),
+                Reached::Damage(85, 2.0, false),
+                Reached::Contact(85),
+                Reached::Damage(ZEROED_ARROW as i32, 0.0, true),
+                Reached::Contact(ZEROED_ARROW),
+                Reached::Damage(87, 8.0, true),
+            ]
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn snapshot_crosses_the_real_damage_hook_with_reductions() {
     let log = heard(|game| {
         let mut container = horizon_world::living_damage::DamageContainer::new(10.0);
