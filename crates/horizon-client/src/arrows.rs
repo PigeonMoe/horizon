@@ -123,6 +123,8 @@ pub enum ArrowEvent {
         kind: &'static str,
         /// The arrow's owner (`Projectile.getOwner`), who owns a TNT it primes.
         owner: Option<Who>,
+        /// The owner identity used to resolve the igniter after the arrow tick.
+        owner_uuid: Option<[i32; 4]>,
     },
     /// The SPLASH and PROJECTILE_SHOOT game events.
     SplashEvent,
@@ -1134,6 +1136,7 @@ impl Ticker<'_, '_, '_, '_> {
                     self.p.entity_type()
                 },
                 owner: self.p.owner,
+                owner_uuid: self.p.owner_uuid,
             });
         }
         let v = self.p.velocity;

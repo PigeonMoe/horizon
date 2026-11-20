@@ -5131,6 +5131,7 @@ impl Game<'_> {
                 projectile,
                 kind,
                 owner,
+                owner_uuid,
             } => match reaction {
                 BlockReaction::PrimeTnt => {
                     // Paper's `TntBlock.onProjectileHit` checks the projectile's
@@ -5144,7 +5145,9 @@ impl Game<'_> {
                     }
                 }
                 BlockReaction::Light(lit) => {
-                    let _ = self.level_set([pos.x, pos.y, pos.z], lit);
+                    if self.arrow_block_ignite_allowed(pos, kind, owner_uuid) {
+                        let _ = self.level_set([pos.x, pos.y, pos.z], lit);
+                    }
                 }
             },
             ArrowEvent::SplashEvent => {

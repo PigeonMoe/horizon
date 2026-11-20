@@ -1,15 +1,18 @@
 use super::*;
+use crate::game::commands::Target;
 
 impl Game<'_> {
+    fn checks_block_ignition(&self) -> bool {
+        self.native_authoritative()
+            && (mod_api::__private::listened(mod_api::HookId::BlockIgnite)
+                || mod_api::__private::listened(mod_api::HookId::PlayerBlockIgnitePre))
+    }
     pub(in crate::game) fn player_block_ignite_allowed(
         &mut self,
         pos: [i32; 3],
         cause: &'static str,
     ) -> bool {
-        if !self.native_authoritative()
-            || !(mod_api::__private::listened(mod_api::HookId::BlockIgnite)
-                || mod_api::__private::listened(mod_api::HookId::PlayerBlockIgnitePre))
-        {
+        if !self.checks_block_ignition() {
             return true;
         }
         let player = (!self.lan_acting_fake)
@@ -19,6 +22,35 @@ impl Game<'_> {
         self.with_level(|_, level, _| {
             level.block_ignite_allowed_by(BlockPos::new(pos[0], pos[1], pos[2]), cause, player)
         })
+    }
+
+    /// Paper resolves a burning arrow's owner for BlockIgniteEvent.
+    pub(in crate::game) fn arrow_block_ignite_allowed(
+        &mut self,
+        pos: BlockPos,
+        kind: &str,
+        owner_uuid: Option<[i32; 4]>,
+    ) -> bool {
+        if !self.checks_block_ignition() {
+            return true;
+        }
+        let player = owner_uuid
+            .map(horizon_client::lan::playerdata::ints_uuid)
+            .filter(|uuid| match self.target_by_uuid(*uuid) {
+                Some(Target::Player) => self.player.is_some() && !self.lan_acting_fake,
+                Some(Target::Guest(conn)) => self
+                    .command_guest(conn)
+                    .is_some_and(|guest| guest.placed_in(self.dim.id())),
+                _ => false,
+            });
+        // The Paper cause switch uses ARROW for a plain arrow and its
+        // FLINT_AND_STEEL fallback for a spectral arrow.
+        let cause = if kind == "minecraft:arrow" {
+            "arrow"
+        } else {
+            "flint_and_steel"
+        };
+        self.with_level(|_, level, _| level.block_ignite_allowed_by(pos, cause, player))
     }
 
     /// Replace a checked air block with fire, after reporting the actual ignition source.
@@ -67,7 +99,10 @@ impl GameLevel<'_> {
                     .map(|source| (source.name, source.permission_level))
                     .or_else(|| {
                         let hub = self.lan_hub?;
-                        let guest = hub.guests.simulation_iter().find(|guest| guest.uuid == player)?;
+                        let guest = hub
+                            .guests
+                            .simulation_iter()
+                            .find(|guest| guest.uuid == player)?;
                         Some((guest.name.as_str(), guest.permission))
                     })
             {
