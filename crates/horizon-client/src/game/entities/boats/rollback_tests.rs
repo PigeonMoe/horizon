@@ -23,6 +23,7 @@ const CAMEL: u32 = 901;
 const FIRST: u128 = 13;
 const SECOND: u128 = 12;
 const START: Vec3 = Vec3::new(7.875, 200.0, 8.5);
+const CROSSING_OFFSET: f64 = 1.3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Policy {
@@ -306,7 +307,7 @@ impl Hooks for GuestBoundary {
     ) -> Flow {
         assert_eq!(event.vehicle, BOAT);
         assert_eq!(event.from, START.components());
-        assert_eq!(event.to, [START.x + 0.7, START.y, START.z]);
+        assert_eq!(event.to, [START.x + CROSSING_OFFSET, START.y, START.z]);
         self.checks.lock().unwrap().push(event.player + 100);
         if event.player == SECOND {
             Flow::Cancel
@@ -444,8 +445,9 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
                         assert_eq!(corrections, [START.components()]);
                         return;
                     }
-                    request(game, 0.7);
-                    assert_eq!(game.boats[0].position.x, START.x + 0.7);
+                    // The returning rider stays clear of the boat's ordinary contact area.
+                    request(game, CROSSING_OFFSET);
+                    assert_eq!(game.boats[0].position.x, START.x + CROSSING_OFFSET);
                     assert_eq!(*checks.lock().unwrap(), [SECOND, FIRST, SECOND, FIRST]);
                     game.tick_boats();
                     let mut expected =
@@ -480,7 +482,7 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
                         assert!(driver.awaiting_teleport.is_some());
                     } else {
                         expected.push(300);
-                        assert_eq!(game.boats[0].position.x, START.x + 0.7);
+                        assert_eq!(game.boats[0].position.x, START.x + CROSSING_OFFSET);
                         for (conn, rider) in [(FIRST, first), (SECOND, second)] {
                             assert_eq!(good(game, conn as u32), None);
                             assert_eq!(game.entity_vehicle(rider), None);
