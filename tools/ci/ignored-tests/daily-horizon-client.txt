@@ -63,6 +63,7 @@ horizon-client game::item_pickup_shape_tests::a_lifted_item_is_visible_at_its_ac
 horizon-client game::item_use::interact_vibration_tests::removed_potion_remainder_never_reaches_the_hand_or_inventory lib daily resources
 horizon-client game::lan_actions::boat_holder_movement_tests::a_leash_knot_click_checks_the_fence_before_transferring_the_leash lib daily resources
 horizon-client game::lan_actions::pickups::orb_merge_contract_tests::orb_xp_listener_only_changes_the_remainder_after_mending lib daily resources
+horizon-client game::lan_actions::tests::sneak_release_in_the_same_packet_batch_does_not_change_a_block_click lib daily resources
 horizon-client game::lan_mount_menu::tests::mount_inventory_open_checks_the_mount_position_before_replacing_a_menu lib daily resources
 horizon-client game::lan_stations::tests::table_proposal_pays_once_and_keeps_both_book_enchantment_components lib daily resources
 horizon-client game::launch_api::tests::developer_offline_never_consumes_inherited_sessions lib daily child-process
