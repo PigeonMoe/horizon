@@ -333,8 +333,16 @@ impl Game<'_> {
         }
         // How many of `stack` `held` gives.
         let taken = |held: Option<&ItemStack>| {
-            held.filter(|held| held.same_item_same_components(&stack))
-                .map_or(0, |held| held.count.min(stack.count))
+            held.filter(|held| {
+                held.same_item_same_components(&stack)
+                    // The API's component snapshot can resolve an optional
+                    // default, such as a potion effect's show_icon, on read.
+                    || (held.item == stack.item
+                        && held.damage == stack.damage
+                        && horizon_items::item_data::encode_components(held)
+                            == horizon_items::item_data::encode_components(&stack))
+            })
+            .map_or(0, |held| held.count.min(stack.count))
         };
         let left = |held: &ItemStack, took: u32| ItemStack {
             count: held.count - took,

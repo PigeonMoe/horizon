@@ -173,6 +173,7 @@ horizon-client game::native_hooks::runtime_environment::server_data_version_test
 horizon-client game::native_level_events::tests::native_and_wasm_break_effects_use_the_supplied_state_without_breaking_a_block lib daily resources
 horizon-client game::native_menu_places::tests::a_backing_names_why_it_refuses lib daily resources
 horizon-client game::native_menu_places::tests::a_backed_menu_commits_its_last_click_before_a_close_in_the_same_batch lib daily resources
+horizon-client game::native_menu_places::tests::a_backed_menu_moves_a_potion_with_an_implicit_effect_icon_from_the_hotbar lib daily resources
 horizon-client game::native_menu_places::tests::a_guest_block_click_opens_and_backs_a_mod_menu_in_one_turn lib daily resources
 horizon-client game::native_menu_places::tests::a_mod_slot_is_shared_by_two_views_and_refuses_a_stale_second_take lib daily resources
 horizon-client game::native_menu_places::tests::a_shift_click_into_a_held_backpack_writes_through_its_handler lib daily resources

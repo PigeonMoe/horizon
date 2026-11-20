@@ -1130,6 +1130,109 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn a_backed_menu_moves_a_potion_with_an_implicit_effect_icon_from_the_hotbar() {
+        use crate::game::native_entity_refs::tests::run_on_guest_stack;
+        use horizon_items::item_data::parse_stack;
+        use horizon_protocol::packets::play::{ContainerClick, Serverbound};
+        use mod_api::{ItemResource, ModEntry};
+
+        struct CoolerBacking;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for CoolerBacking {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                let item = r.item_key("minecraft:player_head");
+                r.item_container(&item, |_: &dyn mod_api::Host| Some(27));
+            }
+        }
+
+        run_on_guest_stack(|| {
+            let mods = [ModEntry::new("cooler_backing", Box::new(CoolerBacking))].into();
+            crate::game::api_values::install_parts(&mods).unwrap();
+            mod_platform::testing::with_mods(mods, || {
+                with_base_game(|game| {
+                    let parse = |snbt| parse_stack(snbt).unwrap().unwrap();
+                    let cooler = parse(
+                        r#"{id:"minecraft:player_head",count:1,components:{"minecraft:custom_data":{PublicBukkitValues:{"slimefun:slimefun_item":"COOLER"}}}}"#,
+                    );
+                    let potion = r#"{id:"minecraft:potion",count:1,components:{"minecraft:custom_data":{PublicBukkitValues:{"slimefun:slimefun_item":"GOLDEN_APPLE_JUICE"}},"minecraft:custom_name":"Golden Apple Juice","minecraft:potion_contents":{custom_effects:[{id:"minecraft:health_boost",duration:400}]}}}"#;
+                    let serving = parse(potion);
+                    let expected = ItemResource::of(&serving.try_into_api().unwrap());
+                    let different = potion.replace("duration:400", "duration:400,show_icon:0b");
+                    let different = ItemResource::of(&parse(&different).try_into_api().unwrap());
+                    assert_ne!(different, expected);
+
+                    open_to_lan(game);
+                    let mut player = guest(1);
+                    player.loaded = true;
+                    player.load_timeout = 0;
+                    player.selected = 0;
+                    player.inventory[0] = Some(cooler);
+                    player.inventory[2] = Some(serving);
+                    game.lan.as_mut().unwrap().hub.guests.push(player);
+                    let window = game
+                        .open_menu(
+                            123,
+                            3,
+                            mod_api::Text::literal("Cooler [27 Slots]"),
+                            Vec::new(),
+                            MenuReplace::CloseFirst,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    let player = game.player(123).unwrap();
+                    game.player_back_mod_menu_slots(player, window, held_places(Hand::Main, 0..27))
+                        .unwrap();
+                    let menu = game.menu(123, window).unwrap();
+                    assert_eq!(
+                        game.menu_slot_backing(menu, 56),
+                        Some(MenuSlotBacking::Player(2))
+                    );
+                    let source = ItemPlace::MenuSlot { menu, slot: 56 };
+                    let host: &mut dyn ServerHost = game;
+                    // A different resolved icon setting is a different resource.
+                    assert_eq!(
+                        host.transaction(|host, tx| Ok::<_, ()>(
+                            source.extract(host, tx, &different, 1)
+                        )),
+                        Ok(0)
+                    );
+                    assert_eq!(source.resource(host), Some(expected.clone()));
+
+                    let click = |game: &mut Game<'_>, slot| {
+                        game.lan_guest_packet(
+                            1,
+                            Serverbound::ContainerClick(ContainerClick {
+                                container: window,
+                                state: 0,
+                                slot,
+                                button: 0,
+                                input: 0,
+                                changed: Vec::new(),
+                                carried: None,
+                            }),
+                        );
+                        game.run_native_menu_events();
+                    };
+                    click(game, 56);
+                    let host: &mut dyn ServerHost = game;
+                    assert!(
+                        source.stack(host).is_none(),
+                        "the authoritative hotbar is empty"
+                    );
+                    assert_eq!(menu.cursor().resource(host), Some(expected.clone()));
+
+                    click(game, 7);
+                    let host: &mut dyn ServerHost = game;
+                    assert!(menu.cursor().stack(host).is_none());
+                    assert_eq!(held_slot(7).resource(host), Some(expected));
+                    assert!(source.stack(host).is_none());
+                });
+            });
+        });
+    }
+
     /// The guest's record, to change their hands as a packet or a command would.
     fn edit_guest(game: &mut Game<'_>, edit: impl FnOnce(&mut horizon_client::lan::guest::Guest)) {
         let guests = &mut game.lan.as_mut().unwrap().hub.guests;
