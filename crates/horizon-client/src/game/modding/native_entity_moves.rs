@@ -377,14 +377,11 @@ impl Game<'_> {
                 };
                 let velocity = change(motion.velocity);
                 motion.velocity = velocity;
-                guest.send(
-                    &horizon_protocol::packets::play::Clientbound::SetEntityMotion(
-                        horizon_protocol::packets::play::SetEntityMotion {
-                            id: guest.entity_id,
-                            velocity: [velocity.x, velocity.y, velocity.z],
-                        },
-                    ),
-                );
+                if target == Target::Player && motion.teleported {
+                    guest.motion_after_teleport = Some(velocity);
+                } else {
+                    guest.send_motion(velocity);
+                }
                 true
             })
             .unwrap_or(false)

@@ -822,8 +822,10 @@ impl Game<'_> {
         let released_vehicle = host.hub.guests[i]
             .vehicle
             .filter(|id| Some(*id) != guest_vehicle);
-        let (stat_events, name, teleport) = host.hub.guests.update(i, |g| {
+        let (stat_events, name, teleport, motion_after_teleport) = host.hub.guests.update(i, |g| {
             let mut teleport = None;
+            let requested_motion = g.motion_after_teleport.take();
+            let mut motion_after_teleport = None;
             g.attachments = std::mem::replace(&mut self.player_state.attachments, attachments);
             let left_vehicle = g.vehicle.filter(|_| guest_vehicle.is_none());
             if guest_vehicle.is_none() {
@@ -930,6 +932,11 @@ impl Game<'_> {
                 let teleported = std::mem::take(&mut m.teleported);
                 let teleported_delta = m.teleported_delta;
                 m.teleported_delta = [false; 3];
+                if teleported {
+                    // Another teleport or motion write in this turn may have superseded it.
+                    motion_after_teleport =
+                        requested_motion.filter(|velocity| *velocity == m.velocity);
+                }
                 let moved: f64 = (0..3).map(|k| (at[k] - g.position[k]).powi(2)).sum();
                 g.motion = Some(Box::new(m));
                 // The pearl and the bed took the rider out of its vehicle at their
@@ -957,7 +964,7 @@ impl Game<'_> {
                     teleport = Some(TurnTeleport::Rider(at));
                 }
             }
-            (stat_events, name, teleport)
+            (stat_events, name, teleport, motion_after_teleport)
         });
         match teleport {
             Some(TurnTeleport::Command(at, delta)) => host.hub.teleport_command(i, at, delta),
@@ -966,6 +973,9 @@ impl Game<'_> {
             None => {}
         }
         let g = &host.hub.guests[i];
+        if let Some(velocity) = motion_after_teleport {
+            g.send_motion(velocity);
+        }
         if new_mode != g.game_mode {
             let conn = g.conn;
             host.hub

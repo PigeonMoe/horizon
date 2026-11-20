@@ -361,6 +361,9 @@ pub struct Guest {
     pub tracker: Tracker,
     // Player state the gameplay code reads and writes.
     pub motion: Option<Box<PlayerMotion>>,
+    /// An explicit mod velocity written after a teleport in this guest's
+    /// active turn. The position packet must precede this motion packet.
+    pub motion_after_teleport: Option<Vec3>,
     /// What the player's file says of the body (`Entity.load`: the fire
     /// and air ticks and the fall distance), for the first body it gets.
     pub loaded_body: Option<SavedBody>,
@@ -789,6 +792,7 @@ impl Guest {
             collision_exclusions: Default::default(),
             tracker: Tracker::default(),
             motion: None,
+            motion_after_teleport: None,
             loaded_body: None,
             carried_attributes: None,
             carried_hit: None,
@@ -892,6 +896,12 @@ impl Guest {
             Ok(body) => self.sender.send(body),
             Err(error) => eprintln!("[lan] send refused: {error}"),
         }
+    }
+    pub fn send_motion(&self, velocity: Vec3) {
+        self.send(&play::Clientbound::SetEntityMotion(play::SetEntityMotion {
+            id: self.entity_id,
+            velocity: [velocity.x, velocity.y, velocity.z],
+        }));
     }
     /// Whether the guest's play epoch has attachment sync negotiated (a vanilla client never
     /// offers it).

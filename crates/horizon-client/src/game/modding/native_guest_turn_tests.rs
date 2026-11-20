@@ -98,6 +98,145 @@ fn a_guest_turn_reports_the_latest_secondary_use_key_before_motion_ticks() {
 
 #[test]
 #[ignore = "daily"]
+fn an_arrow_contact_sends_the_shooters_explicit_velocity_after_its_checked_teleport() {
+    use super::native_entity_refs::tests::run_on_guest_stack;
+    use super::native_sound_refs::tests::packets;
+    use horizon_client::{
+        mobs::Who,
+        projectiles::{Hit, Projectile, ProjectileKind},
+    };
+    use horizon_core::position::ChunkPos;
+    use horizon_protocol::packets::play::Clientbound as C;
+    use mod_api::{ArrowContactPostEvent, Hooks, PlayerTeleportStatus, ServerHost};
+
+    const SHOOTER: u32 = 13;
+    const PIG: u32 = 42;
+    const LIFT: [f64; 3] = [3.0, 64.5, 5.0];
+    const BEFORE: [f64; 3] = [0.5, 0.0, 0.0];
+    const PULL: [f64; 3] = [1.5, 0.5, 0.0];
+
+    struct Pull;
+    #[mod_api::__subscriptions]
+    impl Hooks for Pull {
+        fn arrow_contact_post(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut ArrowContactPostEvent<'_>,
+        ) {
+            assert_eq!(event.contact, "damage");
+            assert_eq!(event.owner, SHOOTER);
+            let player = host.player(u128::from(SHOOTER)).unwrap();
+            assert!(player.entity().set_velocity(host, BEFORE));
+            assert_eq!(
+                player.teleport_checked(host, event.dimension, LIFT, None),
+                Ok(PlayerTeleportStatus::Moved)
+            );
+            assert!(player.entity().set_velocity(host, [1.0, 0.25, 0.0]));
+            assert!(player.entity().set_velocity(host, PULL));
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let mods: mod_api::Mods =
+            vec![mod_api::ModEntry::new("pull_after_arrow", Box::new(Pull))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                game.block_ticks
+                    .add_empty_chunk(ChunkPos::new(0, 0))
+                    .unwrap();
+                let (tx, rx) = std::sync::mpsc::channel();
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .update_guest(SHOOTER, |guest| {
+                        guest.sender = PlayerSender::new(tx, Arc::default())
+                    })
+                    .unwrap();
+                let pig = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+                let at = Vec3::new(9.0, 64.5, 5.0);
+                game.mobs
+                    .push(Mob::new(PIG, pig, Vec3::new(9.0, 64.0, 5.0), 0.0));
+                let before_health = game.mobs[0].health;
+                let mut arrow = Projectile::new(
+                    ProjectileKind::Arrow {
+                        base_damage: 2.0,
+                        critical: false,
+                        effect: None,
+                    },
+                    at,
+                    Some(Who::Player),
+                );
+                arrow.id = 81;
+                arrow.guest = Some(SHOOTER);
+                arrow.velocity = Vec3::new(2.0, 0.0, 0.0);
+                let hit = Hit::Entity {
+                    who: Who::Mob(PIG),
+                    at,
+                };
+                game.as_guest(SHOOTER, |game| game.projectile_hit(&arrow, hit))
+                    .unwrap()
+                    .unwrap();
+                assert!(game.mobs[0].health < before_health);
+
+                let movement = |rx| {
+                    packets(rx)
+                        .into_iter()
+                        .filter(|packet| {
+                            matches!(packet, C::PlayerPosition(_) | C::SetEntityMotion(_))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let sent = movement(&rx);
+                let [
+                    C::SetEntityMotion(earlier),
+                    C::PlayerPosition(lift),
+                    C::SetEntityMotion(pull),
+                ] = sent.as_slice()
+                else {
+                    panic!(
+                        "expected an earlier velocity, then an absolute lift, then the pull: {sent:?}"
+                    );
+                };
+                assert_eq!(lift.position, LIFT);
+                assert_eq!(lift.relatives, 0);
+                assert_eq!(lift.delta, [0.0; 3]);
+                assert_eq!(earlier.id, SHOOTER as i32);
+                assert_eq!(pull.id, earlier.id);
+                for (packet, expected) in [(earlier, BEFORE), (pull, PULL)] {
+                    for (actual, expected) in packet.velocity.into_iter().zip(expected) {
+                        assert!((actual - expected).abs() < 0.001, "{packet:?}");
+                    }
+                }
+                assert_eq!(
+                    game.lan
+                        .as_ref()
+                        .unwrap()
+                        .hub
+                        .guest(SHOOTER)
+                        .unwrap()
+                        .motion
+                        .as_ref()
+                        .unwrap()
+                        .velocity,
+                    Vec3::new(PULL[0], PULL[1], PULL[2])
+                );
+                game.as_guest(SHOOTER, |_| {}).unwrap();
+                assert!(
+                    movement(&rx).is_empty(),
+                    "a deferred packet leaked to the next turn"
+                );
+            });
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn player_dimensions_validate_identity_on_both_server_roles() {
     use super::execution_role::ExecutionRole;
     let previous_extra = super::EXTRA_DIMS.read().unwrap().clone();
