@@ -87,8 +87,9 @@ impl Game<'_> {
                 _ => false,
             });
         }
-        Some(match self.native_entity_body(entity)? {
-            Body::Player(p) => p.shift_key_down,
+        Some(match self.native_entity_target(entity)? {
+            Target::Player => self.player.as_ref()?.shift_key_down,
+            Target::Guest(conn) => self.command_guest(conn)?.sneaking,
             _ => false,
         })
     }

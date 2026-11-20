@@ -78,6 +78,26 @@ pub(in crate::game) fn with_guests_at(
 
 #[test]
 #[ignore = "daily"]
+fn a_guest_turn_reports_the_latest_secondary_use_key_before_motion_ticks() {
+    with_guests(|game| {
+        let entity = game.player(12).unwrap().entity();
+        for pressed in [true, false] {
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(12, |guest| guest.sneaking = pressed);
+            assert_eq!(entity.is_shift_key_down(game), Some(pressed));
+            game.as_guest(12, |game| {
+                assert_eq!(entity.is_shift_key_down(game), Some(pressed));
+            })
+            .unwrap();
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn player_dimensions_validate_identity_on_both_server_roles() {
     use super::execution_role::ExecutionRole;
     let previous_extra = super::EXTRA_DIMS.read().unwrap().clone();

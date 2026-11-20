@@ -200,6 +200,7 @@ impl Game<'_> {
         motion.yaw = g.yaw;
         motion.pitch = g.pitch;
         motion.sprinting = g.sprinting;
+        motion.shift_key_down = g.sneaking;
         let abilities = g.abilities;
         motion.may_fly = abilities.may_fly;
         motion.flying = abilities.flying;
