@@ -30,7 +30,6 @@ const TIMEOUT: Message = Message("timeout", "认证超时，请重新连接。")
 const FORMAT: Message = Message("password_format", "请输入 10–64 个字符的服务器专用密码。");
 const WRONG: Message = Message("wrong_password", "密码错误，请再试一次。");
 const REGISTERED: Message = Message("registered", "注册成功。请重新输入密码完成登录。");
-const SET_PROMPT: Message = Message("prompt", "[PigeonAuth] 点击设置离线登录密码");
 const SET_OK: Message = Message(
     "set_ok",
     "[PigeonAuth] 已设置离线密码。改名后请用新的正版 ID 连接。",
@@ -235,26 +234,20 @@ fn form(kind: Form, error: Option<Message>) -> Tag {
     ])
 }
 
-pub(super) fn send_prompt(sender: &super::PlayerSender) {
-    let mut message = SET_PROMPT.tag();
-    if let Tag::Compound(values) = &mut message {
-        values.insert("color".into(), string("aqua"));
-        values.insert("underlined".into(), Tag::Byte(1));
-        values.insert(
-            "click_event".into(),
-            Tag::compound([
-                ("action", string("show_dialog")),
-                ("dialog", form(Form::Set, None)),
-            ]),
-        );
-    }
-    send_chat(sender, message);
+pub(super) fn show_setup(sender: &super::PlayerSender, error: Option<Message>) {
+    sender.send(setup_dialog(error).encode());
+}
+
+fn setup_dialog(error: Option<Message>) -> play::Clientbound {
+    play::Clientbound::ShowDialog(play::ShowDialog {
+        dialog: play::DialogHolder::Direct(form(Form::Set, error)),
+    })
 }
 
 pub(super) fn send_set_result(sender: &super::PlayerSender, result: Result<Decision, Message>) {
     let message = match result {
         Ok(Decision::Ready) => SET_OK,
-        Ok(Decision::BadFormat) => FORMAT,
+        Ok(Decision::BadFormat) => return show_setup(sender, Some(FORMAT)),
         Ok(Decision::Denied) => RETRY,
         _ => UNAVAILABLE,
     };
@@ -408,6 +401,23 @@ mod tests {
         net::{TcpListener, TcpStream},
         sync::Arc,
     };
+
+    #[test]
+    fn verified_players_receive_a_dismissible_password_dialog_in_play() {
+        let play::Clientbound::ShowDialog(play::ShowDialog {
+            dialog: play::DialogHolder::Direct(dialog),
+        }) = setup_dialog(None)
+        else {
+            panic!("expected the setup dialog to open directly");
+        };
+        assert_eq!(
+            dialog.get("title").unwrap().get("translate"),
+            Some(&string("pigeonauth.set"))
+        );
+        let dialog = crate::dialog::Dialog::parse(&dialog).expect("valid play dialog");
+        assert!(dialog.can_close_with_escape);
+        assert_eq!(dialog.inputs.len(), 1);
+    }
 
     #[test]
     fn offline_player_stays_out_of_the_world_until_register_then_login() {

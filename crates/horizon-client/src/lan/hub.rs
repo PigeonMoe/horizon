@@ -1562,7 +1562,7 @@ impl Hub {
             icon: self.lan.shared.config.favicon.clone(),
         }));
         if g.sender.pigeon_auth_prompt {
-            super::pigeon_auth::send_prompt(&g.sender);
+            super::pigeon_auth::show_setup(&g.sender, None);
         }
         // The player list: everyone already here, then the newcomer to all.
         let mut entries = Vec::new();
