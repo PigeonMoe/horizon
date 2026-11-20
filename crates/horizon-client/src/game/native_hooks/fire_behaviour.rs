@@ -1,6 +1,26 @@
 use super::*;
 
 impl Game<'_> {
+    pub(in crate::game) fn player_block_ignite_allowed(
+        &mut self,
+        pos: [i32; 3],
+        cause: &'static str,
+    ) -> bool {
+        if !self.native_authoritative()
+            || !(mod_api::__private::listened(mod_api::HookId::BlockIgnite)
+                || mod_api::__private::listened(mod_api::HookId::PlayerBlockIgnitePre))
+        {
+            return true;
+        }
+        let player = (!self.lan_acting_fake)
+            .then(|| self.player_uuid_of(self.lan_acting))
+            .flatten()
+            .map(horizon_client::lan::playerdata::ints_uuid);
+        self.with_level(|_, level, _| {
+            level.block_ignite_allowed_by(BlockPos::new(pos[0], pos[1], pos[2]), cause, player)
+        })
+    }
+
     /// Replace a checked air block with fire, after reporting the actual ignition source.
     pub(in crate::game) fn ignite_block_from(
         &mut self,
@@ -26,7 +46,7 @@ impl Game<'_> {
 impl GameLevel<'_> {
     /// `allow_block_ignite`: the `block_ignite` hook's cancel.
     pub(in crate::game) fn block_ignite_allowed(&self, pos: BlockPos, cause: &'static str) -> bool {
-        self.block_ignite_allowed_by(pos, cause, self.native_player)
+        self.block_ignite_allowed_by(pos, cause, None)
     }
 
     fn block_ignite_allowed_by(
@@ -38,6 +58,29 @@ impl GameLevel<'_> {
         let mut cancel = false;
         if self.native_authoritative {
             self.native_block_ignite(self.dimension, player, pos, cause, &mut cancel);
+            if !cancel
+                && mod_api::__private::listened(mod_api::HookId::PlayerBlockIgnitePre)
+                && let Some(player) = player
+                && let Some((name, permission_level)) = self
+                    .block_trigger_player
+                    .filter(|source| source.uuid == Some(player))
+                    .map(|source| (source.name, source.permission_level))
+                    .or_else(|| {
+                        let hub = self.lan_hub?;
+                        let guest = hub.guests.simulation_iter().find(|guest| guest.uuid == player)?;
+                        Some((guest.name.as_str(), guest.permission))
+                    })
+            {
+                self.native_player_block_ignite_pre(mod_api::__private::PlayerBlockIgnitePreCall {
+                    dimension: self.dimension,
+                    pos,
+                    cause,
+                    player,
+                    name,
+                    permission_level,
+                    cancel: &mut cancel,
+                });
+            }
         }
         !cancel
     }

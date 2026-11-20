@@ -473,10 +473,13 @@ fn a_blast_that_keeps_blocks_still_lights_fire() {
 #[test]
 #[ignore = "daily"]
 fn a_blast_checks_individual_ignitions_and_the_direct_player() {
-    use mod_api::{BlockIgniteEvent, LevelDimension, LevelHost};
+    use mod_api::{BlockIgniteEvent, LevelDimension, LevelHost, PlayerBlockIgnitePreEvent};
 
     type Ignitions = Vec<([i32; 3], Option<u128>)>;
-    struct ProtectFire(Arc<Mutex<Ignitions>>);
+    struct ProtectFire {
+        ignitions: Arc<Mutex<Ignitions>>,
+        player_ignitions: Arc<Mutex<Vec<[i32; 3]>>>,
+    }
 
     #[mod_api::__subscriptions]
     impl Hooks for ProtectFire {
@@ -484,12 +487,27 @@ fn a_blast_checks_individual_ignitions_and_the_direct_player() {
             assert!(matches!(event.dimension, LevelDimension::Overworld));
             assert_eq!(event.cause, "explosion");
             let pos = [event.pos.x, event.pos.y, event.pos.z];
-            self.0.lock().unwrap().push((pos, event.player));
+            self.ignitions.lock().unwrap().push((pos, event.player));
             if pos[0] < 8 {
                 Flow::Cancel
             } else {
                 Flow::Continue
             }
+        }
+
+        fn player_block_ignite_pre(
+            &self,
+            _: &dyn LevelHost,
+            event: &mut PlayerBlockIgnitePreEvent<'_>,
+        ) -> Flow {
+            let pos = [event.pos.x, event.pos.y, event.pos.z];
+            assert!(pos[0] >= 8, "the earlier veto already refused this ignition");
+            assert_eq!(event.cause, "explosion");
+            assert_eq!(event.player, 177);
+            assert_eq!(event.name, "Igniter");
+            assert_eq!(event.permission_level, 1);
+            self.player_ignitions.lock().unwrap().push(pos);
+            if pos[2] < 8 { Flow::Cancel } else { Flow::Continue }
         }
     }
 
@@ -498,9 +516,13 @@ fn a_blast_checks_individual_ignitions_and_the_direct_player() {
         const PLAYER_UUID: u128 = 177;
         for direct in [false, true] {
             let ignitions = Arc::new(Mutex::new(Vec::new()));
+            let player_ignitions = Arc::new(Mutex::new(Vec::new()));
             let mods = vec![ModEntry::new(
                 "protect-fire",
-                Box::new(ProtectFire(ignitions.clone())),
+                Box::new(ProtectFire {
+                    ignitions: ignitions.clone(),
+                    player_ignitions: player_ignitions.clone(),
+                }),
             )]
             .into();
             mod_platform::testing::with_mods(mods, || {
@@ -510,6 +532,8 @@ fn a_blast_checks_individual_ignitions_and_the_direct_player() {
                         PlayerMotion::new(game.motion, Vec3::new(0.5, 104.0, 0.5)).unwrap(),
                     );
                     bind_local_player(game, PLAYER_ID, PLAYER_UUID);
+                    game.lan_acting_name = Some("Igniter".into());
+                    game.lan_acting_permission = Some(1);
                     let blast = Blast {
                         source: direct.then(|| game.entity(PLAYER_ID).unwrap()),
                         fire: true,
@@ -526,18 +550,91 @@ fn a_blast_checks_individual_ignitions_and_the_direct_player() {
                             .all(|(_, player)| *player == direct.then_some(PLAYER_UUID))
                     );
                     for (pos, _) in heard.iter() {
-                        let expected = if pos[0] < 8 {
+                        let expected = if pos[0] < 8 || (direct && pos[2] < 8) {
                             "minecraft:air"
                         } else {
                             "minecraft:fire"
                         };
                         assert_eq!(name(game, *pos), expected, "{pos:?}");
                     }
+                    let attributed = player_ignitions.lock().unwrap();
+                    assert_eq!(attributed.is_empty(), !direct);
+                    if direct {
+                        assert!(attributed.iter().any(|pos| pos[2] < 8));
+                        assert!(attributed.iter().any(|pos| pos[2] >= 8));
+                    }
                     assert_eq!(stone(game), 256);
                 });
             });
         }
     });
+}
+
+#[test]
+#[ignore = "daily"]
+fn player_fire_starters_respect_ignition_veto_and_keep_paper_item_cost() {
+    use crate::game::native_guest_turn_tests::with_guests;
+    use crate::game::{Hand, Hit};
+    use horizon_client::items::ItemStack;
+    use mod_api::{LevelHost, PlayerBlockIgnitePreEvent};
+
+    struct ProtectFire(Arc<Mutex<Vec<(String, BlockPos)>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectFire {
+        fn player_block_ignite_pre(
+            &self,
+            _: &dyn LevelHost,
+            event: &mut PlayerBlockIgnitePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.name, "guest12");
+            assert_eq!(event.permission_level, 2);
+            self.0.lock().unwrap().push((event.cause.to_owned(), event.pos));
+            if event.pos.x == 3 { Flow::Cancel } else { Flow::Continue }
+        }
+    }
+
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let mods = vec![ModEntry::new("protect-fire", Box::new(ProtectFire(heard.clone())))].into();
+    mod_platform::testing::with_mods(mods, || {
+        with_guests(|game| {
+            game.build_registries();
+            game.world.chunks.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let stone = game.pack.assets.registry.default_state("minecraft:stone").unwrap();
+            let air = game.pack.assets.registry.default_state("minecraft:air").unwrap();
+            for (item, cause, initial_count) in [
+                ("minecraft:flint_and_steel", "flint_and_steel", 1),
+                ("minecraft:fire_charge", "fireball", 2),
+            ] {
+                for (x, expected) in [(3, "minecraft:air"), (4, "minecraft:fire")] {
+                    game.world.set(x, 64, 4, stone).unwrap();
+                    game.world.set(x, 65, 4, air).unwrap();
+                    game.lan.as_mut().unwrap().hub.update_guest(12, |guest| {
+                        guest.inventory[guest.selected] = Some(ItemStack::new(item, initial_count));
+                        guest.permission = 2;
+                    }).unwrap();
+                    let guest = game.guest_index(12).unwrap();
+                    let hit = Hit {
+                        pos: [x, 64, 4],
+                        face: [0, 1, 0],
+                        point: [f64::from(x) + 0.5, 65.0, 4.5],
+                        inside: false,
+                    };
+                    assert!(game.guest_use_item_on(12, guest, hit, Hand::Main).is_ok());
+                    assert_eq!(name(game, [x, 65, 4]), expected);
+                    let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                    let remaining = guest.inventory[guest.selected].as_ref().unwrap();
+                    assert_eq!(remaining.count, 1);
+                    assert_eq!(remaining.damage, u32::from(initial_count == 1));
+                    assert_eq!(
+                        heard.lock().unwrap().last(),
+                        Some(&(cause.to_owned(), BlockPos::new(x, 65, 4)))
+                    );
+                }
+            }
+        });
+    });
+    assert_eq!(heard.lock().unwrap().len(), 4);
 }
 
 #[test]

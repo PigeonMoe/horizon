@@ -2928,7 +2928,8 @@ impl Game<'_> {
         }
         let native_authoritative = self.native_authoritative();
         let block_trigger_player = if native_authoritative
-            && mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+            && (mod_api::__private::listened(mod_api::HookId::BlockTriggerEntityPre)
+                || mod_api::__private::listened(mod_api::HookId::PlayerBlockIgnitePre))
         {
             self.player.as_ref().map(|player| {
                 let uuid = if self.lan_acting_fake {
@@ -7268,8 +7269,14 @@ impl Game<'_> {
             if !self.may_build() && !self.can_place_on_in_adventure(hit.pos) {
                 return Ok(UseResult::Fail);
             }
+            let charge = item == "fire_charge";
+            let cause = if charge { "fireball" } else { "flint_and_steel" };
             let name = self.res.facts().get(clicked).name.clone();
             if self.can_light(clicked, &name) {
+                if !self.player_block_ignite_allowed(hit.pos, cause) {
+                    self.spend_fire_starter(charge);
+                    return Ok(UseResult::Pass);
+                }
                 let registry = self.pack.assets.registry;
                 let mut state = registry
                     .state(clicked)
@@ -7309,6 +7316,10 @@ impl Game<'_> {
                 hit.pos[2] + hit.face[2],
             ];
             if self.can_place_used_fire(target) {
+                if !self.player_block_ignite_allowed(target, cause) {
+                    self.spend_fire_starter(charge);
+                    return Ok(UseResult::Pass);
+                }
                 // With mods, the fire goes in and `BaseFireBlock.onPlace`
                 // fills the frame, as vanilla's order is, so that
                 // `portal_spawn` is asked once, where vanilla asks it.
@@ -7345,6 +7356,13 @@ impl Game<'_> {
             return Ok(UseResult::Fail);
         }
         Ok(UseResult::Pass)
+    }
+    fn spend_fire_starter(&mut self, charge: bool) {
+        if charge {
+            self.consume_held();
+        } else {
+            self.damage_held_in_slot(1, self.acting_hand_slot());
+        }
     }
     pub(super) fn can_place_used_fire(&mut self, target: [i32; 3]) -> bool {
         let pos = BlockPos::new(target[0], target[1], target[2]);
