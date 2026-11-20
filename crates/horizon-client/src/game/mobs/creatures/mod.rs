@@ -6239,6 +6239,11 @@ impl Game<'_> {
                 // answer for whoever owns the fireball decides: the ghast that
                 // shot it, or the player who sent it back.
                 let fire = self.large_fireball_fire(p.owner, p.guest);
+                let projectile_player = if p.owner == Some(Who::Player) {
+                    self.player_entity_id_by_connection(p.guest)
+                } else {
+                    None
+                };
                 self.combat.explosion_direct = Some(p.id);
                 let result = self.explode_mob(
                     atp,
@@ -6246,7 +6251,8 @@ impl Game<'_> {
                     fire,
                     super::explosion::ExplosionSource::default()
                         .with_silence(self.entity_silent(p.id))
-                        .with_entity(p.id, "minecraft:fireball"),
+                        .with_entity(p.id, "minecraft:fireball")
+                        .with_projectile_player(projectile_player),
                 );
                 self.combat.explosion_direct = None;
                 self.set_blast_by_player(false);

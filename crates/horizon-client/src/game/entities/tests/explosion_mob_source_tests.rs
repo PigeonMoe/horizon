@@ -61,6 +61,150 @@ fn a_mob_owned_blast_spares_vehicles_only_without_mob_griefing() {
 
 #[test]
 #[ignore = "daily"]
+fn a_deflected_ghast_fireballs_blast_protects_targets_against_the_actual_shooter() {
+    use crate::game::{
+        native_entity_refs::tests::run_on_guest_stack, native_guest_turn_tests::with_guests,
+    };
+    use horizon_client::projectiles::{Projectile, ProjectileKind};
+    use mod_api::{EntityDamageTargetPreEvent, Flow, Hooks, LevelRandomHost, ModEntry};
+    use std::sync::{Arc, Mutex};
+
+    const SHOOTER: u32 = 13;
+    const VICTIM: u32 = 12;
+    const GHAST: u32 = 70;
+    const PIG: u32 = 71;
+    const FIREBALL: u32 = 81;
+
+    #[derive(Clone, Default)]
+    struct Claim(Arc<Mutex<Vec<(bool, Option<u128>)>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Claim {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            let victim = event.target_kind == "minecraft:player" && event.position[2] < 4.0;
+            if !victim && event.target_kind != "minecraft:pig" {
+                return Flow::Continue;
+            }
+            assert_eq!(event.dimension, "minecraft:overworld");
+            assert!(event.alive_kind);
+            let responsible = event.player.map(|player| player.uuid);
+            if let Some(player) = event.player {
+                assert_eq!(player.name, "guest13");
+                assert_eq!(player.position, [3.0, 64.0, 5.0]);
+            }
+            self.0.lock().unwrap().push((victim, responsible));
+            if responsible == Some(u128::from(SHOOTER)) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    run_on_guest_stack(|| {
+        for reflected in [false, true] {
+            let claim = Claim::default();
+            let mods: mod_api::Mods =
+                vec![ModEntry::new("fireball_claim", Box::new(claim.clone()))].into();
+            mod_platform::testing::with_mods(mods, || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.load_ticking_neighbourhood(0, 0);
+                    game.update_chunk_tickets();
+                    assert!(game.entity_ticking_area()(5, 5));
+                    game.lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .update_guest(VICTIM, |g| {
+                            g.position = [7.0, 64.0, 3.5];
+                            g.previous_position = g.position;
+                        })
+                        .unwrap();
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world.set(8, 65, 5, stone).unwrap();
+                    for (id, kind, at) in [
+                        (GHAST, "minecraft:ghast", Vec3::new(13.0, 73.0, 13.0)),
+                        (PIG, "minecraft:pig", Vec3::new(7.0, 65.0, 6.8)),
+                    ] {
+                        let kind = game.res.mob_types().get(kind).unwrap().clone();
+                        game.mobs.push(Mob::new(id, kind, at, 0.0));
+                    }
+                    let pig_health = |game: &Game<'_>| {
+                        game.mobs.iter().find(|mob| mob.id == PIG).unwrap().health
+                    };
+                    let player_health = |game: &Game<'_>| {
+                        game.lan.as_ref().unwrap().hub.guest(VICTIM).unwrap().health
+                    };
+                    let before = [player_health(game), pig_health(game)];
+                    let mut shot = Projectile::fireball(
+                        ProjectileKind::LargeFireball { power: 2 },
+                        Vec3::new(5.0, 65.62, 5.0),
+                        Some(Who::Mob(GHAST)),
+                        [1.0, 0.0, 0.0],
+                    );
+                    shot.id = FIREBALL;
+                    shot.owner_uuid = Some(game.uuid_for(GHAST));
+                    game.creatures.projectiles.push(shot);
+                    if reflected {
+                        let hub = &mut game.lan.as_mut().unwrap().hub;
+                        hub.update_guest(SHOOTER, |guest| {
+                            guest.yaw = -90.0;
+                            guest.pitch = 0.0;
+                        })
+                        .unwrap();
+                        let gi = hub.guests.iter().position(|g| g.conn == SHOOTER).unwrap();
+                        assert!(game.guest_attack(SHOOTER, gi, FIREBALL as i32).unwrap());
+                        let fireball = &game.creatures.projectiles[0];
+                        assert_eq!(
+                            (fireball.owner, fireball.guest),
+                            (Some(Who::Player), Some(SHOOTER))
+                        );
+                    }
+                    // Both victims are beside the line of flight; normal projectile
+                    // ticks must fly to the wall before their splash protection runs.
+                    for _ in 0..20 {
+                        game.tick_projectiles().unwrap();
+                        if game.creatures.projectiles.is_empty() {
+                            break;
+                        }
+                    }
+                    assert!(
+                        game.creatures.projectiles.is_empty(),
+                        "the fireball never hit the wall"
+                    );
+                    let expected = reflected.then_some(u128::from(SHOOTER));
+                    let mut checks = claim.0.lock().unwrap();
+                    checks.sort_unstable();
+                    assert_eq!(*checks, [(false, expected), (true, expected)]);
+                    let after = [player_health(game), pig_health(game)];
+                    if reflected {
+                        assert_eq!(after, before);
+                    } else {
+                        assert!(
+                            after
+                                .into_iter()
+                                .zip(before)
+                                .all(|(after, before)| after < before)
+                        );
+                    }
+                });
+            });
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_creeper_blast_primes_tnt_with_the_creeper_as_its_owner() {
     let mut resources = None;
     let mut game = server_game(&mut resources);

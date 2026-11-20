@@ -177,6 +177,8 @@ pub(super) struct ExplosionSource {
     pub(super) portal_proof: bool,
     /// The entity that exploded and its kind (`Explosion.getDirectSourceEntity`), when known.
     entity: Option<(u32, &'static str)>,
+    /// The player owning the direct projectile, for protection of the blast's targets.
+    projectile_player: Option<i32>,
 }
 impl ExplosionSource {
     pub(super) fn with_silence(mut self, silent: bool) -> Self {
@@ -189,6 +191,10 @@ impl ExplosionSource {
     }
     pub(super) fn with_entity(mut self, id: u32, kind: &'static str) -> Self {
         self.entity = Some((id, kind));
+        self
+    }
+    pub(super) fn with_projectile_player(mut self, player: Option<i32>) -> Self {
+        self.projectile_player = player;
         self
     }
 }
@@ -935,6 +941,7 @@ impl Game<'_> {
         damage_type: &str,
         interaction: BlockInteraction,
         blocks: &[[i32; 3]],
+        projectile_player: Option<i32>,
     ) -> Vec<(u32, [f64; 3])> {
         if radius < 1.0e-5 {
             return Vec::new();
@@ -965,9 +972,9 @@ impl Game<'_> {
         let attacker = self.blast_attacker();
         let entity_sourced =
             attacker.is_some() || exploding.is_some() || self.combat.explosion_direct.is_some();
-        let responsible = attacker
-            .as_ref()
-            .and_then(|(id, _)| self.damage_player_by_entity(*id as i32));
+        let responsible = projectile_player
+            .or_else(|| attacker.as_ref().map(|(id, _)| *id as i32))
+            .and_then(|id| self.damage_player_by_entity(id));
         if hurts {
             self.explosion_hits_special(
                 center,
@@ -1768,8 +1775,14 @@ impl Game<'_> {
         let outer = std::mem::take(&mut self.combat.blast_hit_list);
         let outer_ids = std::mem::take(&mut self.combat.blast_hit_ids);
         self.explosion_detonate(center, radius, &mut targets);
-        let pushed =
-            self.explosion_hurt_entities(center, radius, damage_type, interaction, &targets);
+        let pushed = self.explosion_hurt_entities(
+            center,
+            radius,
+            damage_type,
+            interaction,
+            &targets,
+            source.projectile_player,
+        );
         self.combat.blast_hit_list = outer;
         self.combat.blast_hit_ids = outer_ids;
         self.explosion_block_step(&mut targets, radius, interaction, fire, &start)?;
@@ -2202,6 +2215,7 @@ impl Game<'_> {
                     "minecraft:explosion",
                     BlockInteraction::Destroy,
                     &[],
+                    None,
                 );
                 let mut remaining: Vec<_> = self
                     .dropped

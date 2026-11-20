@@ -38,6 +38,7 @@ horizon-client game::equip_answers::tests::local_shift_click_prepares_once_and_p
 horizon-client game::equip_answers::tests::menu_replacement_with_an_unsubscribed_item_stays_stale lib daily resources
 horizon-client game::equip_answers::tests::missing_despawned_and_readmitted_entities_refuse_but_no_listener_keeps_data lib daily resources
 horizon-client game::equip_answers::tests::source_mutations_refuse_prepared_equip_without_reconversion_or_callback lib daily resources
+horizon-client game::explosion::explosion_mob_source_tests::a_deflected_ghast_fireballs_blast_protects_targets_against_the_actual_shooter lib daily resources
 horizon-client game::explosion_detonate::tests::a_nested_blast_keeps_its_own_spared lib daily game-boot
 horizon-client game::explosion_detonate::tests::a_position_taken_out_keeps_its_block lib daily game-boot
 horizon-client game::explosion_detonate::tests::an_added_entity_is_hurt_and_an_empty_handle_is_refused lib daily game-boot
