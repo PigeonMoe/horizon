@@ -27,6 +27,8 @@ pub(in crate::game) struct Source {
     pub origin_dimension: Dim,
     /// Whether a player submitted this source, unchanged by executor modifiers.
     pub origin_player: bool,
+    /// Whether dedicated console or RCON submitted this source, unchanged by `execute`.
+    pub external_console: bool,
     /// The dimension `execute in` named, if any: a server teleports its
     /// players there (`TeleportCommand` into the source's level).
     pub level: Option<super::super::Dim>,
@@ -98,6 +100,7 @@ impl Game<'_> {
             dimension: self.dim,
             origin_dimension: self.dim,
             origin_player: self.player.is_some(),
+            external_console: false,
             level: None,
             block: None,
             cart: None,
@@ -115,6 +118,7 @@ impl Game<'_> {
             dimension: self.dim,
             origin_dimension: self.dim,
             origin_player: false,
+            external_console: false,
             level: None,
             block: None,
             cart: None,

@@ -555,6 +555,7 @@ impl Game<'_> {
                 dimension: self.dim,
                 origin_dimension: self.dim,
                 origin_player: false,
+                external_console: false,
                 level: None,
                 block: Some(pos),
                 cart: None,

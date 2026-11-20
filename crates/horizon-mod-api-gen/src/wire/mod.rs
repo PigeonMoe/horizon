@@ -209,6 +209,8 @@ pub(super) fn call_class(types: &ty::Types<'_>, method: &Method) -> &'static str
         "super::Call::Worker"
     } else if takes(types, method, LOAD_CONTEXTS) {
         "super::Call::Load"
+    } else if method.owner == "Hooks" && method.name == "run_mod_command" {
+        "super::Call::for_command()"
     } else {
         "super::Call::Hook"
     }

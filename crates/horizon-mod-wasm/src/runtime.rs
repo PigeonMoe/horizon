@@ -39,6 +39,33 @@ pub enum CallClass {
     Hook,
     Worker,
     Callback,
+    AdministrativeCommand,
+}
+
+const HOOK_BUDGET_MILLIS: u64 = 100;
+const ADMINISTRATIVE_COMMAND_BUDGET_MILLIS: u64 = 500;
+
+impl CallClass {
+    /// The generated RunModCommand proxy consults native admission. A command
+    /// reached through a guest import cannot create a new administrative deadline.
+    pub(crate) fn for_command() -> Self {
+        if LENT.get().is_null() && horizon_mod_runtime::command_budget::administrative() {
+            Self::AdministrativeCommand
+        } else {
+            Self::Hook
+        }
+    }
+
+    fn epoch_budget(self) -> u64 {
+        match self {
+            Self::Load => horizon_mod_runtime::MAX_GUEST_CALL_BUDGET_MILLIS,
+            _ => match CALL_BUDGET.load(Ordering::Relaxed) {
+                0 if self == Self::AdministrativeCommand => ADMINISTRATIVE_COMMAND_BUDGET_MILLIS,
+                0 => HOOK_BUDGET_MILLIS,
+                budget => budget,
+            },
+        }
+    }
 }
 
 /// A group's linear memory when none of its mods declares one (`wasm_memory_mib`): 1 GiB.
@@ -1127,14 +1154,7 @@ impl WasmMod {
             Some(resumed) => resumed.context(),
             None => {
                 let store = &mut locked.as_mut().expect("group locked without a loan").store;
-                let budget = if class == CallClass::Load {
-                    horizon_mod_runtime::MAX_GUEST_CALL_BUDGET_MILLIS
-                } else {
-                    match CALL_BUDGET.load(Ordering::Relaxed) {
-                        0 => 100,
-                        budget => budget,
-                    }
-                };
+                let budget = class.epoch_budget();
                 store.set_epoch_deadline(budget);
                 store.data_mut().epoch_budget = budget;
                 store.as_context_mut()

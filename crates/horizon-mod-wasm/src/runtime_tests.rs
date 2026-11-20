@@ -1092,6 +1092,129 @@ fn contended_hook_times_out_without_poisoning_the_group() {
 }
 
 #[test]
+fn generated_command_proxy_uses_only_the_native_admission_scope() {
+    use horizon_mod_runtime::command_budget::with_run_mod_command;
+    use mod_api::{CommandInvocation, CommandSource, Flow, Hooks, PermissionLevel, RunModCommandEvent};
+
+    crate::test_stack::on_guest_stack(|| {
+        // Return Flow::Cancel and the event's unchanged cancellation flag.
+        let reply = (2048_u64 << 32) | 5;
+        let module = module(&format!("i32.const 2048 i32.const 1 i32.store i64.const {reply}"));
+        let mut host = mod_api::testing::FakeHost::new();
+        let source = CommandSource::Console {
+            permission: PermissionLevel::Owners,
+        };
+        let command = CommandInvocation::new(
+            vec!["admin".into()],
+            Vec::new(),
+            host.level.level().dimension(),
+            [0.; 3],
+        );
+
+        for (external_console, required, budget) in [
+            (false, 2, HOOK_BUDGET_MILLIS),
+            (true, 0, HOOK_BUDGET_MILLIS),
+            (true, 2, ADMINISTRATIVE_COMMAND_BUDGET_MILLIS),
+        ] {
+            with_run_mod_command(external_console, 4, required, || {
+                assert_eq!(
+                    module.run_mod_command(
+                        &mut host,
+                        &mut RunModCommandEvent {
+                            source: &source,
+                            command: &command,
+                            cancelled: false,
+                        },
+                    ),
+                    Flow::Cancel,
+                );
+            });
+            assert_eq!(
+                module
+                    .running
+                    .group
+                    .lock()
+                    .unwrap()
+                    .store
+                    .data()
+                    .epoch_budget,
+                budget,
+            );
+        }
+    });
+}
+
+#[test]
+fn administrative_commands_are_bounded_and_lent_calls_keep_the_existing_deadline() {
+    use horizon_mod_runtime::command_budget::with_run_mod_command;
+
+    crate::test_stack::on_guest_stack(|| {
+        let import = crate::boundary::import_id("StructureRandom", "next_long").unwrap();
+        let bytes = guest(
+            *mod_api::wire::LAYOUT,
+            &format!(
+                "local.get 0 i32.const 1 i32.eq
+                 if (result i64) i64.const 0
+                 else
+                   i32.const {import} i32.const 0 i32.const 0 i32.const 2048 i32.const 8
+                   call $host drop
+                   i32.const 2048 i32.load local.set 1
+                   loop $resume
+                     local.get 1 i32.const 1 i32.sub local.tee 1 br_if $resume
+                   end
+                   i64.const 8796093022216
+                 end"
+            ),
+        );
+        for (class, elapsed, succeeds) in [
+            (CallClass::Hook, 150, false),
+            (CallClass::AdministrativeCommand, 150, true),
+            (CallClass::AdministrativeCommand, 550, false),
+        ] {
+            // Advance the real Wasmtime engine by a fixed number of epochs.
+            let engine = Engine::new(&engine_config()).unwrap();
+            let module = WasmMod::instantiate(
+                &engine,
+                DEFAULT_GROUP_MEMORY_MIB,
+                &[Member {
+                    name: "command-budget",
+                    module: &bytes,
+                }],
+                None,
+            )
+            .unwrap()
+            .remove(0);
+            let entered = Cell::new(false);
+            let mut random = Random(|| {
+                entered.set(true);
+                assert_eq!(CallClass::for_command(), CallClass::Hook);
+                for _ in 0..elapsed {
+                    engine.increment_epoch();
+                }
+                let resumed = module.call(
+                    CallClass::AdministrativeCommand,
+                    Frame::default(),
+                    1,
+                    None,
+                    |_| {},
+                    |r| r.take::<()>(),
+                );
+                assert_eq!(resumed.is_some(), succeeds);
+                7
+            });
+            let mut frame = Frame::default();
+            frame.set_structure_random_mut(&mut random);
+            let top = with_run_mod_command(true, 4, 2, || {
+                module.call(class, frame, 0, None, |_| {}, |r| r.take::<i64>())
+            });
+            assert!(entered.get());
+            assert_eq!(top, succeeds.then_some(7));
+            assert_eq!(module.is_stopped(), !succeeds);
+        }
+    });
+}
+
+#[test]
 fn nested_load_calls_do_not_extend_the_outer_deadline() {
     crate::test_stack::on_guest_stack(|| {
         let id = crate::boundary::import_id("StructureRandom", "next_long").unwrap();

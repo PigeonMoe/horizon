@@ -2050,10 +2050,26 @@ impl Game<'_> {
     /// The shared command-node executor, also reached by functions and `execute`.
     pub(super) fn run_native_command(&mut self, context: Context) -> super::commands::R<i32> {
         use super::commands::err;
+        // The executable leaf already passed Brigadier's execution check. Shared
+        // traversal prefixes may have lower permissions than the command itself.
+        let execution_permission = context
+            .nodes
+            .last()
+            .and_then(|(node, _)| self.ui.dispatcher.0.nodes.get(*node))
+            .map_or(0, |node| node.execution_permission);
         let command = self.resolve_native_command(context)?;
         let origin = self.native_command_origin(self.ui.registries.permission)?;
+        let external_console = matches!(origin, mod_api::CommandSource::Console { .. })
+            && self
+                .command_source
+                .is_some_and(|source| source.external_console);
         let mut ran = false;
-        self.native_run_mod_command(&origin, &command, &mut ran);
+        horizon_mod_runtime::command_budget::with_run_mod_command(
+            external_console,
+            origin.permission().level(),
+            execution_permission,
+            || self.native_run_mod_command(&origin, &command, &mut ran),
+        );
         if ran {
             Ok(1)
         } else {
@@ -2220,16 +2236,7 @@ impl Game<'_> {
         if self.lan.is_none() || self.native_commands.level(line).is_none() {
             return false;
         }
-        self.as_console_in_overworld(|game| {
-            let previous = game
-                .command_source
-                .replace(super::commands::execute::Source {
-                    silent: false,
-                    ..game.server_source()
-                });
-            game.run_command(line);
-            game.command_source = previous;
-        });
+        self.as_console_in_overworld(|game| game.run_command(line));
         true
     }
 }

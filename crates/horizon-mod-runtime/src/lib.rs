@@ -6,6 +6,7 @@ pub const MAX_GUEST_CALL_BUDGET_MILLIS: u64 = 30_000;
 
 pub mod attachments;
 pub mod byte_channel;
+pub mod command_budget;
 /// A level's capability generations, which kept capabilities compare (arismoko/horizon#3446).
 pub mod capability_generations;
 pub mod dispatch_failures;

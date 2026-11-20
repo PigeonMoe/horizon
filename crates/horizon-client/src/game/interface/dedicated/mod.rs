@@ -1856,11 +1856,13 @@ impl Game<'_> {
     /// `MinecraftServer.createCommandSourceStack`: the console's source is
     /// bound to the overworld, whichever level the last server tick left in
     /// place (the last one ticked, often the nether). Its commands run there
-    /// and the level in place is put back afterwards.
+    /// and the level in place is put back afterwards. Only the dedicated console,
+    /// its owner control socket and RCON enter through this source.
     pub(super) fn as_console_in_overworld<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let back = console_level(self.dim).and_then(|dim| self.enter_command_level(dim));
         let source = super::commands::execute::Source {
             silent: false,
+            external_console: true,
             ..self.server_source()
         };
         let outer = self.command_source.replace(source);
