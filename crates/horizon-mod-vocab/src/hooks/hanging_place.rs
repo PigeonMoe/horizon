@@ -6,7 +6,7 @@ pub trait Hooks {
     /// (`minecraft:item_frame`, `minecraft:glow_item_frame`), a painting
     /// (`minecraft:painting`) or a leash knot (`minecraft:leash_knot`, when a
     /// lead is tied to a fence that has none yet), `kind` its entity type and
-    /// `pos` the block it takes (the fence's for a knot). Where
+    /// `pos` the block containing its centre (the fence's block for a knot). Where
     /// `HangingEntityItem.useOn` and `LeadItem.useOn` create it, once it is
     /// known to fit and before anything is placed or used up. Set `cancel`
     /// and nothing is placed: the item stays in the player's hand. The
