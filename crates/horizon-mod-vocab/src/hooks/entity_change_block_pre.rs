@@ -1,13 +1,13 @@
 //! Declarations carried from upstream `entity_change_block_v2`; the generator owns the typed bindings.
 
 pub trait Hooks {
-    /// A mob or a player is about to change the block at `pos`: a landing's
-    /// trampling (farmland to dirt, a turtle egg breaking), before its
-    /// neighbour updates and events. `player` is the player whose landing it
-    /// was, `entity` and `kind` the mob for a mob's landing (`None` and the
-    /// player's type here). `from` and `to` are resolved block states. Set `cancel`
-    /// and the block stays as it was and nothing the change would have caused
-    /// happens, as Bukkit's `EntityChangeBlockEvent` (@API:entity_change_block_v2@).
+    /// An entity is about to change the block at `pos`, for example by
+    /// trampling farmland or stripping copper patina with lightning. `player`
+    /// is the responsible player for player actions. `entity` and `kind`
+    /// identify the non-player entity for actions such as a lightning strike.
+    /// `from` and `to` are resolved block states. Canceling prevents the block
+    /// write and its neighbour updates, as with Bukkit's `EntityChangeBlockEvent`
+    /// (@API:entity_change_block_v2@).
     /// The fork names this pre-change veto `entity_change_block_pre`; `entity_change_block` is the separate post-change notice.
     #[hook(
         side = "server",

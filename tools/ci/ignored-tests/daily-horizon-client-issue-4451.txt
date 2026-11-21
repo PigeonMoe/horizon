@@ -910,6 +910,7 @@ horizon-client game::levels::tests::a_reopened_world_has_each_levels_saved_borde
 horizon-client game::levels::tests::reopened_borders_keep_through_a_tick_and_a_save_and_a_new_world_has_defaults lib daily resources
 horizon-client game::levels::tests::slow_ticks_enter_the_ring_and_not_the_log lib daily resources
 horizon-client game::lightning::tests::a_bolt_away_from_players_starts_no_fire lib daily resources
+horizon-client game::lightning::tests::a_bolt_preserves_claimed_copper_without_changing_its_walk lib daily resources
 horizon-client game::lightning::tests::a_mod_spares_one_pig_from_the_bolt lib daily resources
 horizon-client game::lightning::tests::a_struck_rod_updates_the_wire_beside_the_block_behind_it lib daily resources
 horizon-client game::lightning::tests::conversion_post_reads_original_and_lightning_outcome lib daily resources
