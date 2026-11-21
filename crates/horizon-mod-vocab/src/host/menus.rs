@@ -16,6 +16,9 @@ pub trait MenusServerHost {
     /// centring the mouse again. Packets for the old window are ignored. The
     /// items of an open menu change through its slots (`menu`), not by
     /// opening it again.
+    /// A reserved `rows` value of 0 opens a recipe menu, with `items` grouped
+    /// into triples (first ingredient, optional second ingredient, result).
+    /// Use `RecipeMenuHostExt::open_recipe_menu` for this layout in Rust.
     #[access(WorldOnly)]
     fn open_menu(
         &mut self,

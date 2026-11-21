@@ -485,6 +485,13 @@ impl Game<'_> {
     }
     /// ServerboundSelectTradePacket: the selection hint, then tryMoveItems.
     pub(super) fn lan_select_trade(&mut self, conn: u32, index: i32) {
+        if self
+            .lan
+            .as_mut()
+            .is_some_and(|host| host.hub.select_recipe(conn, index))
+        {
+            return;
+        }
         let Ok(index) = usize::try_from(index) else {
             return;
         };

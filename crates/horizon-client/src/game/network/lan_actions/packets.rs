@@ -858,8 +858,11 @@ impl Game<'_> {
                 let Some(host) = self.lan.as_mut() else {
                     return;
                 };
-                host.hub.container_closed(conn, p.container);
+                let recipe = host.hub.container_closed(conn, p.container);
                 self.guest_carried_back(gi);
+                if recipe {
+                    self.resync_recipe_inventory(conn);
+                }
                 if closing {
                     self.player_menu_closing(conn);
                 }

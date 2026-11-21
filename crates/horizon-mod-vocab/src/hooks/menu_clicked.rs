@@ -11,6 +11,8 @@ pub trait Hooks {
     /// inventory and hotbar slots. `PlayerSlot` and `PlayerHand` resolve the online
     /// clicking player through the usual acting-player or guest path. All writes
     /// use transactions; stale menus and player identities refuse writes.
+    /// A recipe menu (`open_recipe_menu`) only reports clicks on its result,
+    /// with `slot` equal to 2 plus the selected zero-based offer index.
     #[hook(
         side = "server",
         contract = "listen",

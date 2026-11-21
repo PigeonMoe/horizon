@@ -4765,6 +4765,7 @@ pub(crate) mod tests {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: crate::lan::menu::asks_still_valid(mod_type, registry_id),
+                recipe_menu: None,
             };
             menu.still_valid(context, &world, &guest)
         };

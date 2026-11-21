@@ -105,7 +105,7 @@ impl Game<'_> {
             .ok_or(MenuSlotBackRefusal::NoPlayerOrWindow)?;
         // Only a blockless mod menu's slots are the game's to show (`Slots::Native`); a block's
         // or an entity's menu reads its own storage, which a backing would not replace.
-        if open.slots != Slots::Native {
+        if open.slots != Slots::Native || open.recipe_menu.is_some() {
             return Err(MenuSlotBackRefusal::UnsupportedMenu);
         }
         // A right-click handler runs with this player's inventory borrowed into Game.

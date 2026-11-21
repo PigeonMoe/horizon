@@ -59,6 +59,52 @@ pub enum MenuReplace {
     InPlace,
 }
 
+/// One row of a mod's read-only recipe menu, in the vanilla merchant layout.
+/// The icons describe a recipe. The mod owns its actual ingredients and result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipeMenuOffer {
+    /// The first ingredient icon, including its displayed count.
+    pub first: ItemStack,
+    /// The second ingredient icon, if any. Use result lore for further requirements.
+    pub second: Option<ItemStack>,
+    /// The result icon. It is never moved to the player's inventory by the menu.
+    pub result: ItemStack,
+}
+
+/// Opens a recipe menu through the server host's menu operation.
+pub trait RecipeMenuHostExt: crate::prelude::MenusServerHost {
+    /// Opens the vanilla merchant screen as a scrollable, read-only recipe list. Returns
+    /// its window id, or None for an empty list or an unavailable player. `replace` selects
+    /// how to close the previous menu. `close_menu` closes it and `menu_closed` reports its
+    /// window. The icons and player inventory do not move when clicked. A pickup or
+    /// shift-click of the result tells `menu_clicked` with `slot` equal to 2 plus the selected
+    /// zero-based offer index. The mod must validate and perform each craft through the
+    /// player's real inventory.
+    fn open_recipe_menu(
+        &mut self,
+        uuid: u128,
+        title: crate::Text,
+        offers: Vec<RecipeMenuOffer>,
+        replace: MenuReplace,
+    ) -> Result<Option<i32>, crate::StackWriteError> {
+        let items = offers
+            .into_iter()
+            .flat_map(|offer| [Some(offer.first), offer.second, Some(offer.result)])
+            .collect();
+        let window = self.open_menu(uuid, 0, title, items, replace)?;
+        if let Some(window) = window
+            && self.menu(uuid, window).is_some()
+        {
+            // An older host interpreted row zero as a one-row chest.
+            self.close_menu(uuid);
+            return Ok(None);
+        }
+        Ok(window)
+    }
+}
+
+impl<T: crate::prelude::MenusServerHost + ?Sized> RecipeMenuHostExt for T {}
+
 /// How a complete drag distributes the carried stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // exhaustive: vanilla has split, one-per-slot and creative-fill drags

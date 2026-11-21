@@ -414,7 +414,7 @@ impl Game<'_> {
     /// the container's lid, a vehicle's stand-in (its items go back to the
     /// vehicle), the trade (written back to the villager), the crafting table,
     /// station and mount menus, and the cursor stack back to the inventory.
-    /// Nothing is sent to the client: this is for a guest who is leaving or
+    /// No screen close is sent to the client: this is for a guest who is leaving or
     /// whose server is closing. The guest must be in `host.hub.guests` and the
     /// level they are in must be the one in place.
     pub(in crate::game) fn guest_close_all(&mut self, conn: u32) {
@@ -439,6 +439,7 @@ impl Game<'_> {
         if removal == MenuRemoval::Disconnected {
             self.guest_drop_carried(gi);
         }
+        let mut recipe = false;
         if let Some((window, slots)) = open_menu {
             self.guest_container_closed(conn);
             if let Slots::Block(key) = slots
@@ -447,7 +448,7 @@ impl Game<'_> {
                 self.close_guest_vehicle_menu(conn, key);
             }
             if let Some(host) = self.lan.as_mut() {
-                host.hub.container_closed(conn, window);
+                recipe = host.hub.container_closed(conn, window);
             }
         }
         self.lan_merchant_closed(conn, None);
@@ -459,9 +460,22 @@ impl Game<'_> {
         self.lan_mount_closed(conn, None);
         if removal == MenuRemoval::Live {
             self.guest_carried_back(gi);
+            if recipe {
+                self.resync_recipe_inventory(conn);
+            }
         }
         // `PlayerContainerEvent.Close`, after the menu's `removed`.
         self.player_menu_closing(conn);
+    }
+
+    /// A recipe menu shows preview inputs. Discard their predicted return to the
+    /// inventory on old clients with a complete, authoritative player inventory.
+    pub(super) fn resync_recipe_inventory(&mut self, conn: u32) {
+        if let Some(host) = self.lan.as_mut()
+            && let Some(index) = host.hub.guests.connection_index(conn)
+        {
+            host.hub.send_inventory(index);
+        }
     }
 
     /// `ContainerEntity`'s `Container.stopOpen` when a vehicle menu closes

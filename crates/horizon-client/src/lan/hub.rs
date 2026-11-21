@@ -6199,6 +6199,7 @@ mod tests {
                     craft: None,
                     links: Vec::new(),
                     asks_still_valid: true,
+                    recipe_menu: None,
                 });
             });
         };

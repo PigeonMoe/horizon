@@ -79,6 +79,14 @@ pub struct Menu {
     /// Whether a part on this mod menu type answers `menu_still_valid`,
     /// resolved when it opened; vanilla menu types never ask one.
     pub asks_still_valid: bool,
+    /// A mod's recipe list in the merchant layout, with read-only preview slots.
+    pub recipe_menu: Option<RecipeMenu>,
+}
+
+/// A mod recipe list's offer previews and currently selected row.
+pub struct RecipeMenu {
+    pub offers: Vec<[Option<ItemStack>; 3]>,
+    pub selected: i32,
 }
 
 /// What a mod menu type's crafting grid makes (`ResultContainer`), and the
@@ -171,6 +179,7 @@ impl Menu {
 pub enum NativeMenuEvent {
     /// A click (`ServerboundContainerClickPacket`): the menu's slot (its own
     /// first, then the player's 36; -999 outside), the button and the mode.
+    /// In a recipe menu only the result clicks apply, with slot 2 + the offer index.
     Click {
         uuid: u128,
         window: i32,
@@ -1984,6 +1993,7 @@ pub(crate) mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            recipe_menu: None,
         });
         // Nothing made yet: nothing shown.
         assert_eq!(slots.get(&world, &g, 0), None);
@@ -2108,6 +2118,7 @@ pub(crate) mod tests {
             craft: None,
             links: Vec::new(),
             asks_still_valid: false,
+            recipe_menu: None,
         });
         // Nothing linked yet: the linked slots are empty and all left out.
         let read = slots.read(&world, &g).unwrap();

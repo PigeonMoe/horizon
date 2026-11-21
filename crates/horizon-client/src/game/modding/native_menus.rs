@@ -8,7 +8,10 @@
 use super::{Game, lan::LanHost};
 use horizon_client::{
     items::ItemStack,
-    lan::{data::component_nbt, menu::NativeMenuEvent},
+    lan::{
+        data::component_nbt,
+        menu::{NativeMenuEvent, RecipeMenu},
+    },
     text::Text,
 };
 use mod_api::__private::game::*;
@@ -90,6 +93,9 @@ impl Game<'_> {
         items: Vec<Option<ItemStack>>,
         replace: MenuReplace,
     ) -> Option<i32> {
+        if rows == 0 {
+            return self.open_recipe_menu(uuid, title, items, replace);
+        }
         let conn = self.native_conn(uuid)?;
         self.close_for_open(conn, replace);
         let window = self.lan.as_mut()?.hub.open_native_menu(
@@ -97,6 +103,51 @@ impl Game<'_> {
             rows,
             component_nbt(&title.component()),
             items,
+        )?;
+        self.player_menu_opening(conn);
+        Some(window)
+    }
+
+    fn open_recipe_menu(
+        &mut self,
+        uuid: u128,
+        title: Text,
+        items: Vec<Option<ItemStack>>,
+        replace: MenuReplace,
+    ) -> Option<i32> {
+        if items.is_empty() || !items.len().is_multiple_of(3) {
+            return None;
+        }
+        let mut offers = Vec::with_capacity(items.len() / 3);
+        let mut items = items.into_iter();
+        while let Some(first) = items.next() {
+            let second = items.next()?;
+            let result = items.next()?;
+            if first.is_none() || result.is_none() {
+                return None;
+            }
+            offers.push([first, second, result]);
+        }
+        let recipes = RecipeMenu {
+            offers,
+            selected: 0,
+        };
+        let conn = self.native_conn(uuid)?;
+        let hub = &mut self.lan.as_mut()?.hub;
+        if hub.guest(conn)?.spectator()
+            || hub
+                .registry_id("minecraft:menu", "minecraft:merchant")
+                .is_none()
+        {
+            return None;
+        }
+        let offers = hub.recipe_offers(&recipes)?;
+        self.close_for_open(conn, replace);
+        let window = self.lan.as_mut()?.hub.open_recipe_menu(
+            conn,
+            component_nbt(&title.component()),
+            recipes,
+            offers,
         )?;
         self.player_menu_opening(conn);
         Some(window)
@@ -118,7 +169,7 @@ impl Game<'_> {
         {
             return None;
         }
-        self.open_menu(player.uuid(), rows, title, items, replace)
+        self.open_menu(player.uuid(), rows.clamp(1, 6), title, items, replace)
     }
 
     pub(super) fn player_open_crafting_menu(&mut self, player: mod_api::PlayerRef) -> Option<i32> {
@@ -178,7 +229,7 @@ impl Game<'_> {
         if !self.allow_inventory_menu_at(player, level, pos, rows) {
             return None;
         }
-        self.open_menu(player.uuid(), rows, title, items, replace)
+        self.open_menu(player.uuid(), rows.clamp(1, 6), title, items, replace)
     }
 
     fn allow_inventory_menu_at(
@@ -284,7 +335,9 @@ impl Game<'_> {
             .menu
             .as_ref()
             .filter(|m| {
-                m.window == window && m.slots == horizon_client::lan::menu::Slots::Native
+                m.window == window
+                    && m.slots == horizon_client::lan::menu::Slots::Native
+                    && m.recipe_menu.is_none()
             })?;
         self.player_container_menu(self.player(uuid)?)
             .filter(|menu| menu.fields().window == window)
@@ -547,6 +600,101 @@ mod tests {
         )
         .unwrap()
         .unwrap()
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn recipe_menu_displays_and_only_dispatches_the_selected_result() {
+        use mod_api::{RecipeMenuHostExt, RecipeMenuOffer};
+
+        with_game(|game| {
+            let rx = watched_guest(game);
+            let offers = (0..9)
+                .map(|index| RecipeMenuOffer {
+                    first: ItemStack::new("minecraft:stick", index + 1)
+                        .try_into_api()
+                        .unwrap(),
+                    second: None,
+                    result: ItemStack::new("minecraft:torch", index + 1)
+                        .try_into_api()
+                        .unwrap(),
+                })
+                .collect();
+            let host: &mut dyn ServerHost = game;
+            let window = host
+                .open_recipe_menu(
+                    123,
+                    mod_api::Text::literal("Recipes"),
+                    offers,
+                    MenuReplace::InPlace,
+                )
+                .unwrap()
+                .unwrap();
+            let packets = sent(&rx);
+            let menu_type = game
+                .lan
+                .as_ref()
+                .unwrap()
+                .hub
+                .registry_id("minecraft:menu", "minecraft:merchant")
+                .unwrap();
+            assert!(packets.iter().any(|packet| matches!(packet, C::OpenScreen(p) if p.container == window && p.menu == menu_type)));
+            assert!(packets.iter().any(|packet| matches!(packet, C::MerchantOffers(p) if p.container == window && p.offers.len() == 9 && !p.show_progress)));
+
+            game.lan_guest_packet(1, S::SelectTrade(play::SelectTrade { item: 8 }));
+            assert!(sent(&rx).iter().any(|packet| matches!(packet, C::ContainerSetContent(p) if p.container == window && p.items[2].as_ref().is_some_and(|stack| stack.count == 9))));
+            for (container, slot, button, input) in [
+                (window + 1, 2, 0, 0),
+                (window, 0, 0, 0),
+                (window, 2, 0, 4),
+                (window, 2, 0, 1),
+            ] {
+                game.lan_guest_packet(
+                    1,
+                    S::ContainerClick(play::ContainerClick {
+                        container,
+                        state: 0,
+                        slot,
+                        button,
+                        input,
+                        changed: vec![],
+                        carried: None,
+                    }),
+                );
+            }
+            let hub = &game.lan.as_ref().unwrap().hub;
+            assert_eq!(
+                hub.native_menu_events,
+                [NativeMenuEvent::Click {
+                    uuid: 123,
+                    window,
+                    slot: 10,
+                    button: 0,
+                    mode: 1
+                }]
+            );
+            let guest = hub.guest(1).unwrap();
+            assert!(guest.inventory.iter().all(Option::is_none));
+            assert!(guest.carried.is_none());
+
+            game.lan_guest_packet(
+                1,
+                S::ContainerClose(play::ContainerClose { container: window }),
+            );
+            assert!(
+                sent(&rx)
+                    .iter()
+                    .any(|packet| matches!(packet, C::ContainerSetContent(p)
+                if p.container == 0 && p.items.iter().all(Option::is_none) && p.carried.is_none()))
+            );
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            assert!(!hub.select_recipe(1, 8));
+            assert!(hub.guest(1).unwrap().native_menu.is_empty());
+            assert_eq!(
+                hub.native_menu_events.last(),
+                Some(&NativeMenuEvent::Closed { uuid: 123, window })
+            );
+        });
     }
 
     #[test]

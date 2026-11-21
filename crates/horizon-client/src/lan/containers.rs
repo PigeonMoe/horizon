@@ -2,7 +2,7 @@
 //! level events, animations and block containers with their clicks.
 use super::{
     hub::Hub,
-    menu::{self, Menu, NativeMenuEvent, Rules, Slots, View},
+    menu::{self, Menu, NativeMenuEvent, RecipeMenu, Rules, Slots, View},
 };
 use crate::{containers::BlockEntity, items::ItemStack, world::World};
 use horizon_core::nbt::Tag;
@@ -417,6 +417,7 @@ impl Hub {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: super::menu::asks_still_valid(mod_type, menu_kind),
+                recipe_menu: None,
             });
             window
         });
@@ -479,6 +480,7 @@ impl Hub {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: false,
+                recipe_menu: None,
             });
             window
         });
@@ -502,7 +504,7 @@ impl Hub {
         let Some(size) = self.guests[i]
             .menu
             .as_ref()
-            .filter(|m| m.slots == Slots::Native && m.window == window)
+            .filter(|m| m.slots == Slots::Native && m.window == window && m.recipe_menu.is_none())
             .map(|m| m.size)
         else {
             return false;
@@ -510,6 +512,95 @@ impl Hub {
         items.resize(size, None);
         self.guests.update(i, |g| g.native_menu = items.clone());
         self.send_menu_content(i, items);
+        true
+    }
+
+    /// Encodes a mod recipe list before replacing the old menu. Keep exactly one wire
+    /// offer per row, because the mod receives the client's selected row index.
+    pub fn recipe_offers(&mut self, menu: &RecipeMenu) -> Option<Vec<play::NetOffer>> {
+        menu.offers
+            .iter()
+            .map(|[first, second, result]| {
+                Some(play::NetOffer {
+                    cost_a: self.stack(first)?.into(),
+                    cost_b: match second {
+                        Some(_) => Some(self.stack(second)?.into()),
+                        None => None,
+                    },
+                    result: self.stack(result)?,
+                    out_of_stock: false,
+                    uses: 0,
+                    max_uses: i32::MAX,
+                    xp: 0,
+                    special_price: 0,
+                    price_multiplier: 0.0,
+                    demand: 0,
+                })
+            })
+            .collect()
+    }
+
+    /// Opens the merchant layout without a merchant entity, priced trades or restocks.
+    pub fn open_recipe_menu(
+        &mut self,
+        conn: u32,
+        title: Tag,
+        recipes: RecipeMenu,
+        offers: Vec<play::NetOffer>,
+    ) -> Option<i32> {
+        let window = self.open_menu_window(
+            conn,
+            "minecraft:merchant",
+            title,
+            None,
+            Slots::Native,
+            vec![None; 3],
+            None,
+        )?;
+        self.update_guest(conn, |g| {
+            g.menu
+                .as_mut()
+                .expect("recipe menu just opened")
+                .recipe_menu = Some(recipes);
+            g.send(&C::MerchantOffers(play::MerchantOffers {
+                container: window,
+                offers,
+                level: 0,
+                xp: 0,
+                show_progress: false,
+                can_restock: false,
+            }));
+        })?;
+        self.select_recipe(conn, 0);
+        Some(window)
+    }
+
+    /// Selects an offer in a mod recipe list. Returns true if this menu owns the packet,
+    /// including a refused selection. Real merchant menus use their normal trade logic.
+    pub fn select_recipe(&mut self, conn: u32, index: i32) -> bool {
+        let Some(i) = self.guests.connection_index(conn) else {
+            return false;
+        };
+        let Some(menu) = self.guests[i]
+            .menu
+            .as_ref()
+            .and_then(|m| m.recipe_menu.as_ref())
+        else {
+            return false;
+        };
+        let preview = usize::try_from(index)
+            .ok()
+            .and_then(|index| menu.offers.get(index));
+        if let Some(preview) = preview {
+            let items = preview.to_vec();
+            self.guests.update(i, |g| {
+                if let Some(menu) = g.menu.as_mut().and_then(|m| m.recipe_menu.as_mut()) {
+                    menu.selected = index;
+                }
+                g.native_menu.clone_from(&items);
+            });
+            self.send_menu_content(i, items);
+        }
         true
     }
 
@@ -610,14 +701,19 @@ impl Hub {
             }));
             if menu.slots == Slots::Native {
                 g.native_menu.clear();
-                Some((g.uuid, menu.window))
+                Some((g.uuid, menu.window, menu.recipe_menu.is_some()))
             } else {
                 None
             }
         });
-        if let Some((uuid, window)) = closed {
+        if let Some((uuid, window, recipe)) = closed {
             self.native_menu_events
                 .push(NativeMenuEvent::Closed { uuid, window });
+            if recipe {
+                // Older Horizon clients predict the two merchant input stacks
+                // going back into the inventory. Here they were only previews.
+                self.send_inventory(i);
+            }
         }
     }
 
@@ -631,26 +727,26 @@ impl Hub {
         }
     }
 
-    /// The client closed its window.
-    pub fn container_closed(&mut self, conn: u32, window: i32) {
+    /// Close the matching window without sending a close. Returns whether the
+    /// caller should resync the inventory after returning the true cursor stack.
+    pub fn container_closed(&mut self, conn: u32, window: i32) -> bool {
         let closed = self
             .update_guest(conn, |g| {
-                if !g.menu.as_ref().is_some_and(|m| m.window == window) {
-                    return None;
-                }
-                let native = g.menu.take().is_some_and(|m| m.slots == Slots::Native);
-                if native {
+                let menu = g.menu.take_if(|m| m.window == window)?;
+                if menu.slots == Slots::Native {
                     g.native_menu.clear();
-                    Some(g.uuid)
+                    Some((g.uuid, menu.recipe_menu.is_some()))
                 } else {
                     None
                 }
             })
             .flatten();
-        if let Some(uuid) = closed {
-            self.native_menu_events
-                .push(NativeMenuEvent::Closed { uuid, window });
-        }
+        let Some((uuid, recipe)) = closed else {
+            return false;
+        };
+        self.native_menu_events
+            .push(NativeMenuEvent::Closed { uuid, window });
+        recipe
     }
 
     fn hashed_matches(&mut self, claimed: &Option<Hashed>, mine: &Option<ItemStack>) -> bool {
@@ -719,14 +815,31 @@ impl Hub {
         }
         // A native mod's menu: the click is the mod's to answer, and the
         // whole menu and the cursor go back as they were.
-        if in_menu && self.guests[i].menu.as_ref().map(|m| m.slots) == Some(Slots::Native) {
-            self.native_menu_events.push(NativeMenuEvent::Click {
-                uuid: self.guests[i].uuid,
-                window: p.container,
-                slot: i32::from(p.slot),
-                button: i32::from(p.button),
-                mode: p.input,
-            });
+        if let Some(menu) = self.guests[i]
+            .menu
+            .as_ref()
+            .filter(|m| in_menu && m.slots == Slots::Native)
+        {
+            let slot = match &menu.recipe_menu {
+                Some(recipe)
+                    if p.slot == 2
+                        && ((p.input == menu::input::PICKUP && matches!(p.button, 0 | 1))
+                            || (p.input == menu::input::QUICK_MOVE && p.button == 0)) =>
+                {
+                    recipe.selected.checked_add(2)
+                }
+                Some(_) => None,
+                None => Some(i32::from(p.slot)),
+            };
+            if let Some(slot) = slot {
+                self.native_menu_events.push(NativeMenuEvent::Click {
+                    uuid: self.guests[i].uuid,
+                    window: p.container,
+                    slot,
+                    button: i32::from(p.button),
+                    mode: p.input,
+                });
+            }
             self.resend_menu(conn, p.container, world);
             return None;
         }

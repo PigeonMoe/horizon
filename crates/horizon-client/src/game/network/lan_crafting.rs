@@ -2316,6 +2316,7 @@ mod recipe_check_tests {
                 craft: None,
                 links: Vec::new(),
                 asks_still_valid: false,
+                recipe_menu: None,
             });
             game.lan.as_mut().unwrap().hub.guests.push(guest);
             sent(&rx);
