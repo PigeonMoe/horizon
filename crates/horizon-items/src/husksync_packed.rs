@@ -8,7 +8,7 @@ use horizon_core::{
     version::{DATA_VERSION, VANILLA_VERSION},
 };
 use serde::{
-    Deserialize, Serialize,
+    Deserialize, Deserializer, Serialize,
     de::{self, DeserializeOwned, MapAccess, Visitor},
 };
 use serde_json::value::RawValue;
@@ -247,6 +247,16 @@ fn java_array_limit(limit: usize) -> usize {
     limit.min(i32::MAX as usize)
 }
 
+/// Gson's double adapter uses the decimal token at full precision.
+pub(crate) fn java_double<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    let raw = <&RawValue>::deserialize(deserializer)?;
+    raw.get()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| de::Error::custom("expected a finite JSON number"))
+}
+
 fn validate_metadata(
     fields: &BTreeMap<String, Box<RawValue>>,
     recipient: BukkitMinecraftVersion,
@@ -306,7 +316,7 @@ impl io::Write for BoundedJson {
 }
 
 /// Duplicate keys must not silently replace a field before validation.
-struct UniqueMap<T>(BTreeMap<String, T>);
+pub(crate) struct UniqueMap<T>(pub(crate) BTreeMap<String, T>);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for UniqueMap<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

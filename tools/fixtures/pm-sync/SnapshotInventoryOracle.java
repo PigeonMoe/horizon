@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
@@ -27,21 +28,31 @@ import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.util.Util;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.food.FoodData;
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.adapter.Adaptable;
 import net.william278.husksync.adapter.SnappyGsonAdapter;
+import net.william278.husksync.config.Settings.SynchronizationSettings.AttributeSettings;
 import net.william278.husksync.libraries.desertwell.util.Version;
 import net.william278.husksync.libraries.gson.JsonParser;
 import net.william278.husksync.libraries.nbtapi.utils.MinecraftVersion;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.craftbukkit.CraftRegistry;
 import org.bukkit.craftbukkit.CraftServer;
+import org.bukkit.craftbukkit.attribute.CraftAttributeInstance;
+import org.bukkit.craftbukkit.potion.CraftPotionUtil;
+import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import sun.misc.Unsafe;
 
 public final class SnapshotInventoryOracle {
@@ -178,6 +189,87 @@ public final class SnapshotInventoryOracle {
         }
         var vitalsPacked = new DataSnapshot.Packed(id, false, savedAt, "API", "fixture", vitals, version, "bukkit", 5);
         Files.writeString(output.resolve("husk-vitals-26.2.json"), vitalsPacked.asJson(plugin));
+
+        var effectsAndAttributes = new LinkedHashMap<>(vitals);
+        effectsAndAttributes.put(Identifier.POTION_EFFECTS.toString(), potionEffects(plugin));
+        effectsAndAttributes.put(Identifier.ATTRIBUTES.toString(), normalizedVital(
+                plugin, BukkitData.Attributes.class, attributes()));
+        var effectsPacked = new DataSnapshot.Packed(id, false, savedAt, "API", "fixture",
+                effectsAndAttributes, version, "bukkit", 5);
+        Files.writeString(output.resolve("husk-effects-attributes-26.2.json"), effectsPacked.asJson(plugin));
+    }
+
+    private static String potionEffects(HuskSync plugin) {
+        var speed = CraftPotionUtil.fromBukkit(new PotionEffect(PotionEffectType.SPEED,
+                -1, 300, false, false, true));
+        var regeneration = CraftPotionUtil.fromBukkit(new PotionEffect(PotionEffectType.REGENERATION,
+                73, -4, false, true, false));
+        var expired = CraftPotionUtil.fromBukkit(new PotionEffect(PotionEffectType.HASTE,
+                -19, 4, false, false, false));
+        if (speed.getAmplifier() != 255 || !speed.isInfiniteDuration()
+                || regeneration.getAmplifier() != 0 || expired.getDuration() != -19) {
+            throw new AssertionError("Paper changed native amplifier or duration normalization");
+        }
+        var ambient = new PotionEffect(PotionEffectType.HASTE, 60, 2, true, true, true);
+        var codec = new BukkitSerializer.PotionEffects(plugin);
+        var effects = BukkitData.PotionEffects.from(List.of(
+                CraftPotionUtil.toBukkit(speed), CraftPotionUtil.toBukkit(regeneration), ambient));
+        var result = codec.serialize(effects);
+        if (effects.getActiveEffects().size() != 2 || !codec.serialize(codec.deserialize(result)).equals(result)
+                || !codec.deserialize("[{\"type\":\"minecraft:haste\",\"amplifier\":2,\"duration\":60,"
+                        + "\"is_ambient\":true,\"show_particles\":true,\"has_icon\":true}]")
+                        .getActiveEffects().isEmpty()) {
+            throw new AssertionError("HuskSync changed its application flags or ambient effect policy");
+        }
+        return result;
+    }
+
+    private static BukkitData.Attributes attributes() throws Exception {
+        var health = new CraftAttributeInstance(new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+                Attributes.MAX_HEALTH, unused -> {}), Attribute.MAX_HEALTH);
+        health.setBaseValue(1200.125);
+        health.addModifier(attributeModifier("health", 5.25, AttributeModifier.Operation.ADD_NUMBER,
+                EquipmentSlotGroup.ANY));
+        health.addModifier(new AttributeModifier(new NamespacedKey("minecraft", "effect.fixture"), 1,
+                AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.ANY));
+        var damage = new CraftAttributeInstance(new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+                Attributes.ATTACK_DAMAGE, unused -> {}), Attribute.ATTACK_DAMAGE);
+        damage.setBaseValue(7.125);
+        damage.addModifier(attributeModifier("damage", 0.125, AttributeModifier.Operation.ADD_SCALAR,
+                EquipmentSlotGroup.ANY));
+
+        var settingsConstructor = AttributeSettings.class.getDeclaredConstructor();
+        settingsConstructor.setAccessible(true);
+        var settings = settingsConstructor.newInstance();
+        var ignored = AttributeSettings.class.getDeclaredField("ignoredModifiers");
+        ignored.setAccessible(true);
+        ignored.set(settings, List.of("minecraft:effect.*", "minecraft:creative_mode_*", "pmattibute:*"));
+        var capture = BukkitData.Attributes.class.getDeclaredMethod("adapt", AttributeInstance.class, AttributeSettings.class);
+        capture.setAccessible(true);
+        var healthData = (Data.Attributes.Attribute) capture.invoke(null, health, settings);
+        var damageData = (Data.Attributes.Attribute) capture.invoke(null, damage, settings);
+        if (healthData.baseValue() != 1200.125 || healthData.modifiers().size() != 1) {
+            throw new AssertionError("Unexpected HuskSync base or modifier fixture: "
+                    + healthData.baseValue() + ", " + healthData.modifiers().stream().map(Data.Attributes.Modifier::name).toList());
+        }
+
+        // Permanent NMS modifiers lose equipment slot groups. Exercise the
+        // original modifier adapter directly for a slot-bearing Bukkit value.
+        var captureModifier = BukkitData.Attributes.class.getDeclaredMethod("adapt", AttributeModifier.class);
+        captureModifier.setAccessible(true);
+        var speedModifier = (Data.Attributes.Modifier) captureModifier.invoke(null,
+                attributeModifier("speed", -0.0, AttributeModifier.Operation.MULTIPLY_SCALAR_1,
+                        EquipmentSlotGroup.MAINHAND));
+        var speed = new Data.Attributes.Attribute(Attribute.MOVEMENT_SPEED.getKey().toString(),
+                0.12012345678912345, Set.of(speedModifier));
+        var constructor = BukkitData.Attributes.class.getDeclaredConstructor(List.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(List.of(healthData, damageData, speed));
+    }
+
+    private static AttributeModifier attributeModifier(String name, double amount,
+            AttributeModifier.Operation operation, EquipmentSlotGroup group) {
+        return new AttributeModifier(new NamespacedKey("oracle", name), amount, operation, group);
     }
 
     private static <T extends Data & Adaptable> String normalizedVital(HuskSync plugin, Class<T> type, T value) {

@@ -2,13 +2,11 @@
 
 use std::fmt;
 
+use crate::husksync_packed::{PackedSnapshot, java_double};
 use serde::{
     Deserialize, Deserializer,
     de::{self, DeserializeOwned},
 };
-use serde_json::value::RawValue;
-
-use crate::husksync_packed::PackedSnapshot;
 
 pub const HEALTH_KEY: &str = "husksync:health";
 pub const HUNGER_KEY: &str = "husksync:hunger";
@@ -127,16 +125,6 @@ impl PackedSnapshot {
             .ok_or(VitalsError::MissingField(field))?;
         serde_json::from_str(raw).map_err(|error| VitalsError::InvalidJson { field, error })
     }
-}
-
-/// Gson's double adapter uses the decimal token at full precision.
-fn java_double<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
-    let raw = <&RawValue>::deserialize(deserializer)?;
-    raw.get()
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| de::Error::custom("expected a finite JSON number"))
 }
 
 /// Gson reads a double before narrowing to a Java float.

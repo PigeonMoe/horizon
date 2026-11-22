@@ -17,6 +17,7 @@ pub mod enchant;
 pub mod equipment;
 pub mod firework;
 pub mod flowers;
+pub mod husksync_effects_and_attributes;
 pub mod husksync_inventory;
 pub mod husksync_packed;
 pub mod husksync_vitals;
