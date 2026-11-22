@@ -24,12 +24,18 @@
 use super::{
     guest::{Guest, SavedBody},
     hub::Hub,
-    playerdata,
+    playerdata, profile_sections,
+    profile_storage::{self, PreparedProfiles},
 };
 use crate::save::Level;
-use horizon_core::nbt::{Limits, Tag, read_named};
+use horizon_core::{
+    identifier::Identifier,
+    nbt::{Compound, Limits, Tag, read_named},
+};
 use horizon_world::attributes::{Definition, entity::Catalog};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// The parts of a record, in the order the replies list them.
 pub const PARTS: [&str; 10] = [
@@ -182,7 +188,6 @@ fn read_request(request: &Value) -> Result<Request<'_>, String> {
         .get("record")
         .filter(|r| r.is_object())
         .ok_or("the request needs a record")?;
-    check_record_profiles(record)?;
     let parts = match request.get("parts") {
         None | Some(Value::Null) => PARTS.to_vec(),
         Some(Value::Array(names)) => {
@@ -236,9 +241,9 @@ pub fn check_record_profiles(record: &Value) -> Result<(), String> {
 
 /// Reads the player compound and the hand-over id out of a record, after checking the record
 /// is one this server can take for `uuid`.
-fn read_compound(record: &Value, uuid: u128) -> Result<(Tag, u128), String> {
+fn read_compound(record: &Value, uuid: u128, version: i64) -> Result<(Tag, u128), String> {
     match record.get("version").and_then(Value::as_i64) {
-        Some(super::arrivals::RECORD_VERSION) => {}
+        Some(actual) if actual == version => {}
         Some(other) => return Err(format!("record version {other} is not understood")),
         None => return Err("the record has no version".into()),
     }
@@ -271,6 +276,92 @@ fn read_compound(record: &Value, uuid: u128) -> Result<(Tag, u128), String> {
         tag @ Tag::Compound(_) => Ok((tag, handover)),
         _ => Err("the player compound is not a compound".into()),
     }
+}
+
+/// The coordinator supplies the complete required section roster and a validator for each
+/// registered section. The validator receives the candidate mod data without player write
+/// access and returns that participant's complete projected `PlayerPersisted` entries.
+/// The result is sealed to this owner's exact incoming record. No player or files are changed.
+pub fn stage_required_profiles(
+    hub: &Hub,
+    owner: u128,
+    input: &Value,
+    required: &BTreeMap<Identifier, u32>,
+    mut validate: impl FnMut(&Identifier, u32, &[u8], &Compound) -> Result<Compound, String>,
+) -> Result<StagedProfileImport, String> {
+    if hub.transfers.as_ref().is_some_and(|t| t.stopping) {
+        return Err(super::arrivals::STOPPING.into());
+    }
+    let request = read_request(input)?;
+    let sections = profile_sections::read_required(request.record)?;
+    if sections.is_empty()
+        || required.len() != sections.len()
+        || sections
+            .iter()
+            .any(|section| required.get(&section.id) != Some(&section.version))
+    {
+        return Err(
+            "required profiles do not match the registered destination receiver roster".into(),
+        );
+    }
+    let (tag, handover) = read_compound(request.record, owner, profile_sections::RECORD_VERSION)?;
+    let target = &hub.guests[held_index(hub, owner, handover)?];
+    let candidate = if request.parts.len() == PARTS.len() {
+        Some(&tag)
+    } else {
+        target.saved.as_ref()
+    };
+    let mut player_data = match candidate.and_then(|tag| tag.get("NeoForgeData")) {
+        Some(Tag::Compound(data)) => data.clone(),
+        None => Compound::new(),
+        Some(_) => return Err("the player's mod data is not a compound".into()),
+    };
+    for section in &sections {
+        let replacement = validate(&section.id, section.version, &section.payload, &player_data)?;
+        replace_section_pdc(&mut player_data, &section.id, replacement)?;
+    }
+    Ok(StagedProfileImport(PreparedProfiles {
+        owner,
+        handover,
+        connection: target.conn,
+        profiles: sections,
+        player_data,
+        fingerprint: fingerprint(input)?,
+    }))
+}
+
+/// Opaque result of checking all of a held player's required sections.
+pub struct StagedProfileImport(PreparedProfiles);
+
+fn fingerprint(record: &Value) -> Result<[u8; 32], String> {
+    serde_json::to_vec(record)
+        .map(|bytes| Sha256::digest(bytes).into())
+        .map_err(|error| error.to_string())
+}
+
+fn replace_section_pdc(
+    data: &mut Compound,
+    id: &Identifier,
+    entries: Compound,
+) -> Result<(), String> {
+    let belongs = |key: &horizon_core::nbt::JavaString| {
+        Identifier::parse_namespaced(&key.to_string_lossy())
+            .is_some_and(|key| key.namespace() == id.namespace())
+    };
+    if !entries.keys().all(belongs) {
+        return Err(format!(
+            "required profile {id} proposed another mod's player data"
+        ));
+    }
+    let Tag::Compound(persisted) = data
+        .entry("PlayerPersisted".into())
+        .or_insert_with(|| Tag::Compound(Compound::new()))
+    else {
+        return Err("the player's persisted mod data is not a compound".into());
+    };
+    persisted.retain(|key, _| !belongs(key));
+    persisted.extend(entries);
+    Ok(())
 }
 
 /// The farthest a position may be from the origin on x and z, and on y: what vanilla's
@@ -521,11 +612,23 @@ pub fn import_player(
     uuid: u128,
     request: &Value,
 ) -> Result<Imported, String> {
-    if hub.transfers.as_ref().is_some_and(|t| t.stopping) {
-        return Err(super::arrivals::STOPPING.into());
-    }
-    let request = read_request(request)?;
-    let (tag, handover) = read_compound(request.record, uuid)?;
+    import_player_inner(hub, attributes, uuid, request, None)
+}
+
+/// Apply the incoming native state while keeping validated profile sections sealed until
+/// the real player-confirm saves them. The coordinator invokes this only with a complete
+/// stage produced by [`stage_required_profiles`].
+pub fn import_player_with_profiles(
+    hub: &mut Hub,
+    attributes: &Catalog,
+    uuid: u128,
+    request: &Value,
+    profiles: StagedProfileImport,
+) -> Result<Imported, String> {
+    import_player_inner(hub, attributes, uuid, request, Some(profiles.0))
+}
+
+fn held_index(hub: &Hub, uuid: u128, handover: u128) -> Result<usize, String> {
     let Some(i) = hub
         .guests
         .iter()
@@ -542,6 +645,49 @@ pub fn import_player(
     {
         return Err("that player's record of another hand-over was imported".into());
     }
+    Ok(i)
+}
+
+fn import_player_inner(
+    hub: &mut Hub,
+    attributes: &Catalog,
+    uuid: u128,
+    input: &Value,
+    profiles: Option<PreparedProfiles>,
+) -> Result<Imported, String> {
+    if hub.transfers.as_ref().is_some_and(|t| t.stopping) {
+        return Err(super::arrivals::STOPPING.into());
+    }
+    let request = read_request(input)?;
+    let version = match profiles.as_ref() {
+        Some(profile) if profile.owner == uuid && profile.fingerprint == fingerprint(input)? => {
+            profile_sections::RECORD_VERSION
+        }
+        Some(_) => return Err("the required profile stage belongs to a different record".into()),
+        None => {
+            check_record_profiles(request.record)?;
+            super::arrivals::RECORD_VERSION
+        }
+    };
+    let (mut tag, handover) = read_compound(request.record, uuid, version)?;
+    let i = held_index(hub, uuid, handover)?;
+    let guest = &hub.guests[i];
+    if let Some(stage) = &profiles {
+        if guest.conn != stage.connection || handover != stage.handover {
+            return Err("the required profile stage belongs to a different connection".into());
+        }
+        if guest
+            .arrival_profiles
+            .as_ref()
+            .is_some_and(|current| stage.fingerprint != current.fingerprint)
+        {
+            return Err("different required profile data was already staged".into());
+        }
+    } else if guest.arrival_profiles.is_some() || profile_storage::has_markers(guest.saved.as_ref())
+    {
+        return Err("the held player's required profile sections are missing".into());
+    }
+    profile_storage::clear_markers(&mut tag);
     let mut level = Level::default();
     level.read_player(&tag);
     check_values(&level, attributes)?;
@@ -618,6 +764,7 @@ pub fn import_player(
         g.imported = true;
         g.arrival_announce = request.announce;
         g.arrival_handover = Some(handover);
+        g.arrival_profiles = profiles;
         recentered
     });
     let records = |key: &str| {

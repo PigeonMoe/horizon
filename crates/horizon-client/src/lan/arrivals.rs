@@ -461,9 +461,13 @@ pub fn export_record(
     if let Some(h) = &hub.guests[i].handover {
         return Ok(h.record.clone());
     }
-    let id = freeze.then(new_handover_id).transpose()?;
     let g = &hub.guests[i];
-    let tag = super::playerdata::player_tag(g);
+    if freeze && super::profile_storage::has_markers(g.saved.as_ref()) {
+        return Err("this player's required profile sections have no source collector".into());
+    }
+    let id = freeze.then(new_handover_id).transpose()?;
+    let mut tag = super::playerdata::player_tag(g);
+    super::profile_storage::clear_markers(&mut tag);
     let bytes = write_named(
         &NamedTag {
             name: "".into(),

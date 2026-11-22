@@ -1806,6 +1806,9 @@ impl Hub {
     /// server has it: the position to confirm again and the inventory.
     pub fn confirm_arrival(&mut self, uuid: u128, id: u128) -> Result<bool, &'static str> {
         let i = self.imported_arrival(uuid, id)?;
+        if self.guests[i].arrival_profiles.is_some() {
+            return Err("the required profile sections have not been saved");
+        }
         let announce = self.guests[i].arrival_announce;
         self.resend_teleport(i, None);
         self.send_inventory(i);

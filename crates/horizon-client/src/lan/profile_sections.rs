@@ -4,24 +4,46 @@ use horizon_core::identifier::Identifier;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-const RECORD_VERSION: i64 = 2;
+pub(super) const RECORD_VERSION: i64 = 2;
 const MAX_SECTIONS: usize = 16;
 const MAX_ID_BYTES: usize = 128;
 // The control socket permits a 16 MiB request line. This allows an 8 MiB opaque
 // profile, with up to about 10.67 MiB of base64 plus the native record and headers.
-const MAX_PROFILE_BYTES: usize = 8 << 20;
+pub(super) const MAX_PROFILE_BYTES: usize = 8 << 20;
+
+pub(super) struct Section {
+    pub id: Identifier,
+    pub version: u32,
+    pub payload: Vec<u8>,
+}
 
 /// All sections in a version 2 record are required. A receiver needs a durable
 /// placement participant for every one. Until those participants are available,
 /// refuse the import before touching the held guest or acknowledging a retry.
 pub(super) fn check_import(record: &Value) -> Result<(), String> {
+    let sections = read_required(record)?;
+    if sections.is_empty() {
+        return Ok(());
+    }
+    let required: Vec<_> = sections
+        .iter()
+        .map(|section| format!("{} (schema {})", section.id, section.version))
+        .collect();
+    Err(format!(
+        "no durable receiver is available for required profiles: {}",
+        required.join(", ")
+    ))
+}
+
+/// Decode every required section with one aggregate allocation budget.
+pub(super) fn read_required(record: &Value) -> Result<Vec<Section>, String> {
     let version = record.get("version").and_then(Value::as_i64);
     let profiles = record.get("profiles");
     if version != Some(RECORD_VERSION) {
         return if profiles.is_some() {
             Err("required profiles need a version 2 hand-over record".into())
         } else {
-            Ok(())
+            Ok(Vec::new())
         };
     }
     let sections = profiles
@@ -35,9 +57,10 @@ pub(super) fn check_import(record: &Value) -> Result<(), String> {
     for section in sections {
         let id = section["id"]
             .as_str()
-            .filter(|id| id.len() <= MAX_ID_BYTES && Identifier::parse_namespaced(id).is_some())
+            .filter(|id| id.len() <= MAX_ID_BYTES)
+            .and_then(Identifier::parse_namespaced)
             .ok_or("a required profile needs a namespaced id of at most 128 bytes")?;
-        if !ids.insert(id) {
+        if !ids.insert(id.clone()) {
             return Err(format!("the required profile {id} is listed twice"));
         }
         let version = section["version"]
@@ -60,12 +83,13 @@ pub(super) fn check_import(record: &Value) -> Result<(), String> {
         remaining = remaining
             .checked_sub(bytes.len())
             .ok_or("the required profiles exceed 8 MiB in total")?;
-        required.push(format!("{id} (schema {version})"));
+        required.push(Section {
+            id,
+            version,
+            payload: bytes,
+        });
     }
-    Err(format!(
-        "no durable receiver is available for required profiles: {}",
-        required.join(", ")
-    ))
+    Ok(required)
 }
 
 #[cfg(test)]

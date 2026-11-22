@@ -313,11 +313,18 @@ impl Game<'_> {
         let _ = self.finish_player_autosaves(true);
         let host = self.lan.as_mut().expect("server host is present");
         let i = host.hub.imported_arrival(uuid, id)?;
-        let g = host.hub.guests.take_for_save(i);
-        let written =
-            horizon_client::lan::playerdata::save_now(&g, &self.world_root).and_then(|()| {
+        let mut g = host.hub.guests.take_for_save(i);
+        use horizon_client::lan::playerdata;
+        let written = if playerdata::has_staged_arrival_profiles(&g) {
+            // A profile marker is the single authority switch in player.dat. Nothing
+            // that can refuse the placement is written after this file commits.
+            self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
+                .and_then(|()| playerdata::save_profile_arrival(&mut g, &self.world_root, id))
+        } else {
+            playerdata::save_now(&g, &self.world_root).and_then(|()| {
                 self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
-            });
+            })
+        };
         let name = g.name.clone();
         let host = self.lan.as_mut().expect("server host is present");
         host.hub.guests.insert(i, g);
@@ -480,6 +487,125 @@ mod tests {
             );
             unsupported(&game.player_request("player-import", &format!("{uuid} {profiled}")));
             assert_eq!(std::fs::read(&file).unwrap(), saved);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn staged_profiles_activate_only_with_the_durable_player_file() {
+        use horizon_client::lan::{import, playerdata};
+        use horizon_client::save::read_dat;
+        use horizon_core::{identifier::Identifier, nbt::Tag};
+
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let world = tempfile::tempdir().unwrap();
+            game.world_root = world.path().to_owned();
+            let owner = 12;
+            let (index, mut record) = {
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.transfers = Some(arrivals::Transfers::new(arrivals::Settings::default()));
+                let index = hub.guests.connection_index(12).unwrap();
+                let record = arrivals::export_record(hub, index, true, Default::default()).unwrap();
+                hub.guests.update(index, |guest| {
+                    guest.handover = None;
+                    guest.placed = false;
+                    guest.held = true;
+                    guest.saved = Some(Tag::compound([(
+                        "NeoForgeData",
+                        Tag::compound([(
+                            "PlayerPersisted",
+                            Tag::compound([
+                                ("slimefun:stale", Tag::Byte(1)),
+                                ("other:keep", Tag::Byte(1)),
+                            ]),
+                        )]),
+                    )]));
+                });
+                playerdata::save_now(&hub.guests[index], world.path()).unwrap();
+                (index, record)
+            };
+            let handover = record["handover"].as_str().unwrap().to_owned();
+            let uuid = uuid_string(owner);
+            let id = Identifier::parse_namespaced("slimefun:profile").unwrap();
+            record["version"] = json!(2);
+            record["profiles"] = json!([{
+                "id": id.to_string(), "version": 1, "payload": "U0ZQMQ=="
+            }]);
+            let request = json!({"record": record, "place": false, "parts": ["experience"]});
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            let roster = [(id.clone(), 1)].into();
+            let check = import::stage_required_profiles(
+                hub,
+                owner,
+                &request,
+                &roster,
+                |actual_id, version, payload, data| {
+                    assert_eq!((actual_id, version, payload), (&id, 1, &b"SFP1"[..]));
+                    assert_eq!(
+                        data.get(&"PlayerPersisted".into())
+                            .and_then(|tag| tag.get("other:keep")),
+                        Some(&Tag::Byte(1))
+                    );
+                    Ok([("other:overwrite".into(), Tag::Byte(1))].into())
+                },
+            );
+            assert!(check.err().unwrap().contains("another mod"));
+            let ready =
+                import::stage_required_profiles(hub, owner, &request, &roster, |_, _, _, _| {
+                    Ok([("slimefun:issued".into(), Tag::Byte(1))].into())
+                })
+                .unwrap();
+            let done = import::import_player_with_profiles(
+                hub,
+                &game.motion.attributes,
+                owner,
+                &request,
+                ready,
+            )
+            .unwrap();
+            assert!(hub.confirm_arrival(owner, done.handover).is_err());
+
+            let file = playerdata::path(world.path(), owner);
+            let backup = file.with_extension("dat_old");
+            let before = std::fs::read(&file).unwrap();
+            std::fs::create_dir(&backup).unwrap();
+            let refused = game.player_request("player-confirm", &format!("{uuid} {handover}"));
+            assert!(refused["error"].is_string(), "{refused}");
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+            let guest = &game.lan.as_ref().unwrap().hub.guests[index];
+            assert!(guest.held && !guest.placed);
+            let section_files = std::fs::read_dir(file.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|file| file.extension().is_some_and(|ext| ext == "hprofile"))
+                .collect::<Vec<_>>();
+            assert_eq!(section_files.len(), 1);
+            assert_eq!(std::fs::read(&section_files[0]).unwrap(), b"SFP1");
+
+            std::fs::remove_dir(&backup).unwrap();
+            let confirmed = game.player_request("player-confirm", &format!("{uuid} {handover}"));
+            assert_eq!(confirmed["placed"], true, "{confirmed}");
+            let saved = read_dat(&file).unwrap();
+            let active = saved
+                .get("HorizonTransferProfiles")
+                .and_then(|tag| tag.get("slimefun:profile"));
+            assert_eq!(active.and_then(|tag| tag.get("length")), Some(&Tag::Int(4)));
+            let persisted = saved
+                .get("NeoForgeData")
+                .unwrap()
+                .get("PlayerPersisted")
+                .unwrap();
+            assert_eq!(persisted.get("slimefun:issued"), Some(&Tag::Byte(1)));
+            assert_eq!(persisted.get("other:keep"), Some(&Tag::Byte(1)));
+            assert!(persisted.get("slimefun:stale").is_none());
+            let refused = game.player_request("player-export", &format!("{uuid} freeze"));
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no source collector")
+            );
         });
     }
 }

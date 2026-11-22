@@ -46,6 +46,7 @@ pub mod player_shown;
 pub mod playerdata;
 pub mod prediction;
 mod profile_sections;
+mod profile_storage;
 pub mod recipes;
 mod registry_names;
 pub mod scoreboard;

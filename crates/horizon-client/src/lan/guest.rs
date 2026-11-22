@@ -507,6 +507,9 @@ pub struct Guest {
     /// The hand-over its record came with (`player-import`): `player-confirm` and
     /// `player-drop` name it, and another hand-over's record is not taken.
     pub arrival_handover: Option<u128>,
+    /// Checked required sections for a held arrival. Cleared only by the successful
+    /// durable player-file commit, or discarded when the guest leaves while held.
+    pub(super) arrival_profiles: Option<super::profile_storage::PreparedProfiles>,
     /// The import of that hand-over moved the view to another chunk (`recentered` in its reply),
     /// kept so a retried import or a confirm after it answers the same.
     pub arrival_recentered: bool,
@@ -856,6 +859,7 @@ impl Guest {
             imported: false,
             arrival_announce: true,
             arrival_handover: None,
+            arrival_profiles: None,
             arrival_recentered: false,
             quiet_leave: false,
             released: false,

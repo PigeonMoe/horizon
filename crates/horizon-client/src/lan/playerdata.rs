@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 use {
-    horizon_core::nbt::Tag,
+    horizon_core::nbt::{Compound, Tag},
     horizon_mod_runtime::attachments::{ATTACHMENTS_KEY, attachment_compound},
 };
 
@@ -366,6 +366,47 @@ pub fn save_now(guest: &Guest, world: &Path) -> Result<(), String> {
     let file = path(world, guest.uuid);
     crate::save::write_dat_durable(&file, player_tag(guest))
         .map_err(|e| format!("{} is not saved: {e}", file.display()))
+}
+
+/// Whether this held arrival requires its plugin profile sections to be made
+/// durable before the single player data file activates them.
+pub fn has_staged_arrival_profiles(guest: &Guest) -> bool {
+    guest.arrival_profiles.is_some()
+}
+
+/// Publish the staged PDC and profile markers in the same durable player file.
+pub fn save_profile_arrival(guest: &mut Guest, world: &Path, handover: u128) -> Result<(), String> {
+    use super::profile_storage;
+    let stage = guest
+        .arrival_profiles
+        .as_ref()
+        .ok_or("no profile sections were staged")?;
+    if !guest.held || guest.placed || stage.owner != guest.uuid || stage.handover != handover {
+        return Err("the required profile stage belongs to another held hand-over".into());
+    }
+    let markers = stage.make_durable(world)?;
+    let mut tag = player_tag(guest);
+    profile_storage::set_markers(&mut tag, markers.clone());
+    replace_profile_pdc(&mut tag, stage.player_data.clone());
+    let file = path(world, guest.uuid);
+    crate::save::write_dat_durable(&file, tag)
+        .map_err(|e| format!("{} is not saved: {e}", file.display()))?;
+    let saved = guest
+        .saved
+        .get_or_insert_with(|| Tag::Compound(Compound::new()));
+    profile_storage::set_markers(saved, markers);
+    let stage = guest
+        .arrival_profiles
+        .take()
+        .expect("the stage was used above");
+    replace_profile_pdc(saved, stage.player_data);
+    Ok(())
+}
+
+fn replace_profile_pdc(tag: &mut Tag, pdc: Compound) {
+    if let Tag::Compound(root) = tag {
+        root.insert("NeoForgeData".into(), Tag::Compound(pdc));
+    }
 }
 
 /// An immutable player snapshot. Compression and all filesystem work belong to
