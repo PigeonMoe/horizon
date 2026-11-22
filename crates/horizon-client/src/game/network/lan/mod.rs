@@ -3178,6 +3178,7 @@ impl Game<'_> {
     pub(super) fn player_equipment_broke(
         &mut self,
         slot: horizon_core::equipment_slot::EquipmentSlot,
+        inventory_slot: usize,
         stack: &horizon_client::items::ItemStack,
     ) {
         use horizon_core::equipment_slot::EquipmentSlot;
@@ -3197,6 +3198,18 @@ impl Game<'_> {
             && let (Some(uuid), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone())
         {
             self.native_player_destroy_item(uuid, &name, &stack.item, equipment_slot_name(slot));
+            if stack.count == 1
+                && mod_api::__private::listened(mod_api::HookId::PlayerItemBreakSnapshot)
+                && let Ok(stack) = stack.try_into_api()
+            {
+                self.native_player_item_break_snapshot(
+                    mod_api::__private::PlayerItemBreakSnapshotCall {
+                        player: uuid,
+                        inventory_slot: inventory_slot as u32,
+                        stack: &stack,
+                    },
+                );
+            }
         }
         let Some(at) = self
             .player

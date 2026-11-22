@@ -315,7 +315,7 @@ impl Game<'_> {
             if updated.as_ref() != Some(&before) && self.armor[index].as_ref() == Some(&before) {
                 self.armor[index] = updated;
                 if let Some(stack) = broken {
-                    self.player_equipment_broke(armor_slot(index), &stack);
+                    self.player_equipment_broke(armor_slot(index), 39 - index, &stack);
                     self.apply_equipment();
                 }
             }
@@ -349,6 +349,7 @@ impl Game<'_> {
         if self.held() != Some(&stack) {
             return;
         }
+        let inventory_slot = self.held_slot();
         self.edit_block_use_stack(|slot| {
             if let Some(original) = slot.as_mut() {
                 if let Some(updated) = &updated {
@@ -368,7 +369,7 @@ impl Game<'_> {
             }
         });
         if let Some(broken) = broken {
-            self.player_equipment_broke(break_slot, &broken);
+            self.player_equipment_broke(break_slot, inventory_slot, &broken);
         }
     }
     /// `ItemStack.hurtWithoutBreaking`: Unbreaking applies, but the stack stops at

@@ -328,6 +328,98 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn player_drop_observer_sees_the_accepted_items_and_the_worn_hand() {
+        use crate::game::native_guest_turn_tests::with_guests;
+        use mod_api::{
+            BlockDropsEvent, Flow, Hand, Identifier, LevelHost, PlayerBlockDropsPostEvent,
+            ServerHost,
+        };
+        use std::sync::{Arc, Mutex};
+
+        const GUEST: u32 = 12;
+        const ACCEPTED: [i32; 3] = [4, 64, 4];
+        const CANCELLED: [i32; 3] = [5, 64, 4];
+        struct Observe(Arc<Mutex<Vec<[i32; 3]>>>);
+
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Observe {
+            fn block_drops(&self, _: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+                if [event.pos.x, event.pos.y, event.pos.z] == CANCELLED {
+                    return Flow::Cancel;
+                }
+                event.drops[0].stack.set_count(2).unwrap();
+                Flow::Continue
+            }
+
+            fn player_block_drops_post(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut PlayerBlockDropsPostEvent<'_>,
+            ) {
+                assert_eq!(event.player.uuid(), u128::from(GUEST));
+                assert_eq!(event.state.block().id(host), "minecraft:stone");
+                assert_eq!(event.drops.len(), 1);
+                assert_eq!(
+                    event.drops[0].stack.item().id(host),
+                    "minecraft:cobblestone"
+                );
+                assert_eq!(event.drops[0].stack.count(), 2);
+                let living = host.living(event.player.entity()).unwrap();
+                assert_eq!(living.hand_item(host, Hand::Main).unwrap().damage(), 1);
+                let quartz = host
+                    .item_key(&Identifier::parse("minecraft:quartz").unwrap())
+                    .unwrap();
+                let stack = mod_api::ItemStack::new(quartz, 1).unwrap();
+                let level = event.player.level(host).unwrap();
+                let [x, y, z] = event.pos.map(f64::from);
+                assert!(
+                    level
+                        .spawn_item(host, x, y, z, stack, 10)
+                        .unwrap()
+                        .is_some()
+                );
+                self.0.lock().unwrap().push(event.pos);
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<[i32; 3]>>> = Arc::default();
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "final-drops",
+            Box::new(Observe(seen.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.build_registries();
+                game.load_server_loot();
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let _ = game
+                    .block_ticks
+                    .add_empty_chunk(horizon_core::position::ChunkPos::new(0, 0));
+                game.as_guest(GUEST, |game| {
+                    game.set_mode(GameMode::Survival);
+                    game.inventory[game.selected] =
+                        Some(ItemStack::new("minecraft:diamond_pickaxe", 1));
+                    let player = game.native_acting_player().unwrap();
+                    for pos in [ACCEPTED, CANCELLED] {
+                        place(game, pos, "minecraft:stone");
+                        assert!(game.player_destroy_block(player, pos, true));
+                    }
+                    assert_eq!(carried(game, "minecraft:cobblestone"), 2);
+                    assert!(!popped(game, "minecraft:cobblestone"));
+                    assert!(popped(game, "minecraft:quartz"));
+                })
+                .unwrap();
+            });
+        });
+        assert_eq!(*seen.lock().unwrap(), [ACCEPTED]);
+    }
+
     struct ProtectGravel([i32; 3]);
 
     #[mod_api::__subscriptions]

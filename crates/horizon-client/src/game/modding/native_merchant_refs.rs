@@ -270,6 +270,53 @@ impl Game<'_> {
         true
     }
 
+    /// Reset the villager and its reachable trade session together. A borrowed
+    /// session must refuse before any mutation, or closing it restores old data.
+    pub(super) fn merchant_reset_villager_career(&mut self, merchant: MerchantRef) -> bool {
+        let Some(index) = self.native_villager_index(merchant) else {
+            return false;
+        };
+        let professions = &self.stations().professions;
+        let mob = &self.mobs[index];
+        if !mob.alive() || professions.state_index(&mob.extra.profession).is_none() {
+            return false;
+        }
+        let Some(unemployed) = professions
+            .resolve("minecraft:none")
+            .and_then(|index| professions.state(index))
+        else {
+            return false;
+        };
+        let id = mob.id;
+        if let Some(conn) = self.lan_trade_conn(id) {
+            if !self.lan_reset_villager_career(conn) {
+                return false;
+            }
+        } else if mob.extra.flag2 {
+            let Some(station) = self.station.as_mut() else {
+                return false;
+            };
+            let Some(state) = station
+                .merchant
+                .as_mut()
+                .filter(|state| state.mob == Some(id) && state.session.villager)
+            else {
+                return false;
+            };
+            state.reset_villager_career(&mut self.rand_sequences);
+            station.result = None;
+        }
+        let mob = &mut self.mobs[index];
+        mob.extra.profession = unemployed;
+        mob.extra.villager_level = 1;
+        if let Some(trade) = mob.extra.trade.as_mut() {
+            trade.offers.clear();
+            trade.unset = true;
+            trade.xp = 0;
+        }
+        true
+    }
+
     /// `VillagerData.level`, at least 1.
     pub(super) fn merchant_level(&self, merchant: MerchantRef) -> Option<i32> {
         let index = self.native_villager_index(merchant)?;

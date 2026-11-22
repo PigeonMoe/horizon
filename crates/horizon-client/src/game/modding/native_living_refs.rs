@@ -878,9 +878,9 @@ impl Game<'_> {
         if updated.as_ref() == Some(&stack) {
             return None;
         }
-        let cell = match slot {
-            EquipmentSlot::MainHand => &mut self.inventory[self.selected],
-            EquipmentSlot::OffHand => &mut self.offhand,
+        let (cell, inventory_slot) = match slot {
+            EquipmentSlot::MainHand => (&mut self.inventory[self.selected], self.selected),
+            EquipmentSlot::OffHand => (&mut self.offhand, super::shield::OFFHAND_SLOT),
             EquipmentSlot::Body | EquipmentSlot::Saddle => {
                 if self.equipment.get(slot as usize) != Some(&stack) {
                     return None;
@@ -888,11 +888,15 @@ impl Game<'_> {
                 self.equipment.set(slot as usize, updated);
                 if let Some(ref broken) = broken {
                     self.award_stat("broken", &broken.item, 1);
-                    self.player_equipment_broke(world_equipment_slot(slot), broken);
+                    let inventory_slot = if slot == EquipmentSlot::Body { 41 } else { 42 };
+                    self.player_equipment_broke(world_equipment_slot(slot), inventory_slot, broken);
                 }
                 return broken;
             }
-            _ => &mut self.armor[armor_index(slot)?],
+            _ => {
+                let index = armor_index(slot)?;
+                (&mut self.armor[index], 39 - index)
+            }
         };
         if cell.as_ref() != Some(&stack) {
             return None;
@@ -900,7 +904,7 @@ impl Game<'_> {
         *cell = updated;
         if let Some(ref broken) = broken {
             self.award_stat("broken", &broken.item, 1);
-            self.player_equipment_broke(world_equipment_slot(slot), broken);
+            self.player_equipment_broke(world_equipment_slot(slot), inventory_slot, broken);
             if armor_index(slot).is_some() {
                 self.apply_equipment();
             }
@@ -1222,6 +1226,94 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn item_break_snapshot_keeps_components_and_the_inventory_cell_that_broke() {
+        use horizon_core::nbt::Tag;
+        use mod_api::{Hooks, PlayerItemBreakSnapshotEvent, ServerHost};
+        use std::sync::{Arc, Mutex};
+
+        const GUEST: u32 = 12;
+
+        struct Recorder(Arc<Mutex<Vec<(u32, mod_api::ItemStack)>>>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Recorder {
+            fn player_item_break_snapshot(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut PlayerItemBreakSnapshotEvent<'_>,
+            ) {
+                assert_eq!(event.player, u128::from(GUEST));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((event.inventory_slot, event.stack.clone()));
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mods = vec![mod_api::ModEntry::new(
+            "item_break_snapshot",
+            Box::new(Recorder(seen.clone())),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_guest_turn_tests::with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.as_guest(GUEST, |game| {
+                    game.creative = false;
+                    game.selected = 4;
+                    let mut expected = Vec::new();
+                    for (slot, item) in [
+                        (4, "minecraft:diamond_pickaxe"),
+                        (40, "minecraft:shield"),
+                        (38, "minecraft:diamond_chestplate"),
+                    ] {
+                        let max = game.items().get(item).unwrap().max_damage;
+                        let mut stack = ItemStack::new(item, 1);
+                        stack.damage = max;
+                        stack.data_mut().set_other(
+                            "minecraft:custom_data",
+                            Some(Tag::Compound(
+                                [("example".into(), Tag::IntArray(vec![2, -1, 3]))].into(),
+                            )),
+                        );
+                        expected.push((slot, stack.try_into_api().unwrap()));
+                        stack.damage -= 1;
+                        match slot {
+                            4 => {
+                                game.inventory[game.selected] = Some(stack);
+                                game.damage_held(1);
+                                assert!(game.inventory[game.selected].is_none());
+                            }
+                            40 => {
+                                game.offhand = Some(stack);
+                                game.with_hand(Hand::Off, |game| game.damage_held(1));
+                                assert!(game.offhand.is_none());
+                            }
+                            38 => {
+                                game.armor[1] = Some(stack);
+                                assert!(
+                                    game.damage_player_equipment(EquipmentSlot::Chest, 1)
+                                        .is_some()
+                                );
+                                assert!(game.armor[1].is_none());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    let mut stacked = ItemStack::new("minecraft:diamond_pickaxe", 2);
+                    stacked.damage = game.items().get(&stacked.item).unwrap().max_damage - 1;
+                    game.inventory[game.selected] = Some(stacked);
+                    game.damage_held(1);
+                    assert_eq!(game.inventory[game.selected].as_ref().unwrap().count, 1);
+                    assert_eq!(*seen.lock().unwrap(), expected);
+                });
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn durability_handle_and_held_path_share_rng_and_damage() {
         use horizon_client::motion::PlayerMotion;
         use horizon_core::random::RandomSource;
@@ -1372,7 +1464,11 @@ mod tests {
                     stack.damage = stack.damage.saturating_add(loss).min(max);
                     if stack.damage >= max {
                         game.armor[index] = None;
-                        game.player_equipment_broke(super::super::armor_slot(index), &stack);
+                        game.player_equipment_broke(
+                            super::super::armor_slot(index),
+                            39 - index,
+                            &stack,
+                        );
                         broken.push(index);
                     } else {
                         game.armor[index] = Some(stack);

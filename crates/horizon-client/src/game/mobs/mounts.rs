@@ -266,6 +266,7 @@ impl Game<'_> {
                 if let Some(broken) = broken {
                     self.player_equipment_broke(
                         horizon_core::equipment_slot::EquipmentSlot::MainHand,
+                        self.selected,
                         &broken,
                     );
                     self.award_stat("broken", &broken.item, 1);

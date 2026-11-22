@@ -4186,6 +4186,7 @@ impl Game<'_> {
                     (breaker, held.as_ref(), live),
                     (stacks, exp_to_drop),
                 );
+                self.observe_player_block_drops(pos, state, &dropped);
                 let canceled = dropped.canceled;
                 if let Some(kept) = self.break_collect.as_mut() {
                     kept.extend(dropped.items.into_iter().map(|item| item.stack));

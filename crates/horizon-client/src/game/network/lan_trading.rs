@@ -654,6 +654,32 @@ impl Game<'_> {
     pub(super) fn lan_trade_player(&self, conn: u32) -> Option<u128> {
         Some(self.lan.as_ref()?.hub.guest(conn)?.uuid)
     }
+    /// Update the live session and publish its empty result without replaying
+    /// a trade click or changing either player's inventory.
+    pub(super) fn lan_reset_villager_career(&mut self, conn: u32) -> bool {
+        let Some(host) = self.lan.as_mut() else {
+            return false;
+        };
+        if host.hub.guest(conn).is_none() || self.lan_guest_swaps.contains(&conn) {
+            return false;
+        }
+        let Some(mut gm) = host
+            .play
+            .get_mut(&conn)
+            .and_then(|play| play.merchant.take_if(|gm| gm.merchant.session.villager))
+        else {
+            return false;
+        };
+        gm.merchant.reset_villager_career(&mut self.rand_sequences);
+        gm.slots[2] = None;
+        self.lan_send_offers(conn, &mut gm, true);
+        self.lan_send_merchant_content(conn, &mut gm);
+        if let Some(host) = self.lan.as_mut() {
+            host.play.entry(conn).or_default().merchant = Some(gm);
+        }
+        true
+    }
+
     /// Changes the session of a guest's open trading screen and sends the
     /// client its offers and result slot again. The merchant's own random is
     /// not drawn: the update sound is held back.
@@ -1127,6 +1153,100 @@ mod tests {
             assert_eq!((trade.offers.clone(), trade.xp), (vec![changed], 40));
             assert_eq!(game.mobs[0].extra.villager_level, 3);
             assert_eq!(villager.trading_player(game), None);
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_villager_career_reset_survives_another_guests_trade_closing() {
+        use super::super::native_guest_turn_tests::with_guests;
+
+        with_guests(|game| {
+            let villager = spawn(game, 40, "minecraft:villager");
+            assert!(villager.set_profession(game, "minecraft:farmer"));
+            let old = offer("minecraft:wheat", "minecraft:emerald");
+            let live = offer("minecraft:coal", "minecraft:diamond");
+            let payment = live.base_cost_a.stack.clone();
+            let carried = Some(ItemStack::new("minecraft:apple", 3));
+            game.mobs[0].extra.trade = Some(Box::new(Trader {
+                offers: vec![old.clone()],
+                xp: 17,
+                ..Trader::default()
+            }));
+            game.mobs[0].extra.villager_level = 3;
+            game.mobs[0].extra.flag2 = true;
+            let mut session = merchant::Session::new(vec![live.clone()], true);
+            session.profession = "minecraft:farmer".into();
+            session.level = 4;
+            session.xp = 38;
+            game.lan_open_merchant(
+                13,
+                MerchantState {
+                    session: Box::new(session),
+                    scroll: 0,
+                    dragging: false,
+                    focused: None,
+                    mob: Some(40),
+                    name: None,
+                },
+            );
+            let window = {
+                let host = game.lan.as_mut().unwrap();
+                host.hub
+                    .update_guest(13, |guest| guest.carried = carried.clone())
+                    .unwrap();
+                let gm = host.play.get_mut(&13).unwrap().merchant.as_mut().unwrap();
+                gm.slots = [Some(payment.clone()), None, Some(live.result)];
+                gm.merchant.session.active = Some(0);
+                gm.merchant.session.future_xp = 7;
+                gm.window
+            };
+
+            // The trading guest's own player turn borrows its menu.
+            game.as_guest(13, |game| {
+                assert!(!villager.reset_villager_career(game));
+                assert_eq!(
+                    villager.profession(game).as_deref(),
+                    Some("minecraft:farmer")
+                );
+                let trade = game.mobs[0].extra.trade.as_ref().unwrap();
+                assert_eq!((trade.offers.as_slice(), trade.xp), (&[old][..], 17));
+                assert_eq!(game.mobs[0].extra.villager_level, 3);
+            })
+            .unwrap();
+
+            game.as_guest(12, |game| {
+                // The compatibility contract of the generic setter is unchanged.
+                assert!(!villager.set_profession(game, "minecraft:none"));
+                assert!(villager.reset_villager_career(game));
+            })
+            .unwrap();
+            {
+                let host = game.lan.as_ref().unwrap();
+                let gm = host.play[&13].merchant.as_ref().unwrap();
+                let session = &gm.merchant.session;
+                assert_eq!(gm.window, window);
+                assert_eq!(gm.slots, [Some(payment), None, None]);
+                assert_eq!(host.hub.guest(13).unwrap().carried, carried);
+                assert!(session.offers.is_empty());
+                assert_eq!(session.profession, "minecraft:none");
+                assert_eq!(
+                    (session.level, session.xp, session.active, session.future_xp),
+                    (1, 0, None, 0)
+                );
+                assert!(gm.sent.is_empty());
+                assert_eq!((gm.sent_level, gm.sent_xp), (1, 0));
+            }
+
+            assert!(game.lan_merchant_closed(13, Some(window)));
+            assert!(game.lan.as_ref().unwrap().play[&13].merchant.is_none());
+            assert_eq!(villager.profession(game).as_deref(), Some("minecraft:none"));
+            assert_eq!(villager.level(game), Some(1));
+            assert_eq!(villager.xp(game), Some(0));
+            assert_eq!(villager.offers(game), Some(Vec::new()));
+            let trade = game.mobs[0].extra.trade.as_ref().unwrap();
+            assert!(trade.unset);
+            assert!(trade.offers.is_empty());
         });
     }
 
