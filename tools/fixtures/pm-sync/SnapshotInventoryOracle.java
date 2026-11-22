@@ -2,7 +2,7 @@
 // c8ab8393868e59ad6f126c34f3f3f8b83ba4feb1 (Item-NBT-API 2.16.0).
 // Add patched Paper and its libraries before HuskSync and its runtime jars
 // on the classpath. Compile and run with JDK 25 in a scratch directory.
-// Arguments: output directory, optional directory of SNBT files to verify.
+// Arguments: output directory, optional SNBT directory, optional Packed file.
 package net.william278.husksync.data;
 
 import java.lang.reflect.Proxy;
@@ -31,6 +31,7 @@ import net.minecraft.world.level.WorldDataConfiguration;
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.adapter.SnappyGsonAdapter;
 import net.william278.husksync.libraries.desertwell.util.Version;
+import net.william278.husksync.libraries.gson.JsonParser;
 import net.william278.husksync.libraries.nbtapi.utils.MinecraftVersion;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -76,8 +77,8 @@ public final class SnapshotInventoryOracle {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 1 || args.length > 2) {
-            throw new IllegalArgumentException("Pass an output directory and an optional verification directory");
+        if (args.length < 1 || args.length > 3) {
+            throw new IllegalArgumentException("Pass an output directory, optional SNBT directory, and optional Packed file");
         }
         MinecraftVersion.disableBStats();
         MinecraftVersion.disableUpdateCheck();
@@ -114,7 +115,7 @@ public final class SnapshotInventoryOracle {
         String chestData = ender.serialize(BukkitData.Items.EnderChest.adapt(chest));
         String emptyBag = inventory.serialize(BukkitData.Items.Inventory.empty());
         String emptyChest = ender.serialize(BukkitData.Items.EnderChest.empty());
-        if (args.length == 2) {
+        if (args.length >= 2) {
             var verify = Path.of(args[1]);
             assertEquivalent(bagData, Files.readString(verify.resolve("inventory.snbt")));
             assertEquivalent(chestData, Files.readString(verify.resolve("ender-chest.snbt")));
@@ -140,6 +141,13 @@ public final class SnapshotInventoryOracle {
                 Version.fromString("26.3"), "bukkit", 5);
         if (!DataSnapshot.deserialize(plugin, newer.asBytes(plugin)).isInvalid()) {
             throw new AssertionError("Paper 26.2 accepted a snapshot declaring 26.3");
+        }
+        if (args.length == 3) {
+            var rust = DataSnapshot.deserialize(plugin, Files.readAllBytes(Path.of(args[2])));
+            if (rust.isInvalid() || !JsonParser.parseString(rust.asJson(plugin))
+                    .equals(JsonParser.parseString(packed.asJson(plugin)))) {
+                throw new AssertionError("Rust Packed data changed the Java snapshot");
+            }
         }
         var output = Files.createDirectories(Path.of(args[0]));
         for (var field : Map.of("inventory.snbt", bagData, "ender-chest.snbt", chestData,
