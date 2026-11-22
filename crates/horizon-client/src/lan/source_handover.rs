@@ -102,6 +102,12 @@ struct Reservation {
     fence: Fence,
     phase: Option<Phase>,
     revision: Option<AuthorityRevision>,
+    /// The last retirement remains on disk after activation. This evidence
+    /// came from the synced player file and the authenticated control path.
+    local_return: Option<ReturnAuthorization>,
+    /// When replacing the last retirement, a failed rename may leave that
+    /// exact entry visible. The new reservation already owns this source.
+    predecessor: Option<Fence>,
     /// Keep the original capture only until initial publication succeeds.
     unpublished: Option<Handover>,
 }
@@ -153,6 +159,8 @@ impl Journal {
                                 fence,
                                 phase: Some(phase),
                                 revision,
+                                local_return: None,
+                                predecessor: None,
                                 unpublished: None,
                             },
                         );
@@ -173,6 +181,7 @@ impl Journal {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&owner)
+            .filter(|entry| entry.local_return.is_none())
             .map(|entry| entry.fence.id)
     }
 
@@ -184,7 +193,8 @@ impl Journal {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let active = fences.get(&owner)?;
-        (active.phase == Some(Phase::Retired)).then_some(active.fence.id)
+        (active.phase == Some(Phase::Retired) && active.local_return.is_none())
+            .then_some(active.fence.id)
     }
 
     /// The exact local retirement a returning owner must supersede. HSH1
@@ -194,18 +204,23 @@ impl Journal {
             .fences
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let Some(active) = fences
-            .get(&owner)
-            .filter(|entry| entry.phase == Some(Phase::Retired))
-        else {
+        let Some(active) = fences.get(&owner) else {
             return Ok(None);
         };
-        let Some(revision) = active.revision else {
+        self.read_retired_anchor(owner, active)
+    }
+
+    fn read_retired_anchor(
+        &self,
+        owner: u128,
+        active: &Reservation,
+    ) -> io::Result<Option<RetiredAnchor>> {
+        if active.phase != Some(Phase::Retired) || active.revision.is_none() {
             return Ok(None);
-        };
+        }
         let entry = read_entry(&self.path(owner))?;
         if entry.phase != Phase::Retired
-            || entry.revision != Some(revision)
+            || entry.revision != active.revision
             || entry.fence != active.fence
             || entry.handover.owner != owner
         {
@@ -213,12 +228,7 @@ impl Journal {
                 "the durable source retirement differs from its fence",
             ));
         }
-        Ok(Some(RetiredAnchor {
-            owner,
-            handover: entry.handover.id,
-            revision,
-            record_sha256: entry.handover.record_digest(),
-        }))
+        Ok(entry.retired_anchor())
     }
 
     /// Check an already authenticated return against this world's old
@@ -228,6 +238,10 @@ impl Journal {
         backend: &str,
         authorization: &ReturnAuthorization,
     ) -> io::Result<()> {
+        if self.fenced_handover(authorization.retired.owner) != Some(authorization.retired.handover)
+        {
+            return Err(invalid("the return does not name the current source fence"));
+        }
         let retired = self.retired_anchor(authorization.retired.owner)?;
         authorization.validate_for(backend, retired.as_ref())
     }
@@ -240,14 +254,46 @@ impl Journal {
         let Some(retired) = self.retired_anchor(owner)? else {
             return Ok(None);
         };
-        let world = self.directory.parent().expect("world path");
-        let Some(current) = CurrentReturn::read(world, owner)? else {
+        let Some(current) = CurrentReturn::read(self.world(), owner)? else {
             return Ok(None);
         };
         current
             .authorization()
             .validate_for(backend, Some(&retired))?;
         Ok(Some(current))
+    }
+
+    /// Activate the local owner after its exact confirmed return has been
+    /// synced to the current player file. The caller has already verified
+    /// current ownership through authenticated control. A restart requires
+    /// that verification again, even though it need not reimport the player.
+    pub fn activate_return(&self, backend: &str, expected: &ReturnAuthorization) -> io::Result<()> {
+        let owner = expected.retired.owner;
+        let mut fences = self
+            .fences
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active = fences
+            .get_mut(&owner)
+            .ok_or_else(|| invalid("the return has no local source fence"))?;
+        let retired = self.read_retired_anchor(owner, active)?;
+        expected.validate_for(backend, retired.as_ref())?;
+        if active
+            .local_return
+            .as_ref()
+            .is_some_and(|prior| prior != expected)
+        {
+            return Err(invalid("a different return already owns the local player"));
+        }
+        let current = CurrentReturn::read(self.world(), owner)?
+            .ok_or_else(|| invalid("the current player file has no committed return"))?;
+        if current.authorization() != expected {
+            return Err(invalid(
+                "the current player file belongs to a different return",
+            ));
+        }
+        active.local_return = Some(expected.clone());
+        Ok(())
     }
 
     /// Publish a new frozen hand-over, or acknowledge the same immutable
@@ -278,41 +324,77 @@ impl Journal {
             .fences
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if fences
-            .get(&handover.owner)
-            .is_some_and(|prior| prior.fence != next)
-        {
-            return Err(invalid("another source hand-over already owns this player"));
-        }
-        if !fences.contains_key(&handover.owner)
-            && fences.values().any(|prior| prior.unpublished.is_some())
-        {
+        let prior = fences.get(&handover.owner);
+        let reserve = prior.is_none_or(|entry| entry.local_return.is_some());
+        if reserve && fences.values().any(|prior| prior.unpublished.is_some()) {
             return Err(io::Error::other(
                 "an unfinished source publication must be recovered first",
             ));
         }
-        let path = self.path(handover.owner);
-        let phase = match read_entry(&path) {
-            Ok(previous) => {
-                if &previous.handover != handover || previous.revision != revision {
+        let predecessor = if let Some(prior) = prior {
+            if let Some(local) = &prior.local_return {
+                if revision.is_none_or(|revision| revision <= local.revision)
+                    || [prior.fence.id, local.handover].contains(&handover.id)
+                {
                     return Err(invalid(
-                        "the source hand-over differs from the prepared record",
+                        "the new hand-over must advance the current owner revision",
                     ));
                 }
-                previous.phase
+                if CurrentReturn::read(self.world(), handover.owner)?
+                    .as_ref()
+                    .map(CurrentReturn::authorization)
+                    != Some(local)
+                {
+                    return Err(invalid(
+                        "the current player file no longer matches local authority",
+                    ));
+                }
+                Some(prior.fence)
+            } else {
+                if prior.fence != next {
+                    return Err(invalid("another source hand-over already owns this player"));
+                }
+                prior.predecessor
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Phase::Pending,
+        } else {
+            None
+        };
+        let path = self.path(handover.owner);
+        let phase = match read_entry(&path) {
+            Ok(entry) if entry.phase == Phase::Retired && Some(entry.fence) == predecessor => {
+                Phase::Pending
+            }
+            Ok(entry) if &entry.handover == handover && entry.revision == revision => {
+                self.check_retirement_not_superseded(&entry)?;
+                entry.phase
+            }
+            Ok(_) => {
+                return Err(invalid(
+                    "the source hand-over differs from the prepared record",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && predecessor.is_none() => {
+                Phase::Pending
+            }
             Err(error) => return Err(error),
         };
         // A durable writer can error after rename. Keep the owner fenced
         // until this exact request can be reconciled, whether or not the file
         // is immediately visible. Restart uses the published file alone.
-        let active = fences.entry(handover.owner).or_insert(Reservation {
-            fence: next,
-            phase: None,
-            revision,
-            unpublished: None,
-        });
+        if reserve {
+            fences.insert(
+                handover.owner,
+                Reservation {
+                    fence: next,
+                    phase: None,
+                    revision,
+                    local_return: None,
+                    predecessor,
+                    unpublished: None,
+                },
+            );
+        }
+        let active = fences.get_mut(&handover.owner).expect("source reservation");
         let bytes = if phase == Phase::Pending {
             bytes
         } else {
@@ -325,6 +407,7 @@ impl Journal {
             return Err(error);
         }
         active.phase = Some(phase);
+        active.predecessor = None;
         active.unpublished = None;
         Ok(phase)
     }
@@ -339,7 +422,7 @@ impl Journal {
         let path = self.path(owner);
         let active = fences
             .get_mut(&owner)
-            .filter(|entry| entry.fence.id == id)
+            .filter(|entry| entry.fence.id == id && entry.local_return.is_none())
             .ok_or_else(|| invalid("the source hand-over does not match"))?;
         let (phase, handover) = match read_entry(&path) {
             Ok(entry)
@@ -347,10 +430,24 @@ impl Journal {
                     && entry.fence == active.fence
                     && entry.revision == active.revision =>
             {
+                self.check_retirement_not_superseded(&entry)?;
                 (entry.phase, entry.handover)
             }
+            Ok(entry)
+                if entry.handover.owner == owner
+                    && entry.phase == Phase::Retired
+                    && Some(entry.fence) == active.predecessor =>
+            {
+                let handover = active
+                    .unpublished
+                    .clone()
+                    .ok_or_else(|| invalid("there is no newer source reservation to recover"))?;
+                (Phase::Pending, handover)
+            }
             Ok(_) => return Err(invalid("the source hand-over does not match")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && active.predecessor.is_none() =>
+            {
                 let handover = active.unpublished.clone().ok_or(error)?;
                 (Phase::Pending, handover)
             }
@@ -358,6 +455,7 @@ impl Journal {
         };
         self.publish(&path, &handover.encode(phase, active.revision)?)?;
         active.phase = Some(phase);
+        active.predecessor = None;
         active.unpublished = None;
         Ok((phase, handover))
     }
@@ -376,15 +474,15 @@ impl Journal {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let path = self.path(owner);
-        let Entry {
-            handover,
-            fence,
-            revision,
-            ..
-        } = read_entry(&path)?;
+        let entry = read_entry(&path)?;
+        let handover = &entry.handover;
         let active = fences
             .get_mut(&owner)
-            .filter(|entry| entry.fence == fence && entry.revision == revision)
+            .filter(|active| {
+                active.fence == entry.fence
+                    && active.revision == entry.revision
+                    && active.local_return.is_none()
+            })
             .ok_or_else(|| invalid("the source hand-over does not match"))?;
         if handover.owner != owner
             || handover.id != id
@@ -393,7 +491,8 @@ impl Journal {
         {
             return Err(invalid("the source hand-over does not match"));
         }
-        self.publish(&path, &handover.encode(Phase::Retired, revision)?)?;
+        self.check_retirement_not_superseded(&entry)?;
+        self.publish(&path, &handover.encode(Phase::Retired, entry.revision)?)?;
         active.phase = Some(Phase::Retired);
         active.unpublished = None;
         Ok(())
@@ -401,6 +500,32 @@ impl Journal {
 
     fn path(&self, owner: u128) -> PathBuf {
         self.directory.join(format!("{owner:032x}.{EXTENSION}"))
+    }
+
+    // A lost old reply must not issue an actionable retirement again after
+    // the owner returned, even before this process verifies its resume.
+    fn check_retirement_not_superseded(&self, entry: &Entry) -> io::Result<()> {
+        if let Some(retired) = entry.retired_anchor() {
+            let current = CurrentReturn::read(self.world(), retired.owner)?;
+            if current
+                .as_ref()
+                .is_some_and(|witness| witness.authorization().retired == retired)
+            {
+                return Err(invalid(
+                    "the source retirement was superseded by a committed return",
+                ));
+            }
+            if current.is_none()
+                && !crate::lan::playerdata::path(self.world(), retired.owner).is_file()
+            {
+                return Err(invalid("the current source player file is unavailable"));
+            }
+        }
+        Ok(())
+    }
+
+    fn world(&self) -> &Path {
+        self.directory.parent().expect("world path")
     }
 
     fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -441,6 +566,18 @@ struct Entry {
     handover: Handover,
     fence: Fence,
     revision: Option<AuthorityRevision>,
+}
+
+impl Entry {
+    fn retired_anchor(&self) -> Option<RetiredAnchor> {
+        let revision = self.revision?;
+        (self.phase == Phase::Retired).then(|| RetiredAnchor {
+            owner: self.handover.owner,
+            handover: self.handover.id,
+            revision,
+            record_sha256: self.handover.record_digest(),
+        })
+    }
 }
 
 fn read_entry(path: &Path) -> io::Result<Entry> {
@@ -610,10 +747,7 @@ mod tests {
         drop(journal);
 
         let journal = Journal::open(world.path()).unwrap();
-        assert_eq!(
-            journal.recover(owner, handover.id).unwrap(),
-            (Phase::Retired, handover.clone())
-        );
+        assert!(journal.recover(owner, handover.id).is_err());
         let current = journal
             .current_return(&grant.destination, owner)
             .unwrap()
@@ -700,6 +834,85 @@ mod tests {
                 .is_none()
         );
         assert_eq!(journal.fenced_handover(owner), Some(handover.id));
+    }
+
+    #[test]
+    fn source_handover_activate_then_refence_keeps_the_exact_new_retry() {
+        let world = tempfile::tempdir().unwrap();
+        let first = handover();
+        let grant = a_return(&first);
+        let owner = first.owner;
+        let journal = Journal::open(world.path()).unwrap();
+        journal
+            .prepare_versioned(&first, grant.retired.revision)
+            .unwrap();
+        journal
+            .retire(owner, first.id, &first.destination, first.record_digest())
+            .unwrap();
+        assert!(journal.activate_return(&grant.destination, &grant).is_err());
+        assert_eq!(journal.fenced_handover(owner), Some(first.id));
+
+        let path = crate::lan::playerdata::path(world.path(), owner);
+        crate::save::write_dat_durable(&path, authority::committed_player(&grant)).unwrap();
+        let mut wrong = grant.clone();
+        wrong.request_sha256[0] ^= 1;
+        assert!(journal.activate_return(&grant.destination, &wrong).is_err());
+        assert_eq!(journal.fenced_handover(owner), Some(first.id));
+        journal.activate_return(&grant.destination, &grant).unwrap();
+        journal.activate_return(&grant.destination, &grant).unwrap();
+        assert_eq!(journal.fenced_handover(owner), None);
+        assert_eq!(journal.retired_handover(owner), None);
+        assert!(journal.recover(owner, first.id).is_err());
+        assert!(
+            journal
+                .retire(owner, first.id, &first.destination, first.record_digest())
+                .is_err()
+        );
+        drop(journal);
+
+        let journal = Journal::open(world.path()).unwrap();
+        // Seeing an exact newer receipt stops the old retry, but a restart
+        // still needs authenticated confirmation of current SQL ownership.
+        assert_eq!(journal.fenced_handover(owner), Some(first.id));
+        assert!(journal.recover(owner, first.id).is_err());
+        journal.activate_return(&grant.destination, &grant).unwrap();
+
+        let next = Handover {
+            id: first.id + 1,
+            record: b"new outbound snapshot".to_vec(),
+            ..first
+        };
+        let revision = AuthorityRevision::try_from(u64::from(grant.revision) + 1).unwrap();
+        assert!(journal.prepare_versioned(&next, grant.revision).is_err());
+        assert_eq!(journal.fenced_handover(owner), None);
+        let temporary = world
+            .path()
+            .join(DIRECTORY)
+            .join(format!(".{owner:032x}.{EXTENSION}.durable-new"));
+        let old = fs::read(journal.path(owner)).unwrap();
+        fs::create_dir(&temporary).unwrap();
+        assert!(journal.prepare_versioned(&next, revision).is_err());
+        assert_eq!(journal.fenced_handover(owner), Some(next.id));
+        assert_eq!(fs::read(journal.path(owner)).unwrap(), old);
+        assert!(journal.activate_return(&grant.destination, &grant).is_err());
+        fs::remove_dir(temporary).unwrap();
+        assert_eq!(
+            journal.recover(owner, next.id).unwrap(),
+            (Phase::Pending, next.clone())
+        );
+        journal
+            .retire(owner, next.id, &next.destination, next.record_digest())
+            .unwrap();
+        drop(journal);
+
+        let journal = Journal::open(world.path()).unwrap();
+        assert_eq!(journal.fenced_handover(owner), Some(next.id));
+        assert!(journal.activate_return(&grant.destination, &grant).is_err());
+        assert!(journal.recover(owner, grant.retired.handover).is_err());
+        assert_eq!(
+            journal.recover(owner, next.id).unwrap(),
+            (Phase::Retired, next)
+        );
     }
 
     #[test]
