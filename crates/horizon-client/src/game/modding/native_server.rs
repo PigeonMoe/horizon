@@ -1183,6 +1183,24 @@ impl Game<'_> {
         ))
     }
 
+    pub(super) fn native_known_player_uuid(&self, name: &str) -> Option<u128> {
+        if let Some(player) = self.native_player_by_name(name) {
+            return Some(player.uuid());
+        }
+        if !self.is_dedicated_server() {
+            return None;
+        }
+        let uuid = super::dedicated::cached_user_uuid_by_name(name)?;
+        // A join hook can see the player before the dedicated loop caches the
+        // new name. The live account takes precedence during that window too.
+        let renamed = self.lan.as_ref().is_some_and(|host| {
+            host.hub
+                .online_players()
+                .any(|player| player.uuid == uuid && !player.name.eq_ignore_ascii_case(name))
+        });
+        (!renamed).then_some(uuid)
+    }
+
     /// A connected player's record, including one displaced by a nested turn.
     pub(super) fn online_player_record(&self, player: PlayerRef) -> Option<&Guest> {
         (self.native_lifecycle.epoch()? == player.entity().epoch()).then_some(())?;

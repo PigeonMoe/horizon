@@ -184,6 +184,16 @@ pub(super) fn cached_user_by_id(id: u128) -> Option<NameAndId> {
     USER_CACHE.lock().unwrap().as_mut()?.get_by_id(id)
 }
 
+/// The UUID of a current cached account name, without updating the cache.
+pub(super) fn cached_user_uuid_by_name(name: &str) -> Option<u128> {
+    USER_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .find_by_name(name)
+        .map(|user| user.id)
+}
+
 /// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
 /// default (on) without the file or the section, off (with an error logged) when the section is wrong.
 fn load_anticheat() -> horizon_anticheat::Config {

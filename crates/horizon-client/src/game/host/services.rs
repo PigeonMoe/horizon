@@ -103,6 +103,13 @@ impl Players for Game<'_> {
         );
         self.native_acting_player()
     }
+    fn known_player_uuid(&self, name: &str) -> Option<u128> {
+        mod_api::__private::check_access(
+            "known_player_uuid",
+            mod_api::__private::LoadAccess::WorldOnly,
+        );
+        self.native_known_player_uuid(name)
+    }
 }
 impl RuntimeLevels for Game<'_> {
     fn open(&mut self, id: &str, level: RuntimeLevel) -> Result<LevelRef, RuntimeLevelError> {

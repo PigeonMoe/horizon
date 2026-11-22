@@ -12,6 +12,11 @@ players. Native and wasm mods use the same calls.
 | `host.players()` | `server_players()` returns `Vec<PlayerRef>` in connection order. `acting_player()` returns the optional player whose state is active in the hook. `player_by_name(name)` finds a connected real player by case-insensitive account name, not nickname. |
 | `host.levels()` | `list_levels()` returns loaded server levels in vanilla dimension order, or an empty list before a server world opens. |
 
+Use `host.players().known_player_uuid(name)` for a case-insensitive account-name
+lookup that needs only the UUID. It checks connected network players first and
+an unexpired current entry in the dedicated server's local profile cache second.
+It performs no network request or cache update.
+
 Player and level lookup services accept `&dyn ServerHost` and do not mutate the
 world. These services are unavailable on `Host`, `ClientHost` and restricted
 level hosts. Block and fluid scheduling uses `LevelTicksHost`;
