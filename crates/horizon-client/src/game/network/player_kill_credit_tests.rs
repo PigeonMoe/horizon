@@ -233,6 +233,58 @@ fn a_wither_killing_a_player_leaves_a_rose() {
     assert!(game.dropped.is_empty(), "the block leaves no item");
 }
 
+#[test]
+#[ignore = "daily"]
+fn a_wither_rose_drops_as_an_item_when_its_formation_is_denied() {
+    use crate::game::native_entity_refs::tests::run_on_guest_stack;
+    use mod_api::{BlockFormEvent, Flow, Hooks, LevelHost, ModEntry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ProtectCore(Arc<AtomicUsize>);
+    #[mod_api::__subscriptions]
+    impl Hooks for ProtectCore {
+        fn block_form(&self, host: &dyn LevelHost, event: &mut BlockFormEvent) -> Flow {
+            if host.state_block(event.to) != Some("minecraft:wither_rose") {
+                return Flow::Continue;
+            }
+            assert_eq!(host.state_block(event.from), Some("minecraft:air"));
+            assert_eq!([event.pos.x, event.pos.y, event.pos.z], [22, 100, 9]);
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Flow::Cancel
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let formations = Arc::new(AtomicUsize::new(0));
+        let mods = Arc::from([ModEntry::new(
+            "protect-rose-cell",
+            Box::new(ProtectCore(formations.clone())),
+        )]);
+        mod_platform::testing::with_mods(mods, || {
+            let mut resources = None;
+            let mut game = game(&mut resources);
+            assert!(game.run_command(
+                "summon wither 8.5 100 4.5 {NoAI:1b,Silent:1b,PersistenceRequired:1b}"
+            ));
+            let wither = game.mobs.last().unwrap().id;
+            kill(&mut game, wither, "minecraft:mob_attack", false);
+
+            assert_eq!(
+                &*game.res.facts().get(game.world.block(22, 100, 9)).name,
+                "minecraft:air"
+            );
+            assert_eq!(formations.load(Ordering::Relaxed), 1);
+            let rose = game
+                .dropped
+                .iter()
+                .find(|item| &*item.stack.item == "minecraft:wither_rose")
+                .unwrap();
+            assert_eq!(rose.stack.count, 1);
+            assert_eq!(rose.position.components(), [22.5, 100.0, 9.5]);
+        });
+    });
+}
+
 /// The same with mobGriefing off: the rose is an item at the death position.
 #[test]
 #[ignore = "daily"]
