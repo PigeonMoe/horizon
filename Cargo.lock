@@ -2761,6 +2761,7 @@ dependencies = [
  "horizon-world",
  "log",
  "serde",
+ "sha2",
  "ureq",
  "windows-sys 0.61.2",
 ]

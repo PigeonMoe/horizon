@@ -12,6 +12,8 @@ PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {
     # Original observer of public Paper API events, with no server implementation code.
     "tools/fixtures/paper-trace-plugin/PaperTrace.java",
+    # Original synthetic fixture driver. The PM-Sync implementation stays in its own repository.
+    "tools/fixtures/pm-sync/SnapshotEnvelopeOracle.java",
     "tools/JfrSummary.java",
     # Original generator of the Java character tables: calls only the public Character API and prints ranges; no JDK implementation source.
     "tools/JavaCharacterTables.java",
