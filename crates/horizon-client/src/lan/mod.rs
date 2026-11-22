@@ -45,6 +45,7 @@ pub mod pigeon_auth;
 pub mod player_shown;
 pub mod playerdata;
 pub mod prediction;
+mod profile_sections;
 pub mod recipes;
 mod registry_names;
 pub mod scoreboard;

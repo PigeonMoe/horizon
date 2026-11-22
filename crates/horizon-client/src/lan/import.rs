@@ -182,6 +182,7 @@ fn read_request(request: &Value) -> Result<Request<'_>, String> {
         .get("record")
         .filter(|r| r.is_object())
         .ok_or("the request needs a record")?;
+    check_record_profiles(record)?;
     let parts = match request.get("parts") {
         None | Some(Value::Null) => PARTS.to_vec(),
         Some(Value::Array(names)) => {
@@ -225,6 +226,12 @@ fn read_request(request: &Value) -> Result<Request<'_>, String> {
         place,
         arrival,
     })
+}
+
+/// Refuse required profile data before a held arrival changes or a retry can
+/// answer for an older, profile-free commit with the same hand-over id.
+pub fn check_record_profiles(record: &Value) -> Result<(), String> {
+    super::profile_sections::check_import(record)
 }
 
 /// Reads the player compound and the hand-over id out of a record, after checking the record

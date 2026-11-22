@@ -1,0 +1,128 @@
+//! Required plugin data carried by a version 2 hand-over record.
+
+use horizon_core::identifier::Identifier;
+use serde_json::Value;
+use std::collections::BTreeSet;
+
+const RECORD_VERSION: i64 = 2;
+const MAX_SECTIONS: usize = 16;
+const MAX_ID_BYTES: usize = 128;
+// The control socket permits a 16 MiB request line. This allows an 8 MiB opaque
+// profile, with up to about 10.67 MiB of base64 plus the native record and headers.
+const MAX_PROFILE_BYTES: usize = 8 << 20;
+
+/// All sections in a version 2 record are required. A receiver needs a durable
+/// placement participant for every one. Until those participants are available,
+/// refuse the import before touching the held guest or acknowledging a retry.
+pub(super) fn check_import(record: &Value) -> Result<(), String> {
+    let version = record.get("version").and_then(Value::as_i64);
+    let profiles = record.get("profiles");
+    if version != Some(RECORD_VERSION) {
+        return if profiles.is_some() {
+            Err("required profiles need a version 2 hand-over record".into())
+        } else {
+            Ok(())
+        };
+    }
+    let sections = profiles
+        .and_then(Value::as_array)
+        .filter(|sections| (1..=MAX_SECTIONS).contains(&sections.len()))
+        .ok_or("a version 2 record needs 1 to 16 required profile sections")?;
+
+    let mut ids = BTreeSet::new();
+    let mut remaining = MAX_PROFILE_BYTES;
+    let mut required = Vec::with_capacity(sections.len());
+    for section in sections {
+        let id = section["id"]
+            .as_str()
+            .filter(|id| id.len() <= MAX_ID_BYTES && Identifier::parse_namespaced(id).is_some())
+            .ok_or("a required profile needs a namespaced id of at most 128 bytes")?;
+        if !ids.insert(id) {
+            return Err(format!("the required profile {id} is listed twice"));
+        }
+        let version = section["version"]
+            .as_u64()
+            .and_then(|number| u32::try_from(number).ok())
+            .filter(|number| *number > 0)
+            .ok_or_else(|| format!("the required profile {id} needs a positive schema version"))?;
+        let encoded = section["payload"]
+            .as_str()
+            .filter(|payload| !payload.is_empty() && payload.len().is_multiple_of(4))
+            .ok_or_else(|| {
+                format!("the required profile {id} needs a nonempty padded base64 payload")
+            })?;
+        if encoded.len() > remaining.div_ceil(3) * 4 {
+            return Err("the required profiles exceed 8 MiB in total".into());
+        }
+        let bytes = crate::skins::base64_decode(encoded)
+            .filter(|payload| !payload.is_empty())
+            .ok_or_else(|| format!("the required profile {id} has an invalid base64 payload"))?;
+        remaining = remaining
+            .checked_sub(bytes.len())
+            .ok_or("the required profiles exceed 8 MiB in total")?;
+        required.push(format!("{id} (schema {version})"));
+    }
+    Err(format!(
+        "no durable receiver is available for required profiles: {}",
+        required.join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn section(id: &str, payload: &str) -> Value {
+        json!({"id": id, "version": 1, "payload": payload})
+    }
+
+    #[test]
+    fn required_profile_ids_and_schema_must_be_unambiguous() {
+        let valid = section("slimefun:profile", "U0ZQMQ==");
+        let duplicate = json!({"version": 2, "profiles": [valid, valid]});
+        assert!(
+            check_import(&duplicate)
+                .unwrap_err()
+                .contains("listed twice")
+        );
+        let unqualified = json!({"version": 2, "profiles": [section("profile", "U0ZQMQ==")]});
+        assert!(
+            check_import(&unqualified)
+                .unwrap_err()
+                .contains("namespaced id")
+        );
+        let mut bad_schema = valid.clone();
+        bad_schema["version"] = json!(0);
+        let bad_schema = json!({"version": 2, "profiles": [bad_schema]});
+        assert!(
+            check_import(&bad_schema)
+                .unwrap_err()
+                .contains("positive schema version")
+        );
+    }
+
+    #[test]
+    fn required_profiles_obey_the_aggregate_decoded_budget() {
+        let first = super::super::base64(&vec![0; MAX_PROFILE_BYTES - 1]);
+        let mut record = json!({"version": 2, "profiles": [
+            section("slimefun:profile", &first),
+            section("other:profile", "AA==")
+        ]});
+        assert!(
+            check_import(&record)
+                .unwrap_err()
+                .contains("no durable receiver")
+        );
+        // One and two bytes have the same base64 string length. The total must
+        // be bounded by decoded size as well as encoded allocation.
+        record["profiles"][1]["payload"] = json!("AAA=");
+        assert!(check_import(&record).unwrap_err().contains("exceed 8 MiB"));
+        record["profiles"][1]["payload"] = json!("%A==");
+        assert!(
+            check_import(&record)
+                .unwrap_err()
+                .contains("invalid base64")
+        );
+    }
+}

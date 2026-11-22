@@ -182,6 +182,9 @@ impl Game<'_> {
             Ok(v) => v,
             Err(e) => return json!({ "error": format!("the request is not JSON: {e}") }),
         };
+        if let Err(error) = horizon_client::lan::import::check_record_profiles(&request["record"]) {
+            return json!({ "error": error });
+        }
         let Some(host) = self.lan.as_mut() else {
             return json!({ "error": "the server is not open to players" });
         };
@@ -401,5 +404,82 @@ impl Game<'_> {
             Ok(record) => arrivals::export_reply(&host.hub, i, record),
             Err(e) => json!({ "error": e }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_client::lan::playerdata;
+    use horizon_protocol::crypto::uuid_string;
+
+    #[test]
+    #[ignore = "daily"]
+    fn required_profiles_neither_stage_nor_acknowledge_a_profile_free_commit() {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let world = tempfile::tempdir().unwrap();
+            game.world_root = world.path().to_owned();
+            let owner = 12;
+            let (index, record) = {
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.transfers = Some(arrivals::Transfers::new(arrivals::Settings::default()));
+                let index = hub.guests.connection_index(12).unwrap();
+                hub.guests.update(index, |guest| guest.xp_level = 7);
+                let record =
+                    arrivals::export_record(hub, index, true, arrivals::Records::default())
+                        .unwrap();
+                hub.guests.update(index, |guest| {
+                    guest.handover = None;
+                    guest.placed = false;
+                    guest.held = true;
+                    guest.xp_level = 0;
+                });
+                (index, record)
+            };
+            let file = playerdata::path(world.path(), owner);
+            let handover = record["handover"].as_str().unwrap();
+            let uuid = uuid_string(owner);
+            let stock = json!({"record": record, "place": false, "parts": ["experience"]});
+            let mut profiled = stock.clone();
+            profiled["record"]["version"] = json!(2);
+            profiled["record"]["profiles"] = json!([{
+                "id": "slimefun:profile", "version": 1, "payload": "U0ZQMQ=="
+            }]);
+            let unsupported = |reply: &Value| {
+                assert!(
+                    reply["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains("no durable receiver")),
+                    "{reply}"
+                );
+            };
+
+            unsupported(&game.player_request("player-import", &format!("{uuid} {profiled}")));
+            assert!(!file.exists());
+            let guest = &game.lan.as_ref().unwrap().hub.guests[index];
+            assert!(guest.held && !guest.placed && !guest.imported);
+            assert_eq!(guest.xp_level, 0);
+            assert!(
+                game.player_request("player-confirm", &format!("{uuid} {handover}"))["error"]
+                    .is_string()
+            );
+            assert!(!file.exists());
+
+            let staged = game.player_request("player-import", &format!("{uuid} {stock}"));
+            assert_eq!(staged["ok"], true, "{staged}");
+            assert_eq!(staged["placed"], false);
+            assert!(!file.exists());
+            let placed = game.player_request("player-confirm", &format!("{uuid} {handover}"));
+            assert_eq!(placed["ok"], true, "{placed}");
+            assert_eq!(placed["placed"], true);
+            let saved = std::fs::read(&file).unwrap();
+            assert_eq!(game.lan.as_ref().unwrap().hub.guests[index].xp_level, 7);
+            assert_eq!(
+                game.player_request("player-import", &format!("{uuid} {stock}"))["retried"],
+                true
+            );
+            unsupported(&game.player_request("player-import", &format!("{uuid} {profiled}")));
+            assert_eq!(std::fs::read(&file).unwrap(), saved);
+        });
     }
 }

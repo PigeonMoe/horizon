@@ -2481,6 +2481,13 @@ mod hub_tests {
             serde_json::json!({ "record": r })
         };
         cases.push(("version", with("version", serde_json::json!(2))));
+        cases.push((
+            "required profiles on a version 1 record",
+            with(
+                "profiles",
+                serde_json::json!([{ "id": "slimefun:profile", "version": 1, "payload": "U0ZQMQ==" }]),
+            ),
+        ));
         cases.push(("no version", with("version", serde_json::Value::Null)));
         cases.push(("data version", with("data_version", serde_json::json!(1))));
         cases.push((
