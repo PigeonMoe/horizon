@@ -878,7 +878,7 @@ impl Game<'_> {
         if let Some(guest) = self.lan.as_ref().and_then(|host| {
             host.hub.guests.simulation_iter().find(|guest| {
                 guest.placed
-                    && guest.participates_online()
+                    && guest.participates_in_player_simulation()
                     && guest.uuid == uuid
                     && !self.lan_guest_swaps.contains(&guest.conn)
             })

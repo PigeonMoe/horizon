@@ -310,6 +310,9 @@ impl Game<'_> {
         let Some(host) = self.lan.as_ref() else {
             return;
         };
+        if host.hub.guests[gi].profile_source_parked() {
+            return;
+        }
         let dying = host.hub.guests[gi].health <= 0.0 && !host.hub.guests[gi].dead;
         // The killing blow, for the death hooks.
         let blow = (dying && !mod_api::__private::mods().is_empty())

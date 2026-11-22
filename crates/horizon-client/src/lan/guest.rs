@@ -487,6 +487,7 @@ pub struct Guest {
     /// acknowledgements is not acted on, and every export answers with the
     /// same record. It ends after `[transfer]`'s `max_freeze_seconds`.
     pub handover: Option<super::arrivals::Handover>,
+    pub(super) profile_source_parked: bool,
     /// Its login started while a proxy said it would arrive from another
     /// server, and used that expectation up (`player-expect`).
     pub expected: bool,
@@ -656,7 +657,12 @@ impl Guest {
         self.kind == GuestKind::Network
     }
     pub fn participates_in_player_simulation(&self) -> bool {
-        self.kind == GuestKind::Network
+        self.kind == GuestKind::Network && !self.profile_source_parked()
+    }
+    /// A strict source keeps its transport and chunk view for the proxy. Its
+    /// actual record lives in the source journal rather than in this marker.
+    pub fn profile_source_parked(&self) -> bool {
+        self.profile_source_parked
     }
     /// A connectionless player a mod made (`Host::fake_player`): what `PlayerRef::is_fake`
     /// answers, and what may `perform_action`.
@@ -666,7 +672,7 @@ impl Guest {
     /// Whether the guest is online and placed in level `dimension`: one of the
     /// level's players (`ServerLevel.players`).
     pub fn placed_in(&self, dimension: &str) -> bool {
-        self.participates_online() && self.placed && self.dimension == dimension
+        self.participates_in_player_simulation() && self.placed && self.dimension == dimension
     }
     /// Whether the guest is sent level `dimension`: placed in it, or held, which
     /// looks at it without being part of it.
@@ -853,6 +859,7 @@ impl Guest {
             death_time: 0,
             placed: false,
             handover: None,
+            profile_source_parked: false,
             expected: j.expected,
             held: false,
             viewed: Default::default(),

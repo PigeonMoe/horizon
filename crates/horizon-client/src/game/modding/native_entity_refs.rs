@@ -93,10 +93,21 @@ impl Game<'_> {
 
     /// What a handle names now, or None for a stale or foreign one.
     pub(super) fn native_entity_target(&self, entity: EntityRef) -> Option<Target> {
-        if self.block_entity_tick_items.is_some() {
-            return self.scoped_native_entity_target(entity);
+        let target = if self.block_entity_tick_items.is_some() {
+            self.scoped_native_entity_target(entity)
+        } else {
+            self.unscoped_native_entity_target(entity)
+        }?;
+        if let Target::Guest(conn) = target
+            && self
+                .lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .is_some_and(|guest| guest.profile_source_parked())
+        {
+            return None;
         }
-        self.unscoped_native_entity_target(entity)
+        Some(target)
     }
     /// What a handle names on a client: the local player, or an entity the
     /// server told this client of (`ClientLevel.getEntity`, whose entities are

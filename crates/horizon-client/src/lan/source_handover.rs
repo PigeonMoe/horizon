@@ -29,7 +29,7 @@ pub enum Phase {
 
 /// The portable envelope is sent only to the selected destination. The
 /// checkpoint keeps the source's own fields for recovery on cancellation.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Handover {
     pub owner: u128,
     pub id: u128,
@@ -79,10 +79,18 @@ struct Fence {
 }
 
 #[derive(Debug)]
+struct Reservation {
+    fence: Fence,
+    phase: Option<Phase>,
+    /// Keep the original capture only until initial publication succeeds.
+    unpublished: Option<Handover>,
+}
+
+#[derive(Debug)]
 pub struct Journal {
     directory: PathBuf,
     // Serialize transitions and publication with the login/admission readers.
-    fences: Mutex<HashMap<u128, Fence>>,
+    fences: Mutex<HashMap<u128, Reservation>>,
 }
 
 impl Journal {
@@ -108,13 +116,20 @@ impl Journal {
                                     .filter(|owner| format!("{owner:032x}") == stem)
                             })
                             .ok_or_else(|| invalid("invalid source hand-over filename"))?;
-                        let (_, handover, fence) = read_entry(&path)?;
+                        let (phase, handover, fence) = read_entry(&path)?;
                         if handover.owner != owner {
                             return Err(invalid(
                                 "source hand-over owner does not match its filename",
                             ));
                         }
-                        fences.insert(owner, fence);
+                        fences.insert(
+                            owner,
+                            Reservation {
+                                fence,
+                                phase: Some(phase),
+                                unpublished: None,
+                            },
+                        );
                     }
                 }
             }
@@ -132,7 +147,18 @@ impl Journal {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&owner)
-            .map(|fence| fence.id)
+            .map(|entry| entry.fence.id)
+    }
+
+    /// Read a retired ID without opening a payload again. Control replies
+    /// first call `retire` to durably reconcile the exact destination and digest.
+    pub fn retired_handover(&self, owner: u128) -> Option<u128> {
+        let fences = self
+            .fences
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active = fences.get(&owner)?;
+        (active.phase == Some(Phase::Retired)).then_some(active.fence.id)
     }
 
     /// Publish a new frozen hand-over, or acknowledge the same immutable
@@ -147,46 +173,80 @@ impl Journal {
             .unwrap_or_else(|error| error.into_inner());
         if fences
             .get(&handover.owner)
-            .is_some_and(|prior| *prior != next)
+            .is_some_and(|prior| prior.fence != next)
         {
             return Err(invalid("another source hand-over already owns this player"));
         }
+        if !fences.contains_key(&handover.owner)
+            && fences.values().any(|prior| prior.unpublished.is_some())
+        {
+            return Err(io::Error::other(
+                "an unfinished source publication must be recovered first",
+            ));
+        }
         let path = self.path(handover.owner);
-        match read_entry(&path) {
+        let phase = match read_entry(&path) {
             Ok((phase, previous, _)) => {
                 if &previous != handover {
                     return Err(invalid(
                         "the source hand-over differs from the prepared record",
                     ));
                 }
-                fences.insert(handover.owner, next);
-                self.publish(&path, &handover.encode(phase)?)?;
-                return Ok(phase);
+                phase
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Phase::Pending,
             Err(error) => return Err(error),
-        }
+        };
         // A durable writer can error after rename. Keep the owner fenced
         // until this exact request can be reconciled, whether or not the file
         // is immediately visible. Restart uses the published file alone.
-        fences.insert(handover.owner, next);
-        self.publish(&path, &bytes)?;
-        Ok(Phase::Pending)
+        let active = fences.entry(handover.owner).or_insert(Reservation {
+            fence: next,
+            phase: None,
+            unpublished: None,
+        });
+        let bytes = if phase == Phase::Pending {
+            bytes
+        } else {
+            handover.encode(phase)?
+        };
+        if let Err(error) = self.publish(&path, &bytes) {
+            if active.phase.is_none() && active.unpublished.is_none() {
+                active.unpublished = Some(handover.clone());
+            }
+            return Err(error);
+        }
+        active.phase = Some(phase);
+        active.unpublished = None;
+        Ok(phase)
     }
 
     /// Recover the immutable snapshot only after rechecking its on-disk seal
     /// and republishing the exact entry if an earlier reply was ambiguous.
     pub fn recover(&self, owner: u128, id: u128) -> io::Result<(Phase, Handover)> {
-        let fences = self
+        let mut fences = self
             .fences
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let path = self.path(owner);
-        let (phase, handover, active) = read_entry(&path)?;
-        if handover.owner != owner || handover.id != id || fences.get(&owner) != Some(&active) {
-            return Err(invalid("the source hand-over does not match"));
-        }
+        let active = fences
+            .get_mut(&owner)
+            .filter(|entry| entry.fence.id == id)
+            .ok_or_else(|| invalid("the source hand-over does not match"))?;
+        let (phase, handover) = match read_entry(&path) {
+            Ok((phase, handover, fence)) if handover.owner == owner && fence == active.fence => {
+                (phase, handover)
+            }
+            Ok(_) => return Err(invalid("the source hand-over does not match")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let handover = active.unpublished.clone().ok_or(error)?;
+                (Phase::Pending, handover)
+            }
+            Err(error) => return Err(error),
+        };
         self.publish(&path, &handover.encode(phase)?)?;
+        active.phase = Some(phase);
+        active.unpublished = None;
         Ok((phase, handover))
     }
 
@@ -199,21 +259,27 @@ impl Journal {
         destination: &str,
         record_digest: [u8; 32],
     ) -> io::Result<()> {
-        let fences = self
+        let mut fences = self
             .fences
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let path = self.path(owner);
-        let (_, handover, active) = read_entry(&path)?;
+        let (_, handover, fence) = read_entry(&path)?;
+        let active = fences
+            .get_mut(&owner)
+            .filter(|entry| entry.fence == fence)
+            .ok_or_else(|| invalid("the source hand-over does not match"))?;
         if handover.owner != owner
             || handover.id != id
-            || fences.get(&owner) != Some(&active)
             || handover.destination != destination
             || handover.record_digest() != record_digest
         {
             return Err(invalid("the source hand-over does not match"));
         }
-        self.publish(&path, &handover.encode(Phase::Retired)?)
+        self.publish(&path, &handover.encode(Phase::Retired)?)?;
+        active.phase = Some(Phase::Retired);
+        active.unpublished = None;
+        Ok(())
     }
 
     fn path(&self, owner: u128) -> PathBuf {
@@ -408,6 +474,12 @@ mod tests {
         fs::create_dir(&temporary).unwrap();
         assert!(journal.prepare(&transfer).is_err());
         assert_eq!(journal.fenced_handover(transfer.owner), Some(transfer.id));
+        let other = Handover {
+            owner: transfer.owner + 1,
+            ..transfer.clone()
+        };
+        assert!(journal.prepare(&other).is_err());
+        assert_eq!(journal.fenced_handover(other.owner), None);
         assert_eq!(
             Journal::open(world.path())
                 .unwrap()
@@ -415,11 +487,16 @@ mod tests {
             None
         );
         fs::remove_dir(temporary).unwrap();
-        assert_eq!(journal.prepare(&transfer).unwrap(), Phase::Pending);
+        assert!(journal.recover(transfer.owner, transfer.id + 1).is_err());
+        assert_eq!(
+            journal.recover(transfer.owner, transfer.id).unwrap(),
+            (Phase::Pending, transfer.clone())
+        );
         let reopened = Journal::open(world.path()).unwrap();
         assert_eq!(
             reopened.recover(transfer.owner, transfer.id).unwrap(),
             (Phase::Pending, transfer)
         );
+        assert_eq!(journal.prepare(&other).unwrap(), Phase::Pending);
     }
 }

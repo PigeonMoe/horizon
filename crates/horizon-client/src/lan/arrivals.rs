@@ -1943,6 +1943,109 @@ mod hub_tests {
     }
 
     #[test]
+    fn a_profile_source_keeps_network_acks_without_legacy_unfreeze_or_detach() {
+        use crate::lan::{
+            guest::InboxItem,
+            source_handover::{Handover, Journal},
+        };
+        use horizon_protocol::packets::play::{ChunkBatchReceived, MovePlayerPos, Serverbound};
+        use std::sync::Arc;
+
+        crate::raw_payloads::test_support::with_peer(|transport| {
+            let root = tempfile::tempdir().unwrap();
+            let journal = Arc::new(Journal::open(root.path()).unwrap());
+            let record = Handover {
+                owner: UUID_N,
+                id: 58,
+                destination: "receiver".into(),
+                record: b"portable record".to_vec(),
+                local_checkpoint: b"source checkpoint".to_vec(),
+            };
+            let mut hub = hub_with(NetConfig {
+                source_handovers: Some(journal.clone()),
+                ..NetConfig::loopback(0, "Strict source".into(), 4)
+            });
+            let (mut player, _old_output) = guest(1, record.owner, "Source");
+            let (sender, owner) = channel();
+            player.sender =
+                PlayerSender::new_with_payload_transport(sender, Arc::default(), transport);
+            player.placed = true;
+            let before = player.position;
+            hub.guests.push(player);
+            journal.prepare(&record).unwrap();
+            assert!(hub.park_profile_source(0, record.id));
+            assert!(!hub.detach_retired_profile_source(record.owner));
+            assert!(!hub.here(&hub.guests[0]));
+            assert!(hub.watches(&hub.guests[0]));
+            assert!(hub.online_players().next().is_none());
+            let mut world = crate::world::World::new(horizon_world::registry::BlockStateId(0), 0);
+            let border = crate::worldborder::WorldBorder::default();
+            let mut next = 100;
+            let mut ctx = tick_context(&mut world, &border, &mut next);
+            let sender = hub.guests[0].sender.clone();
+            let raw = crate::raw_payloads::test_support::delivery(1, sender, vec![1]);
+            let ingress = hub.lan.shared.events.clone();
+            ingress.send(crate::lan::NetEvent::RawPayload(raw)).unwrap();
+            drop(hub.poll(&mut ctx));
+
+            hub.guests.update(0, |guest| {
+                guest.unacknowledged = 2;
+                guest.inbox.extend([
+                    InboxItem::uncredited(Serverbound::MovePlayerPos(MovePlayerPos {
+                        x: before[0] + 30.0,
+                        y: before[1],
+                        z: before[2],
+                        flags: 1,
+                    })),
+                    InboxItem::uncredited(Serverbound::ChunkBatchReceived(ChunkBatchReceived {
+                        chunks_per_tick: 9.0,
+                    })),
+                ]);
+            });
+            let events = hub.drain_packets(&mut ctx);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, crate::lan::hub::HostEvent::RawPayload(_)))
+            );
+            assert!(!hub.packets_paused());
+            drop(events);
+            assert_eq!(ingress.stats().reserved_bytes, 0);
+            assert_eq!(hub.guests[0].position, before);
+            assert_eq!(hub.guests[0].unacknowledged, 1);
+            hub.ticks += super::Settings::default().max_freeze_ticks + 1;
+            hub.poll(&mut ctx);
+            assert!(hub.guests[0].profile_source_parked());
+            assert!(
+                !owner
+                    .try_iter()
+                    .any(|out| matches!(out, Out::Disconnect(_)))
+            );
+            let id = super::handover_text(record.id);
+            for how in ["abort", "moved"] {
+                assert!(
+                    super::release_request(&mut hub, &format!("{UUID} {id} {how}"))["error"]
+                        .is_string()
+                );
+            }
+            journal
+                .retire(
+                    record.owner,
+                    record.id,
+                    &record.destination,
+                    record.record_digest(),
+                )
+                .unwrap();
+            assert!(hub.detach_retired_profile_source(record.owner));
+            assert!(hub.detach_retired_profile_source(record.owner));
+            let left = left_events(&mut hub);
+            assert_eq!(left.len(), 1);
+            assert!(left[0].released);
+            assert_eq!(hub.source_frozen_handover(record.owner), Some(record.id));
+        });
+    }
+
+    #[test]
     fn the_freeze_lasts_the_settings_ticks() {
         assert_eq!(super::Settings::default().max_freeze_ticks, 600);
         assert!(!super::frozen_too_long(10, 10 + 599, 600));

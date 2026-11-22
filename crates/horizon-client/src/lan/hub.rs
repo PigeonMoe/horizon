@@ -1032,7 +1032,7 @@ impl Hub {
     pub fn online_players(&self) -> impl Iterator<Item = &Guest> {
         self.guests
             .simulation_iter()
-            .filter(|g| g.placed && g.participates_online())
+            .filter(|g| g.placed && g.participates_in_player_simulation())
     }
     /// The number of network guests, including those still joining.
     pub fn online_count(&self) -> usize {
@@ -1311,6 +1311,9 @@ impl Hub {
             self.kick(conn, translatable("disconnect.timeout", &[]));
         }
         self.guests.update_all(|g| {
+            if g.profile_source_parked() {
+                return;
+            }
             let Some(h) = &g.handover else {
                 return;
             };
@@ -1771,6 +1774,62 @@ impl Hub {
 
     pub fn source_frozen_handover(&self, owner: u128) -> Option<u128> {
         self.lan.shared.source_frozen_handover(owner)
+    }
+
+    /// Keep this backend connection responsive to the proxy while the
+    /// source fence owns its state. The game calls this between guest turns.
+    pub fn park_profile_source(&mut self, index: usize, id: u128) -> bool {
+        let Some(guest) = self.guests.get(index) else {
+            return false;
+        };
+        if !guest.placed
+            || guest.held
+            || !guest.participates_online()
+            || self.source_frozen_handover(guest.uuid) != Some(id)
+        {
+            return false;
+        }
+        self.deferred_payloads.remove(&Some(guest.conn));
+        let since = self.ticks;
+        self.guests.update(index, |guest| {
+            guest.pending_move = None;
+            guest.profile_source_parked = true;
+            guest.handover = Some(super::arrivals::Handover {
+                id,
+                since,
+                record: serde_json::Value::Null,
+            });
+        });
+        true
+    }
+
+    /// Detach a parked source only after a durable retirement. A proxy
+    /// may repeat the detach after the original connection has gone away.
+    pub fn detach_retired_profile_source(&mut self, owner: u128) -> bool {
+        let Some(id) = self
+            .lan
+            .shared
+            .config
+            .source_handovers
+            .as_ref()
+            .and_then(|journal| journal.retired_handover(owner))
+        else {
+            return false;
+        };
+        if let Some(index) = self
+            .guests
+            .iter()
+            .position(|guest| guest.uuid == owner && guest.participates_online())
+        {
+            let guest = &self.guests[index];
+            if !guest.profile_source_parked()
+                || guest.handover.as_ref().map(|handover| handover.id) != Some(id)
+            {
+                return false;
+            }
+            self.release_handover_guest(index, false);
+        }
+        true
     }
 
     /// The guest index of the player `uuid` placed from the hand-over `id` (its import or
@@ -2428,17 +2487,25 @@ impl Hub {
     /// here in arrival order: the client counts them as acknowledged, and its next
     /// message after the freeze would not validate otherwise.
     pub(crate) fn keep_acknowledgements(&mut self, i: usize, events: &mut Vec<HostEvent>) {
+        let strict_source = self.guests[i].profile_source_parked();
         let inbox = self.guests.update(i, |g| std::mem::take(&mut g.inbox));
         let mut credits = Vec::new();
         let mut inbox = inbox.into_iter();
         while let Some(entry) = inbox.next() {
-            let InboxItem::Packet(packet, credit) = entry else {
-                // Never filter or acknowledge past a raw callback boundary.
-                self.guests.update(i, |g| {
-                    g.inbox.push_back(entry);
-                    g.inbox.extend(inbox);
-                });
-                break;
+            let (packet, credit) = match entry {
+                InboxItem::Packet(packet, credit) => (packet, credit),
+                InboxItem::Raw(_, credit) if strict_source => {
+                    credits.push(credit);
+                    continue;
+                }
+                raw @ InboxItem::Raw(_, _) => {
+                    // Ordinary holds preserve the ordering of raw callbacks.
+                    self.guests.update(i, |g| {
+                        g.inbox.push_back(raw);
+                        g.inbox.extend(inbox);
+                    });
+                    break;
+                }
             };
             match &packet {
                 S::Chat(c) => {
@@ -2657,6 +2724,11 @@ impl Hub {
         announce: bool,
     ) -> Result<(), &'static str> {
         let i = self.handover_of(uuid, id)?;
+        self.release_handover_guest(i, announce);
+        Ok(())
+    }
+
+    fn release_handover_guest(&mut self, i: usize, announce: bool) {
         self.guests.update(i, |g| {
             g.quiet_leave = !announce;
             g.left_reason = "moved to another server".to_owned();
@@ -2665,13 +2737,16 @@ impl Hub {
         });
         let mut gone = self.remove_guest(i, "moved to another server");
         gone.released = true;
+        gone.profile_source_parked = false;
         gone.handover = None;
         self.pending_kicks.push(HostEvent::Left(Box::new(gone)));
-        Ok(())
     }
 
     /// The guest index of the player `uuid` while it is frozen for the hand-over `id`.
     pub fn handover_of(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        if self.source_frozen_handover(uuid).is_some() {
+            return Err("the player is fenced by a source hand-over");
+        }
         let Some(i) = self.guests.iter().position(|g| g.uuid == uuid) else {
             return Err("that player is not connected to this server");
         };
@@ -4087,6 +4162,16 @@ impl Hub {
                     if !self.guests[i].client_loaded() => {}
                 // handleAcceptTeleportPacket.
                 S::AcceptTeleportation(p) => {
+                    if self.guests[i].profile_source_parked() {
+                        // Finish the wire handshake without replaying a source-world
+                        // movement after the authoritative record was sealed.
+                        self.guests.update(i, |guest| {
+                            if guest.awaiting_teleport.is_some_and(|(id, _)| id == p.id) {
+                                guest.awaiting_teleport = None;
+                            }
+                        });
+                        continue;
+                    }
                     let recording = self.recording();
                     let g = &self.guests[i];
                     if p.id == g.teleport_counter && g.awaiting_teleport.is_none() {

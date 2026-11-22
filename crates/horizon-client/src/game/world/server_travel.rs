@@ -707,6 +707,9 @@ impl Game<'_> {
         let Some(g) = host.hub.guest(conn) else {
             return;
         };
+        if g.profile_source_parked() {
+            return;
+        }
         let (at, invulnerable, sleeping, riding) = (
             Vec3::new(g.position[0], g.position[1], g.position[2]),
             g.creative(),
@@ -958,6 +961,9 @@ impl Game<'_> {
         let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
             return;
         };
+        if g.profile_source_parked() {
+            return;
+        }
         let origin = (!credits_respawn && self.subscribed_portal_teleport())
             .then(|| PlayerTravelOrigin::capture(g));
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);

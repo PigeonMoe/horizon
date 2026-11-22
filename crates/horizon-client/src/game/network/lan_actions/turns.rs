@@ -134,7 +134,12 @@ impl Game<'_> {
         let Some(host) = self.lan.as_mut() else {
             return Err(TurnRefused::Gone);
         };
-        if host.hub.guests.get(i).is_none_or(|g| g.conn != conn) {
+        if host
+            .hub
+            .guests
+            .get(i)
+            .is_none_or(|g| g.conn != conn || g.profile_source_parked())
+        {
             return Err(TurnRefused::Gone);
         }
         // An active guest's record holds an outer player's state, not theirs.
