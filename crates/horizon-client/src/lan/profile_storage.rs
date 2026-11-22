@@ -3,13 +3,12 @@
 //! The immutable bytes are written before the player file references them.
 //! Unreferenced bytes from an interrupted placement have no authority.
 
-use super::playerdata;
-#[cfg(test)]
-use super::profile_sections::MAX_PROFILE_BYTES;
+use super::{playerdata, profile_sections::MAX_PROFILE_BYTES};
 use horizon_core::{
     identifier::Identifier,
     nbt::{Compound, Tag},
 };
+use mod_api::TransferProfileReadError;
 use sha2::{Digest, Sha256};
 use std::{
     io::{ErrorKind, Read},
@@ -57,7 +56,6 @@ impl Marker {
         ])
     }
 
-    #[cfg(test)]
     fn from_tag(tag: &Tag) -> Option<Self> {
         let Tag::ByteArray(generation) = tag.get("generation")? else {
             return None;
@@ -91,7 +89,7 @@ impl Marker {
         ))
     }
 
-    fn verify_read(&self, file: &Path) -> std::io::Result<Vec<u8>> {
+    fn verify_metadata(&self, file: &Path) -> std::io::Result<()> {
         let metadata = std::fs::symlink_metadata(file)?;
         if !metadata.is_file() || metadata.len() != self.len as u64 {
             return Err(std::io::Error::new(
@@ -99,6 +97,11 @@ impl Marker {
                 "invalid profile length",
             ));
         }
+        Ok(())
+    }
+
+    fn verify_read(&self, file: &Path) -> std::io::Result<Vec<u8>> {
+        self.verify_metadata(file)?;
         let mut bytes = Vec::with_capacity(self.len);
         std::fs::File::open(file)?
             .take(self.len as u64 + 1)
@@ -184,20 +187,60 @@ pub(super) fn has_markers(saved: Option<&Tag>) -> bool {
 
 /// Read the marker for an explicitly named section. A malformed local marker
 /// is an error and cannot be treated as an owner whose only copy is legacy.
-#[cfg(test)]
-fn read_marker(saved: &Tag, id: &Identifier) -> Result<Option<Marker>, String> {
-    let Some(root) = saved.get(MARKERS) else {
+fn read_marker(
+    saved: Option<&Tag>,
+    id: &Identifier,
+) -> Result<Option<Marker>, TransferProfileReadError> {
+    let Some(saved) = saved else {
+        return Ok(None);
+    };
+    let Tag::Compound(saved) = saved else {
+        return Err(TransferProfileReadError::Corrupt);
+    };
+    let Some(root) = saved.get(&MARKERS.into()) else {
         return Ok(None);
     };
     let Tag::Compound(root) = root else {
-        return Err("invalid transfer profile markers".into());
+        return Err(TransferProfileReadError::Corrupt);
     };
     let Some(tag) = root.get(&id.to_string().as_str().into()) else {
         return Ok(None);
     };
     Marker::from_tag(tag)
         .map(Some)
-        .ok_or("invalid transfer profile marker".into())
+        .ok_or(TransferProfileReadError::Corrupt)
+}
+
+pub(super) fn active_generation(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &Identifier,
+) -> Result<Option<u128>, TransferProfileReadError> {
+    let Some(marker) = read_marker(saved, id)? else {
+        return Ok(None);
+    };
+    let file = marker.path(&world.join("players").join("data"), owner, id);
+    marker
+        .verify_metadata(&file)
+        .map_err(|_| TransferProfileReadError::Corrupt)?;
+    Ok(Some(marker.generation))
+}
+
+pub(super) fn active_payload(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &Identifier,
+    generation: u128,
+) -> Result<Vec<u8>, TransferProfileReadError> {
+    let marker = read_marker(saved, id)?
+        .filter(|marker| marker.generation == generation)
+        .ok_or(TransferProfileReadError::StaleGeneration)?;
+    let file = marker.path(&world.join("players").join("data"), owner, id);
+    marker
+        .verify_read(&file)
+        .map_err(|_| TransferProfileReadError::Corrupt)
 }
 
 #[cfg(test)]
@@ -218,7 +261,7 @@ mod tests {
             &mut player,
             [("slimefun:profile".into(), first.to_tag())].into(),
         );
-        let loaded = read_marker(&player, &id).unwrap().unwrap();
+        let loaded = read_marker(Some(&player), &id).unwrap().unwrap();
         assert_eq!((loaded.generation, loaded.schema), (7, 1));
         assert_eq!(loaded.verify_read(&path).unwrap(), source);
 
@@ -229,6 +272,6 @@ mod tests {
         std::fs::write(&path, changed).unwrap();
         assert!(loaded.verify_read(&path).is_err());
         clear_markers(&mut player);
-        assert!(read_marker(&player, &id).unwrap().is_none());
+        assert!(read_marker(Some(&player), &id).unwrap().is_none());
     }
 }

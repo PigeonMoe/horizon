@@ -59,3 +59,27 @@ impl crate::NoBackend for PlayerFlagReadError {
         Self::Unavailable
     }
 }
+
+/// Access to a mod's committed, world-local transfer profile section was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum TransferProfileReadError {
+    /// No current server-world player data is available.
+    Unavailable,
+    /// The section does not belong to the calling package's namespace.
+    NotOwned,
+    /// The owner's current state or the durable section cannot be verified.
+    Corrupt,
+    /// The owner is frozen on the source or held on the destination.
+    Transferring,
+    /// The owner has been released to another server.
+    Away,
+    /// The requested generation is no longer the owner's active copy.
+    StaleGeneration,
+}
+
+impl crate::NoBackend for TransferProfileReadError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}

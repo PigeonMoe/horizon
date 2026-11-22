@@ -496,6 +496,10 @@ mod tests {
         use horizon_client::lan::{import, playerdata};
         use horizon_client::save::read_dat;
         use horizon_core::{identifier::Identifier, nbt::Tag};
+        use mod_api::{
+            ServerHost, TransferProfileReadError as Error,
+            content::crash::{ModCall, enter_native_mod},
+        };
 
         crate::game::native_guest_turn_tests::with_guests(|game| {
             let world = tempfile::tempdir().unwrap();
@@ -527,6 +531,26 @@ mod tests {
             let handover = record["handover"].as_str().unwrap().to_owned();
             let uuid = uuid_string(owner);
             let id = Identifier::parse_namespaced("slimefun:profile").unwrap();
+            let foreign = Identifier::parse_namespaced("other:profile").unwrap();
+            let host: &dyn ServerHost = game;
+            assert_eq!(
+                host.player_transfer_profile_generation(owner, &id),
+                Err(Error::NotOwned)
+            );
+            let _scope = enter_native_mod(ModCall {
+                id: "slimefun",
+                hook: "test_transfer_profile_read",
+                part: None,
+            });
+            assert_eq!(
+                host.player_transfer_profile_generation(owner, &foreign),
+                Err(Error::NotOwned)
+            );
+            assert_eq!(
+                host.player_transfer_profile_generation(owner, &id),
+                Err(Error::Transferring)
+            );
+            assert_eq!(host.player_transfer_profile_generation(999, &id), Ok(None));
             record["version"] = json!(2);
             record["profiles"] = json!([{
                 "id": id.to_string(), "version": 1, "payload": "U0ZQMQ=="
@@ -605,6 +629,52 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains("no source collector")
+            );
+            let generation = arrivals::parse_handover(&handover).unwrap();
+            let verify_owned = |host: &dyn ServerHost| {
+                assert_eq!(
+                    host.player_transfer_profile_generation(owner, &id),
+                    Ok(Some(generation))
+                );
+                assert_eq!(
+                    host.player_transfer_profile_payload(owner, &id, generation),
+                    Ok(b"SFP1".to_vec())
+                );
+                assert_eq!(
+                    host.player_transfer_profile_payload(owner, &id, generation ^ 1),
+                    Err(Error::StaleGeneration)
+                );
+            };
+            verify_owned(game);
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            let leaving = hub.guests.connection_index(13).unwrap();
+            hub.guests.update(leaving, |guest| guest.released = true);
+            let host: &dyn ServerHost = game;
+            assert_eq!(
+                host.player_transfer_profile_generation(13, &id),
+                Err(Error::Away)
+            );
+            game.lan.as_mut().unwrap().hub.guests.remove(index);
+            verify_owned(game);
+
+            let player_file = std::fs::read(&file).unwrap();
+            std::fs::write(&file, b"damaged current player file").unwrap();
+            let host: &dyn ServerHost = game;
+            assert!(backup.is_file(), "the unmarked backup exists");
+            assert_eq!(
+                host.player_transfer_profile_generation(owner, &id),
+                Err(Error::Corrupt)
+            );
+            std::fs::write(&file, player_file).unwrap();
+            std::fs::write(&section_files[0], b"oops").unwrap();
+            assert_eq!(
+                host.player_transfer_profile_payload(owner, &id, generation),
+                Err(Error::Corrupt)
+            );
+            std::fs::remove_file(&section_files[0]).unwrap();
+            assert_eq!(
+                host.player_transfer_profile_generation(owner, &id),
+                Err(Error::Corrupt)
             );
         });
     }

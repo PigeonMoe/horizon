@@ -409,6 +409,27 @@ fn replace_profile_pdc(tag: &mut Tag, pdc: Compound) {
     }
 }
 
+/// Check committed metadata without decompressing or reading the sidecar payload.
+pub fn transfer_profile_generation(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &horizon_core::identifier::Identifier,
+) -> Result<Option<u128>, mod_api::TransferProfileReadError> {
+    super::profile_storage::active_generation(world, owner, saved, id)
+}
+
+/// Verify the payload of exactly the marker the engine selected for this owner.
+pub fn transfer_profile_payload(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &horizon_core::identifier::Identifier,
+    generation: u128,
+) -> Result<Vec<u8>, mod_api::TransferProfileReadError> {
+    super::profile_storage::active_payload(world, owner, saved, id, generation)
+}
+
 /// An immutable player snapshot. Compression and all filesystem work belong to
 /// the writer; native callbacks are delivered by the server after completion.
 struct Snapshot {

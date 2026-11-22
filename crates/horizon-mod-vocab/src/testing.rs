@@ -197,6 +197,10 @@ pub struct FakeHost {
     pub players: FakePlayers,
     /// Source hand-overs that currently freeze a player's state.
     pub frozen_player_handovers: BTreeMap<u128, u128>,
+    /// Committed owner profiles keyed by owner and namespaced section ID.
+    pub transfer_profiles: BTreeMap<(u128, crate::Identifier), (u128, Vec<u8>)>,
+    /// Refusals the active profile store reports before exposing an owner's state.
+    pub transfer_profile_refusals: BTreeMap<u128, crate::TransferProfileReadError>,
     /// The one level.
     pub level: FakeLevel,
     /// The command service.
@@ -335,6 +339,35 @@ impl crate::prelude::PlayersHost for FakeHost {
 impl crate::prelude::PlayersServerHost for FakeHost {
     fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
         self.frozen_player_handovers.get(&owner).copied()
+    }
+
+    fn player_transfer_profile_generation(
+        &self,
+        owner: u128,
+        id: &crate::Identifier,
+    ) -> Result<Option<u128>, crate::TransferProfileReadError> {
+        if self.frozen_player_handovers.contains_key(&owner) {
+            return Err(crate::TransferProfileReadError::Transferring);
+        }
+        if let Some(error) = self.transfer_profile_refusals.get(&owner) {
+            return Err(*error);
+        }
+        Ok(self
+            .transfer_profiles
+            .get(&(owner, id.clone()))
+            .map(|entry| entry.0))
+    }
+
+    fn player_transfer_profile_payload(
+        &self,
+        owner: u128,
+        id: &crate::Identifier,
+        generation: u128,
+    ) -> Result<Vec<u8>, crate::TransferProfileReadError> {
+        if self.player_transfer_profile_generation(owner, id)? != Some(generation) {
+            return Err(crate::TransferProfileReadError::StaleGeneration);
+        }
+        Ok(self.transfer_profiles[&(owner, id.clone())].1.clone())
     }
 }
 impl crate::prelude::ItemsHost for FakeHost {

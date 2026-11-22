@@ -27,6 +27,26 @@ pub trait PlayersServerHost {
     #[access(WorldOnly)]
     fn player_frozen_handover(&self, owner: u128) -> Option<u128>;
 
+    /// The committed generation of the calling mod's profile section, for a live
+    /// or offline owner in this world. `Ok(None)` means there is no committed
+    /// section. An unreadable, held, frozen or released owner reports an error.
+    #[access(WorldOnly)]
+    fn player_transfer_profile_generation(
+        &self,
+        owner: u128,
+        id: &Identifier,
+    ) -> Result<Option<u128>, TransferProfileReadError>;
+
+    /// Read the calling mod's immutable payload for the supplied active owner
+    /// generation. The server rechecks the generation and verifies the bytes.
+    #[access(WorldOnly)]
+    fn player_transfer_profile_payload(
+        &self,
+        owner: u128,
+        id: &Identifier,
+        generation: u128,
+    ) -> Result<Vec<u8>, TransferProfileReadError>;
+
     /// Side: server. Select which of the requested `PlayerPersisted` byte
     /// flags are exactly 1. Every key must belong to the calling package's
     /// namespace. The returned keys follow the request order.
