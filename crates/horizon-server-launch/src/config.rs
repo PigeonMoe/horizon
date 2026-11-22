@@ -556,6 +556,8 @@ pub struct Transfer {
     pub max_freeze_seconds: u32,
     pub max_hold_seconds: u32,
     pub stop_wait_seconds: u32,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub required_profiles: BTreeMap<String, u32>,
 }
 
 impl Default for Transfer {
@@ -568,12 +570,29 @@ impl Default for Transfer {
             max_freeze_seconds: 30,
             max_hold_seconds: 60,
             stop_wait_seconds: 10,
+            required_profiles: BTreeMap::new(),
         }
     }
 }
 
 impl Transfer {
     fn check(&self) -> Result<(), String> {
+        if !self.required_profiles.is_empty() && !self.enabled {
+            return Err("transfer.required_profiles needs transfer.enabled".into());
+        }
+        if self.required_profiles.len() > 16 {
+            return Err("transfer.required_profiles may contain up to 16 sections".into());
+        }
+        for (id, &schema) in &self.required_profiles {
+            if schema == 0
+                || id.len() > 128
+                || horizon_core::identifier::Identifier::parse_namespaced(id).is_none()
+            {
+                return Err(format!(
+                    "invalid transfer.required_profiles section {id:?} or schema"
+                ));
+            }
+        }
         for (name, n) in [
             ("expect_seconds", self.expect_seconds),
             ("max_expect_seconds", self.max_expect_seconds),
@@ -608,7 +627,7 @@ impl Transfer {
     /// The game's `--transfers` value, when the section turns transfers on.
     pub fn engine_arg(&self) -> Option<String> {
         self.enabled.then(|| {
-            format!(
+            let mut options = format!(
                 "expect_seconds={},max_expect_seconds={},max_expected={},max_freeze_seconds={},max_hold_seconds={},stop_wait_seconds={}",
                 self.expect_seconds,
                 self.max_expect_seconds,
@@ -616,7 +635,13 @@ impl Transfer {
                 self.max_freeze_seconds,
                 self.max_hold_seconds,
                 self.stop_wait_seconds
-            )
+            );
+            if !self.required_profiles.is_empty() {
+                let required = self.required_profiles.iter().map(|(id, schema)| format!("{id}@{schema}")).collect::<Vec<_>>();
+                options.push_str(",required_profiles=");
+                options.push_str(&required.join(";"));
+            }
+            options
         })
     }
 }
@@ -957,6 +982,13 @@ pub fn render(config: &Config) -> String {
     ] {
         set(&mut doc, section, field, &table[section][field]);
     }
+    if !config.transfer.required_profiles.is_empty() {
+        let mut profiles = toml_edit::Table::new();
+        for (id, &schema) in &config.transfer.required_profiles {
+            profiles.insert(id, toml_edit::value(i64::from(schema)));
+        }
+        doc["transfer"]["required_profiles"] = toml_edit::Item::Table(profiles);
+    }
     let mut text = doc.to_string();
     for section in [
         "anticheat",
@@ -1218,6 +1250,27 @@ keep = {keep}
             let bad = on.replace(from, to);
             assert_ne!(bad, on, "{from} is in the template");
             assert!(Config::parse(&bad).is_err(), "{to} was taken");
+        }
+    }
+
+    #[test]
+    fn a_required_destination_roster_round_trips_to_the_engine() {
+        let text = "[transfer]\nenabled = true\n[transfer.required_profiles]\n\"slimefun:profile\" = 1\n\"other:state\" = 2\n";
+        let config = Config::parse(text).unwrap();
+        assert_eq!(Config::parse(&render(&config)).unwrap(), config);
+        assert!(
+            config
+                .transfer
+                .engine_arg()
+                .unwrap()
+                .ends_with(",required_profiles=other:state@2;slimefun:profile@1")
+        );
+        for invalid in [
+            text.replace("enabled = true", "enabled = false"),
+            text.replace("slimefun:profile", "unqualified"),
+            text.replace(" = 1", " = 0"),
+        ] {
+            assert!(Config::parse(&invalid).is_err(), "{invalid}");
         }
     }
 

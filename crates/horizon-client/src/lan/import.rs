@@ -317,7 +317,8 @@ pub fn stage_required_profiles(
         Some(_) => return Err("the player's mod data is not a compound".into()),
     };
     for section in &sections {
-        let replacement = validate(&section.id, section.version, &section.payload, &player_data)?;
+        let owned = owned_section_pdc(&player_data, &section.id)?;
+        let replacement = validate(&section.id, section.version, &section.payload, &owned)?;
         replace_section_pdc(&mut player_data, &section.id, replacement)?;
     }
     Ok(StagedProfileImport(PreparedProfiles {
@@ -339,15 +340,37 @@ fn fingerprint(record: &Value) -> Result<[u8; 32], String> {
         .map_err(|error| error.to_string())
 }
 
+/// A profile-bearing commit acknowledges a lost reply only for the same validated request.
+pub fn is_profile_import_retry(guest: &Guest, request: &Value) -> bool {
+    guest
+        .arrival_profile_fingerprint
+        .is_some_and(|accepted| fingerprint(request).is_ok_and(|resent| accepted == resent))
+}
+
+fn owned_persisted_key(id: &Identifier, key: &horizon_core::nbt::JavaString) -> bool {
+    Identifier::parse_namespaced(&key.to_string_lossy())
+        .is_some_and(|key| key.namespace() == id.namespace())
+}
+
+fn owned_section_pdc(data: &Compound, id: &Identifier) -> Result<Compound, String> {
+    let owned = match data.get(&"PlayerPersisted".into()) {
+        Some(Tag::Compound(entries)) => entries
+            .iter()
+            .filter(|(key, _)| owned_persisted_key(id, key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        None => Compound::new(),
+        Some(_) => return Err("the player's persisted mod data is not a compound".into()),
+    };
+    Ok([("PlayerPersisted".into(), Tag::Compound(owned))].into())
+}
+
 fn replace_section_pdc(
     data: &mut Compound,
     id: &Identifier,
     entries: Compound,
 ) -> Result<(), String> {
-    let belongs = |key: &horizon_core::nbt::JavaString| {
-        Identifier::parse_namespaced(&key.to_string_lossy())
-            .is_some_and(|key| key.namespace() == id.namespace())
-    };
+    let belongs = |key: &horizon_core::nbt::JavaString| owned_persisted_key(id, key);
     if !entries.keys().all(belongs) {
         return Err(format!(
             "required profile {id} proposed another mod's player data"
@@ -764,6 +787,7 @@ fn import_player_inner(
         g.imported = true;
         g.arrival_announce = request.announce;
         g.arrival_handover = Some(handover);
+        g.arrival_profile_fingerprint = profiles.as_ref().map(|stage| stage.fingerprint);
         g.arrival_profiles = profiles;
         recentered
     });

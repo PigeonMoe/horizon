@@ -206,7 +206,7 @@ player is frozen, the reply also gives `"freeze_ticks_left"` beside the record: 
 by itself, so that a proxy does not commit on the target too late for its release to come in time.
 
 How a server reads a record (the target's `player-import`):
-- A record of another `version`, or of another `data_version` than the server's own, is refused.
+- The target refuses a record version it cannot receive or a `data_version` different from its own.
 - The NBT in `player` wins over the plain fields: they are copies of its values, for a proxy.
 - Fields the reader does not know are ignored, so a later version 1 record may carry more.
 
@@ -214,8 +214,12 @@ The reserved `profiles` field is for version 2 records. It lists 1 to 16 require
 each with a unique namespaced `id`, a positive integer schema `version`, and a nonempty padded base64
 `payload`. Section data can contain up to 8 MiB total after decoding. The complete request must fit
 the game control socket's 16 MiB line limit. A target needs a durable receiver for every section
-before placing the held player or acknowledging an import retry. The current server exports version
-1 records and refuses profile-bearing imports before changing the held player or writing its files.
+before placing the held player or acknowledging an import retry. Servers opt into receiving by
+setting the exact section IDs and schema versions under `[transfer.required_profiles]`, for example
+`"slimefun:profile" = 1`. The package owning each namespace must validate its complete section.
+With a required roster, the login must have a live proxy expectation and its import must include
+the exact roster. The target confirms only after the player file activates the durable sections.
+Profile-free servers continue to export and import version 1. Required profiles are receive-only.
 
 **The hand-over.** `freeze` starts one: the record gets a `handover` id, which the later requests name, and the
 player's own inputs (moves, clicks, chat, commands) stop being acted on, while what answers the server (teleport

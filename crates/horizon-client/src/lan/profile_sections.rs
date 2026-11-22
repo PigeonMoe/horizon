@@ -2,7 +2,7 @@
 
 use horizon_core::identifier::Identifier;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const RECORD_VERSION: i64 = 2;
 const MAX_SECTIONS: usize = 16;
@@ -15,6 +15,34 @@ pub(super) struct Section {
     pub id: Identifier,
     pub version: u32,
     pub payload: Vec<u8>,
+}
+
+fn section_id(raw: &str) -> Option<Identifier> {
+    (raw.len() <= MAX_ID_BYTES)
+        .then(|| Identifier::parse_namespaced(raw))
+        .flatten()
+}
+
+pub(super) fn parse_roster(text: &str) -> Result<BTreeMap<Identifier, u32>, String> {
+    let mut roster = BTreeMap::new();
+    for pair in text.split(';') {
+        let (id, schema) = pair
+            .split_once('@')
+            .ok_or("required_profiles needs id@schema entries")?;
+        let id = section_id(id).ok_or("required_profiles needs fully namespaced IDs")?;
+        let schema = schema
+            .parse::<u32>()
+            .ok()
+            .filter(|version| *version > 0)
+            .ok_or("required_profiles needs positive schema versions")?;
+        if roster.insert(id, schema).is_some() {
+            return Err("required_profiles contains a duplicate section".into());
+        }
+        if roster.len() > MAX_SECTIONS {
+            return Err("required_profiles may contain up to 16 sections".into());
+        }
+    }
+    Ok(roster)
 }
 
 /// All sections in a version 2 record are required. A receiver needs a durable
@@ -57,8 +85,7 @@ pub(super) fn read_required(record: &Value) -> Result<Vec<Section>, String> {
     for section in sections {
         let id = section["id"]
             .as_str()
-            .filter(|id| id.len() <= MAX_ID_BYTES)
-            .and_then(Identifier::parse_namespaced)
+            .and_then(section_id)
             .ok_or("a required profile needs a namespaced id of at most 128 bytes")?;
         if !ids.insert(id.clone()) {
             return Err(format!("the required profile {id} is listed twice"));

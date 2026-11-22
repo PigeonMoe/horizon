@@ -41,6 +41,8 @@ pub enum Contract {
 pub enum HostAccess {
     /// The shared read-only `Host`.
     Read,
+    /// Server services through an immutable `ServerHost` borrow.
+    ServerRead,
     /// A level host, for a receiver that is a level but not `GameLevel`.
     Level,
 }

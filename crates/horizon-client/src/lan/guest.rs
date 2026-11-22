@@ -510,6 +510,7 @@ pub struct Guest {
     /// Checked required sections for a held arrival. Cleared only by the successful
     /// durable player-file commit, or discarded when the guest leaves while held.
     pub(super) arrival_profiles: Option<super::profile_storage::PreparedProfiles>,
+    pub(super) arrival_profile_fingerprint: Option<[u8; 32]>,
     /// The import of that hand-over moved the view to another chunk (`recentered` in its reply),
     /// kept so a retried import or a confirm after it answers the same.
     pub arrival_recentered: bool,
@@ -860,6 +861,7 @@ impl Guest {
             arrival_announce: true,
             arrival_handover: None,
             arrival_profiles: None,
+            arrival_profile_fingerprint: None,
             arrival_recentered: false,
             quiet_leave: false,
             released: false,

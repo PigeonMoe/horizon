@@ -21,7 +21,8 @@
 //! is done on a tick. It has nothing to do with vanilla's `accepts-transfers`,
 //! which is about the transfer packet a server sends a client.
 use super::hub::Hub;
-use std::collections::HashMap;
+use horizon_core::identifier::Identifier;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,8 @@ pub struct Settings {
     pub max_hold_ticks: u64,
     /// How long a stop waits for a proxy to move the players out ([`StopWait`]); zero stops at once.
     pub stop_wait: Duration,
+    /// Destination-only package sections every arrival must validate before placement.
+    pub required_profiles: BTreeMap<Identifier, u32>,
 }
 
 impl Default for Settings {
@@ -55,6 +58,7 @@ impl Default for Settings {
             max_freeze_ticks: 20 * 30,
             max_hold_ticks: 20 * 60,
             stop_wait: Duration::from_secs(10),
+            required_profiles: BTreeMap::new(),
         }
     }
 }
@@ -64,11 +68,20 @@ impl Settings {
     /// whole number above zero, but `stop_wait_seconds`, which is zero to [`MAX_STOP_WAIT`].
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut s = Self::default();
+        let mut roster_seen = false;
         for pair in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("{pair:?} is not key=value"))?;
             let key = key.trim();
+            if key == "required_profiles" {
+                if roster_seen {
+                    return Err("required_profiles is specified more than once".into());
+                }
+                roster_seen = true;
+                s.required_profiles = super::profile_sections::parse_roster(value.trim())?;
+                continue;
+            }
             let n: u64 = value
                 .trim()
                 .parse()
@@ -131,10 +144,9 @@ pub struct Transfers {
 
 impl Transfers {
     pub fn new(settings: Settings) -> Self {
-        let expected = Arc::new(Mutex::new(Expectations::new(
-            settings.max_expected,
-            settings.max_expect,
-        )));
+        let mut table = Expectations::new(settings.max_expected, settings.max_expect);
+        table.required = !settings.required_profiles.is_empty();
+        let expected = Arc::new(Mutex::new(table));
         Self {
             settings,
             expected,
@@ -252,6 +264,7 @@ pub struct Expectations {
     until: HashMap<u128, Instant>,
     max: usize,
     max_ttl: Duration,
+    required: bool,
 }
 
 impl Default for Expectations {
@@ -267,6 +280,7 @@ impl Expectations {
             until: HashMap::new(),
             max,
             max_ttl,
+            required: false,
         }
     }
 
@@ -293,6 +307,20 @@ impl Expectations {
     /// [`Self::put_back`].
     pub fn take_until(&mut self, uuid: u128, now: Instant) -> Option<Instant> {
         self.until.remove(&uuid).filter(|deadline| now < *deadline)
+    }
+
+    /// Profiled destination servers admit only an expectation the proxy still owns.
+    pub fn take_required_for_login(
+        &mut self,
+        uuid: u128,
+        now: Instant,
+    ) -> Result<Option<Instant>, RequiredExpectation> {
+        if !self.required {
+            return Ok(None);
+        }
+        self.take_until(uuid, now)
+            .map(Some)
+            .ok_or(RequiredExpectation)
     }
 
     /// Gives back an expectation a login used up and that did not reach play (it
@@ -354,6 +382,9 @@ impl Expectations {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequiredExpectation;
+
 /// The version of the record `player-export` answers with.
 pub const RECORD_VERSION: i64 = 1;
 
@@ -404,6 +435,13 @@ pub fn frozen_too_long(since: u64, now: u64, max: u64) -> bool {
 /// `player-export <uuid> freeze` during a stop's wait: refused once a hand-over that starts now could
 /// not finish before the stop's limit ([`StopWait`]). A player already frozen is answered as before.
 pub fn check_freeze(hub: &Hub, i: usize, now: Instant) -> Result<(), &'static str> {
+    if hub
+        .transfers
+        .as_ref()
+        .is_some_and(|transfer| !transfer.settings.required_profiles.is_empty())
+    {
+        return Err("this destination has no approved source profile collector");
+    }
     let wait = hub.transfers.as_ref().and_then(|t| t.stop_wait);
     if hub.guests[i].handover.is_none() && wait.is_some_and(|w| !w.may_freeze(now)) {
         return Err("the server is stopping: no hand-over starts this late");

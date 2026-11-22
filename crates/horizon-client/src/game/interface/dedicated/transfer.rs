@@ -10,7 +10,7 @@
 //! tick. The rules are `lan/arrivals.rs`'s. All of them are refused while `server.toml`'s
 //! `[transfer]` is off, and those that bring a player in once the server has begun to stop.
 use crate::game::{Dim, Game};
-use horizon_client::lan::arrivals;
+use horizon_client::lan::{arrivals, import};
 use horizon_protocol::packets::play::{self, Clientbound as C};
 use serde_json::{Value, json};
 use std::time::Instant;
@@ -182,12 +182,16 @@ impl Game<'_> {
             Ok(v) => v,
             Err(e) => return json!({ "error": format!("the request is not JSON: {e}") }),
         };
-        if let Err(error) = horizon_client::lan::import::check_record_profiles(&request["record"]) {
-            return json!({ "error": error });
-        }
-        let Some(host) = self.lan.as_mut() else {
+        let Some(host) = self.lan.as_ref() else {
             return json!({ "error": "the server is not open to players" });
         };
+        let transfers = host.hub.transfers.as_ref().expect("transfers are enabled");
+        let required = &transfers.settings.required_profiles;
+        if required.is_empty()
+            && let Err(error) = import::check_record_profiles(&request["record"])
+        {
+            return json!({ "error": error });
+        }
         // A retry after the commit, whose reply was lost: the player is placed from this
         // hand-over already, and the answer is the same.
         let retried = request["record"]["handover"]
@@ -195,6 +199,11 @@ impl Game<'_> {
             .and_then(arrivals::parse_handover)
             .and_then(|id| host.hub.placed_arrival(uuid, id).map(|g| (id, g)));
         if let Some((id, i)) = retried {
+            if !required.is_empty()
+                && !import::is_profile_import_retry(&host.hub.guests[i], &request)
+            {
+                return json!({ "error": "the required profile request differs from the committed hand-over" });
+            }
             return json!({
                 "ok": true,
                 "handover": arrivals::handover_text(id),
@@ -204,12 +213,47 @@ impl Game<'_> {
                 "retried": true,
             });
         }
-        let result = horizon_client::lan::import::import_player(
-            &mut host.hub,
-            &self.motion.attributes,
-            uuid,
-            &request,
-        );
+        let stage = if required.is_empty() {
+            None
+        } else {
+            match import::stage_required_profiles(
+                &host.hub,
+                uuid,
+                &request,
+                required,
+                |id, schema, payload, candidate| {
+                    let mut reply = None;
+                    self.native_player_transfer_profile_stage(
+                        mod_api::__private::PlayerTransferProfileStageCall {
+                            mod_id: id.namespace(),
+                            owner: uuid,
+                            id,
+                            schema,
+                            payload,
+                            candidate,
+                            reply: &mut reply,
+                        },
+                    );
+                    reply.ok_or_else(|| {
+                        format!("no approved receiver accepted required profile {id}")
+                    })?
+                },
+            ) {
+                Ok(stage) => Some(stage),
+                Err(error) => return json!({ "error": error }),
+            }
+        };
+        let hub = &mut self.lan.as_mut().expect("the server is open").hub;
+        let result = match stage {
+            Some(stage) => import::import_player_with_profiles(
+                hub,
+                &self.motion.attributes,
+                uuid,
+                &request,
+                stage,
+            ),
+            None => import::import_player(hub, &self.motion.attributes, uuid, &request),
+        };
         match result {
             Ok(done) => {
                 self.take_arrival_records(uuid, &done);
@@ -420,6 +464,37 @@ mod tests {
     use horizon_client::lan::playerdata;
     use horizon_protocol::crypto::uuid_string;
 
+    #[derive(Default)]
+    struct ProfileReceiver(bool);
+
+    #[mod_api::horizon_mod]
+    impl mod_api::Hooks for ProfileReceiver {
+        fn player_transfer_profile_stage(
+            &self,
+            host: &dyn mod_api::ServerHost,
+            event: &mut mod_api::PlayerTransferProfileStageEvent<'_>,
+        ) {
+            assert!(self.0, "the foreign package received private profile bytes");
+            assert_eq!(event.mod_id, "slimefun");
+            assert_eq!(event.owner, 12);
+            assert_eq!(event.id.to_string(), "slimefun:profile");
+            assert_eq!(event.schema, 1);
+            assert_eq!(event.payload, b"SFP1");
+            let flags = event.candidate.get(&"PlayerPersisted".into()).unwrap();
+            assert_eq!(
+                flags.get("slimefun:stale"),
+                Some(&horizon_core::nbt::Tag::Byte(1))
+            );
+            assert!(flags.get("other:keep").is_none());
+            assert!(host.item_from_saved_gzip_nbt(Vec::new()).is_none());
+            *event.reply = Some(Ok([(
+                "slimefun:issued".into(),
+                horizon_core::nbt::Tag::Byte(1),
+            )]
+            .into()));
+        }
+    }
+
     #[test]
     #[ignore = "daily"]
     fn required_profiles_neither_stage_nor_acknowledge_a_profile_free_commit() {
@@ -568,26 +643,48 @@ mod tests {
                     assert_eq!(
                         data.get(&"PlayerPersisted".into())
                             .and_then(|tag| tag.get("other:keep")),
-                        Some(&Tag::Byte(1))
+                        None
                     );
                     Ok([("other:overwrite".into(), Tag::Byte(1))].into())
                 },
             );
             assert!(check.err().unwrap().contains("another mod"));
-            let ready =
-                import::stage_required_profiles(hub, owner, &request, &roster, |_, _, _, _| {
-                    Ok([("slimefun:issued".into(), Tag::Byte(1))].into())
-                })
-                .unwrap();
-            let done = import::import_player_with_profiles(
-                hub,
-                &game.motion.attributes,
-                owner,
-                &request,
-                ready,
-            )
-            .unwrap();
-            assert!(hub.confirm_arrival(owner, done.handover).is_err());
+            hub.transfers.as_mut().unwrap().settings.required_profiles = roster;
+            let mut stock = request.clone();
+            stock["record"]["version"] = json!(1);
+            stock["record"].as_object_mut().unwrap().remove("profiles");
+            assert!(
+                game.player_request("player-import", &format!("{uuid} {stock}"))["error"]
+                    .is_string()
+            );
+            let other = || mod_api::ModEntry::new("other", Box::new(ProfileReceiver(false)));
+            let missing = mod_platform::testing::with_mods(vec![other()].into(), || {
+                game.player_request("player-import", &format!("{uuid} {request}"))
+            });
+            assert!(
+                missing["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no approved receiver")
+            );
+            let mods = vec![
+                other(),
+                mod_api::ModEntry::new("slimefun", Box::new(ProfileReceiver(true))),
+            ]
+            .into();
+            let staged = mod_platform::testing::with_mods(mods, || {
+                game.player_request("player-import", &format!("{uuid} {request}"))
+            });
+            assert_eq!(staged["placed"], false, "{staged}");
+            let hold = arrivals::parse_handover(&handover).unwrap();
+            assert!(
+                game.lan
+                    .as_mut()
+                    .unwrap()
+                    .hub
+                    .confirm_arrival(owner, hold)
+                    .is_err()
+            );
 
             let file = playerdata::path(world.path(), owner);
             let backup = file.with_extension("dat_old");
@@ -610,6 +707,20 @@ mod tests {
             std::fs::remove_dir(&backup).unwrap();
             let confirmed = game.player_request("player-confirm", &format!("{uuid} {handover}"));
             assert_eq!(confirmed["placed"], true, "{confirmed}");
+            assert_eq!(
+                game.player_request("player-import", &format!("{uuid} {request}"))["retried"],
+                true
+            );
+            assert!(
+                game.player_request("player-import", &format!("{uuid} {stock}"))["error"]
+                    .is_string()
+            );
+            let mut changed = request.clone();
+            changed["record"]["profiles"][0]["payload"] = json!("U0ZQMg==");
+            assert!(
+                game.player_request("player-import", &format!("{uuid} {changed}"))["error"]
+                    .is_string()
+            );
             let saved = read_dat(&file).unwrap();
             let active = saved
                 .get("HorizonTransferProfiles")
@@ -628,7 +739,7 @@ mod tests {
                 refused["error"]
                     .as_str()
                     .unwrap()
-                    .contains("no source collector")
+                    .contains("no approved source profile collector")
             );
             let generation = arrivals::parse_handover(&handover).unwrap();
             let verify_owned = |host: &dyn ServerHost| {

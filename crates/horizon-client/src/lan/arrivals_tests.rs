@@ -126,6 +126,11 @@ fn the_settings_are_read_from_the_supervisors_line() {
         "stop_wait_seconds=61",
         "max_freeze_seconds=81",
         "stop_wait_seconds=60,max_freeze_seconds=31",
+        "required_profiles=",
+        "required_profiles=slimefun:profile@0",
+        "required_profiles=plain@1",
+        "required_profiles=slimefun:profile@1;slimefun:profile@2",
+        "required_profiles=slimefun:profile@1,required_profiles=other:state@2",
     ] {
         assert!(Settings::parse(bad).is_err(), "{bad:?} was taken");
     }

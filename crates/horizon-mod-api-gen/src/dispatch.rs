@@ -856,12 +856,11 @@ pub(super) fn emit<'a>(
             build
         };
         // A trait mod's call is marked with the mod for a panic to name.
-        let each = match &hook.owner {
-            Some(owner) => format!("super::entered_owned(HookId::{hook_id}, \"{name}\", {owner})"),
-            None if answered || hook.collect_validator.is_some() => {
+        let each = match answered || hook.collect_validator.is_some() {
+            true => {
                 format!("super::entered_with_id(HookId::{hook_id}, \"{name}\")")
             }
-            None => format!("super::entered(HookId::{hook_id}, \"{name}\")"),
+            false => format!("super::entered(HookId::{hook_id}, \"{name}\")"),
         };
         // One callee's call: a mod's, or a scoped hook's part's.
         let call = |callee: &str, exit: &str| {
@@ -954,10 +953,11 @@ pub(super) fn emit<'a>(
                     "for (mod_id, {mod_item}) in super::entered_with_id(HookId::{hook_id}, \"{name}\") {{ let mut local = Vec::new(); {{ let mut {event} = {event_type} {{ {name}: &mut local }}; {mod_item}.{name}(context, &mut {event}); }} for declaration in &mut local {{ if let Err(reason) = super::parts::own_declaration(mod_id, declaration) {{ context.refuse_declaration(reason); }} }} {event}.{name}.extend(local); }}"
                 ),
             ),
-            None if name == "setting_changed" => (
+            None if hook.owner.is_some() => (
                 String::new(),
                 format!(
-                    "{{ let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if owner.id != {event}.mod_id {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
+                    "{{ let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if owner.id != {event}.{} {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
+                    hook.owner.as_ref().unwrap(),
                     call(&mod_item, "break"),
                 ),
             ),
