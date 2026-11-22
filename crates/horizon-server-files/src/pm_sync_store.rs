@@ -14,6 +14,7 @@ pub enum StoreError {
     Invalid(&'static str),
     Fenced,
     Conflict,
+    DuplicateCheckpoint,
 }
 
 impl fmt::Display for StoreError {
@@ -24,6 +25,9 @@ impl fmt::Display for StoreError {
             Self::Fenced => f.write_str("PM-Sync source does not own the expected revision"),
             Self::Conflict => {
                 f.write_str("PM-Sync request id already belongs to another operation")
+            }
+            Self::DuplicateCheckpoint => {
+                f.write_str("PM-Sync checkpoint already committed; query its receipt")
             }
         }
     }
@@ -51,6 +55,22 @@ pub struct Handover<'a> {
     pub source_revision: i64,
     pub destination: &'a str,
     pub destination_token: u128,
+    pub snapshot: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointDisposition {
+    KeepLease,
+    ReleaseLease,
+}
+
+pub struct Checkpoint<'a> {
+    pub player: u128,
+    pub request: u128,
+    pub backend: &'a str,
+    pub token: u128,
+    pub revision: i64,
+    pub disposition: CheckpointDisposition,
     pub snapshot: &'a [u8],
 }
 
@@ -169,11 +189,7 @@ impl Store {
         {
             return Err(StoreError::Invalid("invalid PM-Sync hand-over identity"));
         }
-        let revision = change
-            .source_revision
-            .checked_add(1)
-            .filter(|revision| *revision > 0)
-            .ok_or(StoreError::Invalid("invalid PM-Sync source revision"))?;
+        let revision = next_revision(change.source_revision)?;
         validate_snapshot(change.snapshot, self.max_snapshot_bytes)?;
 
         let player = uuid_string(change.player);
@@ -183,15 +199,15 @@ impl Store {
         let digest = operation_digest(change);
         let mut transaction = self.connection.start_transaction(TxOpts::default())?;
         let current = lock_head(&mut transaction, &self.state, &player)?;
-        let prior: Option<(String, i64)> = transaction.exec_first(
-            format!("SELECT payload_digest,revision FROM `{}` WHERE player_uuid=? AND request_id=? FOR UPDATE", self.receipts),
-            (&player, &request),
-        )?;
-        if let Some((prior_digest, prior_revision)) = prior {
-            if prior_digest != digest || prior_revision != revision {
-                return Err(StoreError::Conflict);
-            }
-            if current.revision < prior_revision {
+        if matches_receipt(
+            &mut transaction,
+            &self.receipts,
+            &player,
+            &request,
+            &digest,
+            revision,
+        )? {
+            if current.revision < revision {
                 return Err(StoreError::Invalid(
                     "PM-Sync receipt is newer than the authoritative row",
                 ));
@@ -207,31 +223,126 @@ impl Store {
         if !current.matches(&source_token, change.source, change.source_revision) {
             return Err(StoreError::Fenced);
         }
-        transaction.exec_drop(
-            format!(
-                "INSERT INTO `{}` (player_uuid,revision,snapshot) VALUES (?,?,?)",
-                self.history
-            ),
-            (&player, revision, change.snapshot),
+        write_snapshot(
+            &mut transaction,
+            (&self.state, &self.history),
+            &player,
+            change.snapshot,
+            &Head {
+                revision,
+                token: Some(destination_token),
+                backend: Some(change.destination.to_owned()),
+            },
         )?;
-        transaction.exec_drop(
-            format!("UPDATE `{}` SET snapshot=?,revision=?,owner_token=?,owner_server=?,updated_at=CURRENT_TIMESTAMP WHERE player_uuid=?", self.state),
-            (change.snapshot, revision, &destination_token, change.destination, &player),
-        )?;
-        transaction.exec_drop(
-            format!(
-                "DELETE FROM `{}` WHERE player_uuid=? AND revision<=?",
-                self.history
-            ),
-            (&player, revision - 16),
-        )?;
-        transaction.exec_drop(
-            format!("INSERT INTO `{}` (player_uuid,request_id,payload_digest,revision) VALUES (?,?,?,?)", self.receipts),
-            (&player, &request, &digest, revision),
+        write_receipt(
+            &mut transaction,
+            &self.receipts,
+            &player,
+            &request,
+            &digest,
+            revision,
         )?;
         transaction.commit()?;
         Ok(HandoverOutcome::Committed { revision })
     }
+
+    /// Commit a live checkpoint or release the lease with the last saved state.
+    /// The original Paper plugin can acquire the released snapshot on its next join.
+    pub fn checkpoint(&mut self, change: &Checkpoint<'_>) -> Result<i64, StoreError> {
+        let (revision, digest) = self.checkpoint_binding(change)?;
+        let (player, request, token) = (
+            uuid_string(change.player),
+            uuid_string(change.request),
+            uuid_string(change.token),
+        );
+        let mut transaction = self.connection.start_transaction(TxOpts::default())?;
+        let current = lock_head(&mut transaction, &self.state, &player)?;
+        if matches_receipt(
+            &mut transaction,
+            &self.receipts,
+            &player,
+            &request,
+            &digest,
+            revision,
+        )? {
+            return Err(StoreError::DuplicateCheckpoint);
+        }
+        if !current.matches(&token, change.backend, change.revision) {
+            return Err(StoreError::Fenced);
+        }
+        let keep = change.disposition == CheckpointDisposition::KeepLease;
+        write_snapshot(
+            &mut transaction,
+            (&self.state, &self.history),
+            &player,
+            change.snapshot,
+            &Head {
+                revision,
+                token: keep.then_some(token),
+                backend: keep.then(|| change.backend.to_owned()),
+            },
+        )?;
+        write_receipt(
+            &mut transaction,
+            &self.receipts,
+            &player,
+            &request,
+            &digest,
+            revision,
+        )?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    /// Reconcile the exact checkpoint after an ambiguous response. A receipt
+    /// acknowledges the write, even after another backend owns a newer revision.
+    pub fn checkpoint_receipt(
+        &mut self,
+        change: &Checkpoint<'_>,
+    ) -> Result<Option<i64>, StoreError> {
+        let (revision, digest) = self.checkpoint_binding(change)?;
+        let (player, request) = (uuid_string(change.player), uuid_string(change.request));
+        let prior = self.connection.exec_first(
+            format!(
+                "SELECT payload_digest,revision FROM `{}` WHERE player_uuid=? AND request_id=?",
+                self.receipts
+            ),
+            (&player, &request),
+        )?;
+        Ok(check_receipt(prior, &digest, revision)?.then_some(revision))
+    }
+
+    fn checkpoint_binding(&self, change: &Checkpoint<'_>) -> Result<(i64, String), StoreError> {
+        if change.player == 0
+            || change.request == 0
+            || change.token == 0
+            || !valid_sql_backend(change.backend)
+        {
+            return Err(StoreError::Invalid("invalid PM-Sync checkpoint identity"));
+        }
+        let revision = next_revision(change.revision)?;
+        validate_snapshot(change.snapshot, self.max_snapshot_bytes)?;
+        let mut digest = Sha256::new();
+        digest.update(b"horizon/pm-sync/checkpoint/v1\0");
+        for uuid in [change.player, change.request, change.token] {
+            digest.update(uuid.to_be_bytes());
+        }
+        digest.update(change.revision.to_be_bytes());
+        digest.update([u8::from(
+            change.disposition == CheckpointDisposition::ReleaseLease,
+        )]);
+        digest.update([change.backend.len() as u8]);
+        digest.update(change.backend.as_bytes());
+        digest.update(Sha256::digest(change.snapshot));
+        Ok((revision, format!("{:x}", digest.finalize())))
+    }
+}
+
+fn next_revision(revision: i64) -> Result<i64, StoreError> {
+    revision
+        .checked_add(1)
+        .filter(|revision| *revision > 0)
+        .ok_or(StoreError::Invalid("invalid PM-Sync source revision"))
 }
 
 fn valid_sql_backend(id: &str) -> bool {
@@ -275,6 +386,70 @@ fn lock_head(
         token,
         backend,
     })
+}
+
+fn check_receipt(
+    prior: Option<(String, i64)>,
+    digest: &str,
+    revision: i64,
+) -> Result<bool, StoreError> {
+    match prior {
+        Some((bound, prior_revision)) if bound == digest && prior_revision == revision => Ok(true),
+        Some(_) => Err(StoreError::Conflict),
+        None => Ok(false),
+    }
+}
+
+fn matches_receipt(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    player: &str,
+    request: &str,
+    digest: &str,
+    revision: i64,
+) -> Result<bool, StoreError> {
+    let prior = transaction.exec_first(
+        format!("SELECT payload_digest,revision FROM `{table}` WHERE player_uuid=? AND request_id=? FOR UPDATE"),
+        (player, request),
+    )?;
+    check_receipt(prior, digest, revision)
+}
+
+fn write_snapshot(
+    transaction: &mut Transaction<'_>,
+    (state, history): (&str, &str),
+    player: &str,
+    snapshot: &[u8],
+    next: &Head,
+) -> Result<(), StoreError> {
+    transaction.exec_drop(
+        format!("INSERT INTO `{history}` (player_uuid,revision,snapshot) VALUES (?,?,?)"),
+        (player, next.revision, snapshot),
+    )?;
+    transaction.exec_drop(
+        format!("UPDATE `{state}` SET snapshot=?,revision=?,owner_token=?,owner_server=?,updated_at=CURRENT_TIMESTAMP WHERE player_uuid=?"),
+        (snapshot, next.revision, next.token.as_deref(), next.backend.as_deref(), player),
+    )?;
+    transaction.exec_drop(
+        format!("DELETE FROM `{history}` WHERE player_uuid=? AND revision<=?"),
+        (player, next.revision - 16),
+    )?;
+    Ok(())
+}
+
+fn write_receipt(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    player: &str,
+    request: &str,
+    digest: &str,
+    revision: i64,
+) -> Result<(), StoreError> {
+    transaction.exec_drop(
+        format!("INSERT INTO `{table}` (player_uuid,request_id,payload_digest,revision) VALUES (?,?,?,?)"),
+        (player, request, digest, revision),
+    )?;
+    Ok(())
 }
 
 fn operation_digest(change: &Handover<'_>) -> String {
