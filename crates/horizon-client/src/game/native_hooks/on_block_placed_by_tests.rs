@@ -340,7 +340,9 @@ fn block_items_notify_after_setup_and_before_consumption() {
 #[test]
 #[ignore = "daily"]
 fn placement_part_sees_the_replaced_cell_and_vetoes_before_global_placement() {
-    use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+    use crate::game::native_entity_refs::tests::{
+        prepare_entity_ticking_neighborhood, run_on_guest_stack, with_game,
+    };
     use mod_api::{BlockFace, BlockItemPlacePreEvent, EntityPlaceEvent, Flow, ModEntry};
     use std::sync::atomic::AtomicUsize;
 
@@ -406,7 +408,10 @@ fn placement_part_sees_the_replaced_cell_and_vetoes_before_global_placement() {
             crate::game::api_values::install_parts(&mods).unwrap();
             with_game(|game| {
                 game.options.dedicated = Some(Vec::new());
-                game.load_ticking_neighbourhood(0, 0);
+                prepare_entity_ticking_neighborhood(
+                    game,
+                    horizon_core::position::ChunkPos::new(0, 0),
+                );
                 let registry = game.pack.assets.registry;
                 let dirt = registry.default_state("minecraft:dirt").unwrap();
                 let grass = registry.default_state("minecraft:short_grass").unwrap();
