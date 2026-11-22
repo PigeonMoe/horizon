@@ -6,8 +6,22 @@ use horizon_client::{
     lan::{Joined, NetConfig, Out, PlayerSender, guest::Guest, hub::HubConfig},
 };
 use horizon_protocol::packets::configuration::ClientInformation;
-use horizon_world::registry::BlockStateId;
+use horizon_world::{chunk::BlockState, registry::BlockStateId};
+use mod_api::{BreakBlockEvent, Flow, Hooks, ServerHost};
 use std::sync::{Arc, atomic::AtomicI32, mpsc};
+
+struct ProtectedCrop([i32; 3]);
+
+#[mod_api::__subscriptions]
+impl Hooks for ProtectedCrop {
+    fn break_block(&self, _: &mut dyn ServerHost, event: &mut BreakBlockEvent<'_>) -> Flow {
+        if event.pos == self.0 {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+}
 
 fn observer(conn: u32, position: [f64; 3], dimension: &str) -> (Guest, mpsc::Receiver<Out>) {
     let (tx, rx) = mpsc::channel();
@@ -257,6 +271,51 @@ fn crack_packets_follow_start_clock_and_strict_observer_radius() {
     game.world.set(pos[0], pos[1], pos[2], torch).unwrap();
     game.lan_guest_packet(1, action(0));
     assert!(cracks(&receivers[1]).is_empty(), "instant START");
+
+    // A walking player can send several instant crop breaks that the server
+    // drains in the same tick. Each allowed START must finish before the next.
+    let registry = &game.pack.assets.registry;
+    let crop = registry
+        .resolve(&BlockState {
+            name: "minecraft:beetroots".into(),
+            properties: [("age".into(), "3".into())].into(),
+        })
+        .unwrap();
+    let farmland = registry.default_state("minecraft:farmland").unwrap();
+    let protected = [1, 100, 1];
+    for [x, y, z] in [pos, protected, other] {
+        game.world.set(x, y - 1, z, farmland).unwrap();
+        game.world.set(x, y, z, crop).unwrap();
+    }
+    let mods = vec![mod_api::ModEntry::new(
+        "crop-protection",
+        Box::new(ProtectedCrop(protected)),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        for (target, sequence) in [(pos, 3), (protected, 4), (other, 5)] {
+            game.lan_guest_packet(
+                1,
+                S::PlayerAction(play::PlayerAction {
+                    action: 0,
+                    pos: target,
+                    direction: 1,
+                    sequence,
+                }),
+            );
+        }
+    });
+    for [x, y, z] in [pos, other] {
+        assert_eq!(game.world.block(x, y, z), game.world.air);
+    }
+    assert_eq!(
+        game.world.block(protected[0], protected[1], protected[2]),
+        crop
+    );
+    let host = game.lan.as_ref().unwrap();
+    assert_eq!(host.hub.guests[0].ack_up_to.get(), 5);
+    assert!(host.play[&1].digging.is_none());
+
     for (index, rx) in receivers.iter().enumerate() {
         assert!(
             cracks(rx).is_empty(),
