@@ -2315,6 +2315,7 @@ impl Game<'_> {
         let face = cart_motion_face(c.yaw, c.flipped, self.minecart_improvements());
         let offsets = dismount_offsets(face);
         let poses = super::mounts::rider_poses(rider);
+        let collision = self.player_dismount_collision(rider);
         for &(pose, mut dimensions) in &poses {
             dimensions.width = dimensions.width.min(1.0);
             let heights: &[i32] = if pose == Pose::Swimming {
@@ -2335,7 +2336,7 @@ impl Game<'_> {
                     }
                     let target =
                         Vec3::new(f64::from(x) + 0.5, f64::from(y) + floor, f64::from(z) + 0.5);
-                    if self.can_dismount_to(dimensions.bounds(target)) {
+                    if self.can_dismount_to(dimensions.bounds(target), &collision) {
                         return (target, Some(pose));
                     }
                 }

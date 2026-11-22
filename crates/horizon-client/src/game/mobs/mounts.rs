@@ -2,7 +2,7 @@
 //! armour and chests, mounting, the rider's control and jump bar
 //! (`LocalPlayer.aiStep`'s riding jump), positioning, dismounting, and the
 //! mount's health and jump bar on the HUD.
-use super::{Game, lan_vehicles::GuestDismount};
+use super::{Game, lan_vehicles::GuestDismount, respawn_anchor::DismountCollision};
 use horizon_client::actions::Action;
 use horizon_client::{
     blocks::Fluid,
@@ -767,7 +767,14 @@ impl Game<'_> {
                     guest.info.main_hand == 0
                 }),
         };
-        dismount_location(mount, &rider, &GameDismountWorld(self))
+        dismount_location(
+            mount,
+            &rider,
+            &GameDismountWorld {
+                game: self,
+                collision: self.player_dismount_collision(p),
+            },
+        )
     }
 
     /// The same player search when the mount is lent out during a mob tick.
@@ -1116,21 +1123,24 @@ trait DismountWorld {
     /// `DismountHelper.canDismountTo(level, passenger, box)`.
     fn can_dismount_to(&self, bounds: Aabb) -> bool;
 }
-struct GameDismountWorld<'a, 'g>(&'a Game<'g>);
+struct GameDismountWorld<'a, 'g> {
+    game: &'a Game<'g>,
+    collision: DismountCollision<'a>,
+}
 impl DismountWorld for GameDismountWorld<'_, '_> {
     fn lava(&self, p: [i32; 3]) -> bool {
-        let g = self.0;
+        let g = self.game;
         g.res.facts().get(g.world.block(p[0], p[1], p[2])).fluid == Fluid::Lava
     }
     fn floor_height(&self, p: [i32; 3]) -> f64 {
-        let shape = self.0.block_collision_shape(p);
+        let shape = self.game.block_collision_shape(p);
         let below = std::cell::OnceCell::<VoxelShape>::new();
         horizon_core::geometry::block_floor_height(&shape, || {
-            below.get_or_init(|| self.0.block_collision_shape([p[0], p[1] - 1, p[2]]))
+            below.get_or_init(|| self.game.block_collision_shape([p[0], p[1] - 1, p[2]]))
         })
     }
     fn can_dismount_to(&self, bounds: Aabb) -> bool {
-        self.0.can_dismount_to(bounds)
+        self.game.can_dismount_to(bounds, &self.collision)
     }
 }
 /// `getDismountLocationForPassenger`, and the pose the rider takes there: each

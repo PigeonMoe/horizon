@@ -131,6 +131,138 @@ fn lay_rails(game: &mut Game<'_>) {
     game.carts.push(cart);
 }
 
+fn with_dismount_terrain(test: impl FnOnce(&mut Game<'_>, u32)) {
+    crate::game::native_entity_refs::tests::with_game(|game| {
+        lay_rails(game);
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        for x in 6..=10 {
+            for z in 6..=13 {
+                game.world.set(x, 63, z, stone).unwrap();
+            }
+        }
+        game.settings.main_hand_left = false;
+        assert!(game.run_command("summon horse 8.5 64 12.5 {NoAI:1b,Tame:1b}"));
+        let horse = game
+            .mobs
+            .iter_mut()
+            .find(|mob| &*mob.kind.id == "minecraft:horse")
+            .unwrap();
+        horse.yaw = 0.0;
+        let horse = horse.id;
+        test(game, horse);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn minecart_dismount_uses_the_riders_scaffolding_and_powder_snow_shapes() {
+    check_contextual_dismount(true);
+}
+
+#[test]
+#[ignore = "daily"]
+fn horse_dismount_uses_the_riders_scaffolding_and_powder_snow_shapes() {
+    check_contextual_dismount(false);
+}
+
+fn check_contextual_dismount(cart: bool) {
+    with_dismount_terrain(|game, horse| {
+        let registry = game.pack.assets.registry;
+        let slab = crate::game::native_hooks::with_property(
+            registry,
+            registry.default_state("minecraft:stone_slab").unwrap(),
+            "type",
+            "bottom",
+        )
+        .unwrap();
+        let scaffold = crate::game::native_hooks::with_property(
+            registry,
+            registry.default_state("minecraft:scaffolding").unwrap(),
+            "distance",
+            "0",
+        )
+        .unwrap();
+        let (z, source) = if cart {
+            (7, Vec3::new(START.x, START.y + SEAT, START.z))
+        } else {
+            (12, Vec3::new(8.5, 65.6, 12.5))
+        };
+        let mut rider = PlayerMotion::new(game.motion, source).unwrap();
+        let target = |game: &Game<'_>, rider: &PlayerMotion| {
+            let at = if cart {
+                game.cart_player_dismount_target(0, rider).0
+            } else {
+                game.player_dismount_point(horse, 0.0, rider).unwrap()
+            };
+            [at.x.floor(), at.y, at.z.floor()]
+        };
+        let preferred = |height| [7.0, height, f64::from(z)];
+        let other = if cart {
+            [7.0, 64.0, 9.0]
+        } else {
+            [9.0, 64.0, 12.0]
+        };
+
+        game.world.set(7, 64, z, slab).unwrap();
+        game.world.set(7, 65, z, scaffold).unwrap();
+        rider.shift_key_down = true;
+        assert_eq!(target(game, &rider), preferred(64.5));
+        rider.position.y = 67.0;
+        assert_eq!(target(game, &rider), preferred(64.5));
+        rider.shift_key_down = false;
+        // The horse can use the top of this scaffold. The cart searches
+        // only its block and one above or below it.
+        assert_eq!(
+            target(game, &rider),
+            if cart { other } else { preferred(66.0) }
+        );
+
+        let air = registry.default_state("minecraft:air").unwrap();
+        let snow = registry.default_state("minecraft:powder_snow").unwrap();
+        game.world.set(7, 65, z, air).unwrap();
+        game.world.set(7, 64, z, snow).unwrap();
+        rider.position = source;
+        assert_eq!(target(game, &rider), preferred(64.0));
+        rider.fall_distance = 3.0;
+        assert_eq!(target(game, &rider), other);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn cart_and_horse_dismount_bound_the_whole_rider_with_the_vanilla_border_epsilon() {
+    with_dismount_terrain(|game, horse| {
+        let rider = PlayerMotion::new(game.motion, START).unwrap();
+        game.carts.update(0, |cart| cart.yaw = 180.0);
+        let cart_target = |game: &Game<'_>| game.cart_player_dismount_target(0, &rider).0;
+        let south = cart_target(game);
+        assert_eq!(south.z, 9.5);
+        let max = rider.dimensions.bounds(south).max(Axis::Z) - f64::from(1.0e-5_f32);
+        game.border.set_size(16.0);
+        game.border.set_center([7.5, max.next_up() - 8.0]);
+        assert_eq!(cart_target(game), south);
+        game.border.set_center([7.5, max - 8.0]);
+        assert_eq!(cart_target(game).z, 7.5);
+
+        game.border.set_center([8.5, 12.5]);
+        game.settings.main_hand_left = true;
+        let horse_target =
+            |game: &Game<'_>| game.player_dismount_point(horse, 0.0, &rider).unwrap();
+        let east = horse_target(game);
+        assert_eq!(east.x.floor(), 9.0);
+        let max = rider.dimensions.bounds(east).max(Axis::X) - f64::from(1.0e-5_f32);
+        game.border.set_center([max.next_up() - 8.0, 12.5]);
+        assert_eq!(horse_target(game), east);
+        game.border.set_center([max - 8.0, 12.5]);
+        assert_eq!(horse_target(game).x.floor(), 7.0);
+    });
+}
+
 #[test]
 #[ignore = "daily"]
 fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {

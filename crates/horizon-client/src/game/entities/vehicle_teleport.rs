@@ -6,6 +6,7 @@
 //! `Entity.forceSetRotation`).
 use super::commands::Target;
 use super::entity::{Entity as _, with_entity, with_entity_mut};
+use super::respawn_anchor::DismountCollision;
 use super::server_travel::{
     LevelTeleport, LevelTeleportPassenger, PlayerTravelOrigin, TravelCause,
 };
@@ -158,6 +159,7 @@ impl Game<'_> {
         let [bx, by, bz] =
             [cart.position.x, cart.position.y, cart.position.z].map(|v| v.floor() as i32);
         let half = f64::from(rider.width().min(1.0) / 2.0);
+        let collision = DismountCollision::mob(rider);
         for dy in [0, 1, -1] {
             for (dx, dz) in offsets {
                 let p = [bx + dx, by + dy, bz + dz];
@@ -174,7 +176,7 @@ impl Game<'_> {
                         Vec3::new(at.x - half, at.y, at.z - half),
                         Vec3::new(at.x + half, at.y + f64::from(rider.height()), at.z + half),
                     );
-                    if self.can_dismount_to(bounds) {
+                    if self.can_dismount_to(bounds, &collision) {
                         return Some(at);
                     }
                 }
@@ -207,6 +209,7 @@ impl Game<'_> {
         let reach =
             (f64::from(mount.width()) + f64::from(rider.width()) + f64::from(1e-5_f32)) / 2.0;
         let limit = mount.bounds().max_position().y + 0.75;
+        let collision = DismountCollision::mob(rider);
         for turn in [turn, -turn] {
             let radians = f64::from((mount.yaw + turn) * 0.017_453_292);
             let (dx, dz) = (-trig::sin(radians), trig::cos(radians));
@@ -229,7 +232,7 @@ impl Game<'_> {
                         Vec3::new(x - half, at.y, z - half),
                         Vec3::new(x + half, at.y + f64::from(rider.height()), z + half),
                     );
-                    if self.can_dismount_to(bounds) {
+                    if self.can_dismount_to(bounds, &collision) {
                         return Some(at);
                     }
                 }
