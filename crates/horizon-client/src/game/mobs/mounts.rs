@@ -583,11 +583,15 @@ impl Game<'_> {
         // of the `dismounts_underwater` tag (a server's player too: `leave_guest` tells their
         // client). When `entity_mount` keeps it on, the mount still reads this tick's input.
         let species = self.mobs[i].species();
-        let forced =
-            !self.mobs[i].alive() || (dismounts_underwater(species) && self.rider_eyes_in_water());
+        let alive = self.mobs[i].alive();
         let mut dismount = None;
-        let i = if keys.shift || forced {
-            if !forced && species == Species::Horse && self.lan_acting.is_some() {
+        let i = if keys.shift
+            || !alive
+            || (dismounts_underwater(species) && self.rider_eyes_in_water())
+        {
+            // Both sneak and underwater stopRiding on a live horse detach
+            // before Paper offers a separately cancellable landing.
+            if alive && species == Species::Horse && self.lan_acting.is_some() {
                 dismount = self
                     .prepare_mount_dismount()
                     .and_then(|landing| self.admit_guest_dismount(landing));

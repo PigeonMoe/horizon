@@ -179,6 +179,16 @@ fn a_kept_server_player_still_drives_and_sneaks() {
 #[test]
 #[ignore = "daily"]
 fn a_live_horse_checks_its_guests_sneak_dismount_at_their_chosen_side() {
+    check_guest_horse_dismount(false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_submerged_guests_horse_exit_checks_its_landing_without_sneak() {
+    check_guest_horse_dismount(true);
+}
+
+fn check_guest_horse_dismount(submerged: bool) {
     use crate::game::{
         native_entity_refs::tests::run_on_guest_stack, native_guest_turn_tests::with_guests,
     };
@@ -242,13 +252,21 @@ fn a_live_horse_checks_its_guests_sneak_dismount_at_their_chosen_side() {
         }
     }
 
-    run_on_guest_stack(|| {
+    run_on_guest_stack(move || {
         let traces = Arc::new(Mutex::new(Vec::new()));
+        let keep = Arc::new(AtomicBool::new(submerged));
+        let leaves = Arc::new(AtomicU32::new(0));
         mod_platform::testing::with_mods(
-            vec![mod_api::ModEntry::new(
-                "horse-dismount-test",
-                Box::new(Protect(traces.clone())),
-            )]
+            vec![
+                mod_api::ModEntry::new("horse-dismount-test", Box::new(Protect(traces.clone()))),
+                mod_api::ModEntry::new(
+                    "keep-rider",
+                    Box::new(KeepRider {
+                        keep: keep.clone(),
+                        leaves: leaves.clone(),
+                    }),
+                ),
+            ]
             .into(),
             || {
                 with_guests(|game| {
@@ -280,6 +298,12 @@ fn a_live_horse_checks_its_guests_sneak_dismount_at_their_chosen_side() {
                     // side has a full standing space.
                     game.world.set(7, 64, 8, slab).unwrap();
                     game.world.set(7, 66, 8, stone).unwrap();
+                    if submerged {
+                        let water = registry.default_state("minecraft:water").unwrap();
+                        for y in 64..=68 {
+                            game.world.set(8, y, 8, water).unwrap();
+                        }
+                    }
                     game.settings.main_hand_left = false;
                     assert!(game.run_command("summon horse 8.5 64 8.5 {NoAI:1b,Tame:1b}"));
                     let horse = game
@@ -304,10 +328,23 @@ fn a_live_horse_checks_its_guests_sneak_dismount_at_their_chosen_side() {
                             guest.load_timeout = 0;
                             guest.awaiting_teleport = None;
                             guest.info.main_hand = hand;
+                        });
+                        game.lan_player_input(conn, if submerged { 0 } else { 32 }, true);
+                        assert_eq!(
+                            game.as_guest(conn, |game| game.rider_eyes_in_water()),
+                            Some(submerged)
+                        );
+                        if submerged && uuid == DENIED {
+                            game.guest_vehicle_tick(conn);
+                            assert_eq!(leaves.load(Ordering::SeqCst), 1);
+                            assert_eq!(game.command_guest(conn).unwrap().vehicle, Some(horse_id));
+                            assert!(traces.lock().unwrap().is_empty());
+                            keep.store(false, Ordering::SeqCst);
+                        }
+                        game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
                             guest.motion.as_mut().unwrap().velocity = motion;
                         });
                         let from = game.command_guest(conn).unwrap().position;
-                        game.lan_player_input(conn, 32, true);
                         game.guest_vehicle_tick(conn);
 
                         let records = std::mem::take(&mut *traces.lock().unwrap());
