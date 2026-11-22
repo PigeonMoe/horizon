@@ -426,10 +426,15 @@ impl Game<'_> {
         Ok(true)
     }
 
-    /// `LocalPlayer.tick` for a passenger: the boat it controls goes to the
-    /// server every tick with its paddles (the rider's own position does not).
+    /// `LocalPlayer.tick` reports movement for a controlled root vehicle.
+    /// `AbstractBoat.tick` reports its paddles independently.
     pub(super) fn remote_vehicle_packets(&self) -> Vec<S> {
-        if let Some(m) = self.driven_mount() {
+        let is_passenger = |id| {
+            self.remote
+                .as_ref()
+                .is_some_and(|remote| remote.passenger_vehicles.contains_key(&id))
+        };
+        if let Some(m) = self.driven_mount().filter(|m| !is_passenger(m.id)) {
             return vec![mount_move(m)];
         }
         let Some(b) = self
@@ -439,18 +444,20 @@ impl Game<'_> {
         else {
             return Vec::new();
         };
-        vec![
-            S::MoveVehicle(play::MoveVehicleRequest {
+        let mut packets = Vec::with_capacity(2);
+        if !is_passenger(b.id) {
+            packets.push(S::MoveVehicle(play::MoveVehicleRequest {
                 position: [b.position.x, b.position.y, b.position.z],
                 yaw: b.yaw,
                 pitch: 0.0,
                 on_ground: b.on_ground,
-            }),
-            S::PaddleBoat(play::PaddleBoat {
-                left: b.paddling[0],
-                right: b.paddling[1],
-            }),
-        ]
+            }));
+        }
+        packets.push(S::PaddleBoat(play::PaddleBoat {
+            left: b.paddling[0],
+            right: b.paddling[1],
+        }));
+        packets
     }
 
     /// `ClientPacketListener.handleMoveVehicle`: the server put the boat or
@@ -971,6 +978,35 @@ mod tests {
             "the release waits a tick"
         );
         assert_eq!(zza(&mut game, Keys::default()), 0.0);
+
+        assert!(matches!(
+            game.remote_vehicle_packets().as_slice(),
+            [S::MoveVehicle(_)]
+        ));
+        game.remote_set_passengers(8, &[7]);
+        assert!(game.remote_vehicle_packets().is_empty());
+        game.remote_set_passengers(8, &[]);
+        assert!(matches!(
+            game.remote_vehicle_packets().as_slice(),
+            [S::MoveVehicle(_)]
+        ));
+
+        let mut boat = super::super::boats::Boat::new(9, "oak".into(), Vec3::ZERO, 0.0);
+        boat.paddling = [true, false];
+        game.boats.push(boat);
+        game.riding = Some(9);
+        assert!(matches!(
+            game.remote_vehicle_packets().as_slice(),
+            [S::MoveVehicle(_), S::PaddleBoat(_)]
+        ));
+        game.remote_set_passengers(8, &[9]);
+        assert!(matches!(
+            game.remote_vehicle_packets().as_slice(),
+            [S::PaddleBoat(play::PaddleBoat {
+                left: true,
+                right: false
+            })]
+        ));
     }
 
     /// #2920: the client reports where it moved the mount, and a released

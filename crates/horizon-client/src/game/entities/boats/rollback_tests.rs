@@ -291,7 +291,7 @@ fn launch_nested_camel_driver(game: &mut Game<'_>) -> mpsc::Receiver<Out> {
 
 #[test]
 #[ignore = "daily"]
-fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
+fn a_nested_driver_cannot_move_its_mount_until_it_is_the_root_vehicle() {
     use horizon_client::lan::guest::InboxItem;
     use horizon_protocol::packets::play::{AcceptTeleportation, Serverbound};
 
@@ -349,15 +349,34 @@ fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
                     guest.inbox.push_back(InboxItem::Packet(packet, None));
                 }
             });
-            // No additional ride tick has repaired a stale movement baseline.
+            // The rider confirmed the player teleport, but the camel is
+            // still a passenger of the boat and cannot move independently.
             game.tick_lan_packets();
-            assert_eq!(game.entity_position(mount), Some(target));
+            assert_eq!(game.entity_position(mount), Some(at));
             assert_eq!(game.entity_vehicle(driver), Some(mount));
             assert!(
                 received_packets(&packets)
                     .iter()
                     .all(|packet| !matches!(packet, Clientbound::MoveVehicle(_)))
             );
+
+            assert!(game.entity_stop_riding(mount));
+            assert_eq!(game.entity_vehicle(mount), None);
+            game.guest_vehicle_tick(conn);
+            let at = game.entity_position(mount).unwrap();
+            let mount_state = game.mob_object(CAMEL).unwrap();
+            let target = [at[0] + 0.05, at[1], at[2]];
+            game.guest_move_vehicle(
+                conn,
+                &MoveVehicleRequest {
+                    position: target,
+                    yaw: mount_state.yaw,
+                    pitch: mount_state.head_pitch,
+                    on_ground: false,
+                },
+            );
+            assert_eq!(game.entity_position(mount), Some(target));
+            assert_eq!(game.entity_vehicle(driver), Some(mount));
         });
     });
 }

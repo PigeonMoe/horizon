@@ -9,7 +9,7 @@
 //! here with the rider's input (`ServerPlayer.getLastClientMoveIntent`).
 //! Sneaking gets out (`Player.rideTick`: `wantsToStopRiding`), and the client
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
-use super::{Dim, Game, Keys, lan::LanHost, minecarts::SEAT};
+use super::{Dim, Game, Keys, commands::Target, lan::LanHost, minecarts::SEAT};
 use horizon_client::collisions::SceneCollisions;
 use horizon_client::lan::hub::no_blocks_in;
 use horizon_client::mobs::equine;
@@ -396,12 +396,6 @@ impl Game<'_> {
     /// moved too quickly or wrongly; then it stays, and the client is told
     /// where it is.
     pub(super) fn guest_move_vehicle(&mut self, conn: u32, p: &play::MoveVehicleRequest) {
-        let controls_vehicle = self
-            .lan
-            .as_ref()
-            .and_then(|host| host.hub.guest(conn))
-            .and_then(|g| g.vehicle)
-            .is_none_or(|v| self.guest_controls_vehicle(conn, v));
         let Some(host) = self.lan.as_ref() else {
             return;
         };
@@ -420,15 +414,21 @@ impl Game<'_> {
         if g.awaiting_teleport.is_some() || !g.client_loaded() {
             return;
         }
-        // Only the vehicle's controlling passenger moves it: the move of a
-        // player in a boat's second seat is ignored (#11541).
-        if !controls_vehicle {
+        let Some(vehicle) = g.vehicle else {
+            return;
+        };
+        // The root vehicle must be driven by this player. A camel carried by
+        // a boat cannot move independently, even with the player on its saddle.
+        // A player in a boat's second seat cannot move it either (#11541).
+        if self.native_root_vehicle_id(vehicle, Target::Mob(vehicle)) != Some(vehicle)
+            || !self.guest_controls_vehicle(conn, vehicle)
+        {
             return;
         }
         let player = g.uuid;
         let owner = host.hub.singleplayer_owner == Some(player);
         let allow_flight = host.hub.config.allow_flight;
-        let (vehicle, good) = (g.vehicle, g.vehicle_good);
+        let good = g.vehicle_good;
         let back = |host: &mut LanHost, position: Vec3, yaw: f32| {
             let packet = play::MoveVehicle {
                 position: [position.x, position.y, position.z],
@@ -440,12 +440,11 @@ impl Game<'_> {
         // Only a boat, and a horse its rider's client moves, are driven by
         // their rider (getControllingPassenger); a minecart that is elsewhere
         // on the client is put back.
-        let boat = vehicle.and_then(|v| self.boats.iter().position(|b| b.id == v));
-        let mount = vehicle.and_then(|v| {
-            self.mobs
-                .iter()
-                .position(|m| m.id == v && equine::moved_by_client(m))
-        });
+        let boat = self.boats.iter().position(|b| b.id == vehicle);
+        let mount = self
+            .mobs
+            .iter()
+            .position(|m| m.id == vehicle && equine::moved_by_client(m));
         // The vehicle's id, kind, position, rotation, motion, box, step height
         // and ground.
         let (id, old, yaw, velocity, bounds, step, on_ground) = if let Some(i) = boat {
@@ -472,7 +471,7 @@ impl Game<'_> {
                 m.on_ground,
             )
         } else {
-            if let Some(c) = vehicle.and_then(|v| self.carts.iter().find(|c| c.id == v))
+            if let Some(c) = self.carts.iter().find(|c| c.id == vehicle)
                 && c.position.distance_squared(Vec3::new(x, y, z)) > 1.0
             {
                 back(self.lan.as_mut().unwrap(), c.position, c.yaw);
