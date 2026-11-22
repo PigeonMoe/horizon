@@ -468,13 +468,21 @@ impl Game<'_> {
             if source == destination {
                 return Ok(false);
             }
+            // An active travel listener can keep just the blocking branch
+            // behind. Without one, the occupied dragon slot cannot change.
+            if game.entity_travel_hook_epoch().is_none() {
+                game.check_vehicle_dragon_slot(root, destination)?;
+            }
             // Refused passengers are dismounted and remain in the source level.
             if !game.tree_may_travel(root, destination) {
                 return Ok(true);
             }
-            // Open the destination before changing or removing any entity.
+            // Open the destination before placing or taking the source tree.
             game.enter_level(destination)?;
             game.enter_level(source)?;
+            // Travel listeners may have changed the tree, and opening a level
+            // runs its load listeners. Check the state that is about to move.
+            game.check_vehicle_dragon_slot(root, destination)?;
             if game
                 .mobs
                 .iter()
@@ -581,6 +589,24 @@ impl Game<'_> {
             Ok(true)
         })
         .unwrap_or(Ok(false))
+    }
+
+    fn check_vehicle_dragon_slot(
+        &self,
+        root: u32,
+        destination: super::Dim,
+    ) -> horizon_client::Result<()> {
+        if self.levels.parked_has_dragon(destination)
+            && self
+                .dragon
+                .as_ref()
+                .is_some_and(|dragon| self.passenger_tree(root).contains(&dragon.id))
+        {
+            // The dragon loader refuses a second dragon. Catch that refusal
+            // before a postorder restore could install part of the tree.
+            return Err(format!("{} already has an ender dragon", destination.id()).into());
+        }
+        Ok(())
     }
 
     /// Whether the vehicle `root` and the server players riding it (or what it

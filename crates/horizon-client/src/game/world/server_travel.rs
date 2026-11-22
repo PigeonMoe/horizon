@@ -590,6 +590,16 @@ impl Game<'_> {
         self.entity_tree_may_travel(id, to, cause, &mut Vec::new())
     }
 
+    pub(super) fn entity_travel_hook_epoch(&self) -> Option<mod_api::WorldEpoch> {
+        if self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::EntityTravelToDimension)
+        {
+            self.native_lifecycle.epoch()
+        } else {
+            None
+        }
+    }
+
     fn entity_tree_may_travel(
         &mut self,
         id: u32,
@@ -597,12 +607,7 @@ impl Game<'_> {
         cause: TravelCause,
         visited: &mut Vec<u32>,
     ) -> bool {
-        if !self.native_authoritative()
-            || !mod_api::__private::listened(mod_api::HookId::EntityTravelToDimension)
-        {
-            return true;
-        }
-        let Some(epoch) = self.native_lifecycle.epoch() else {
+        let Some(epoch) = self.entity_travel_hook_epoch() else {
             return true;
         };
         if visited.contains(&id)

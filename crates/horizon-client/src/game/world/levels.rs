@@ -575,6 +575,12 @@ impl Levels {
         self.parked.get(&dim).map(|level| &level.border)
     }
 
+    pub(super) fn parked_has_dragon(&self, dim: Dim) -> bool {
+        self.parked
+            .get(&dim)
+            .is_some_and(|level| level.dragon.as_ref().is_some())
+    }
+
     pub(super) fn install_profession_save_snapshots(
         &self,
         table: Arc<horizon_client::mobs::villager::ResolvedProfessions>,

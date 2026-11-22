@@ -149,6 +149,187 @@ fn every_entity_kind_follows_a_cross_dimension_tp() {
     }
 }
 
+#[test]
+#[ignore = "daily"]
+fn a_conflicting_dragon_destination_preserves_the_source_vehicle_tree() {
+    use super::{Target, TeleportMotion};
+    use horizon_mod_runtime::attachments::{AttachmentType, Attachments, Holder};
+
+    let mut game = game();
+    game.enter_level(Dim::Nether).unwrap();
+    assert!(game.run_command("summon minecraft:ender_dragon 15 65 15"));
+    let destination_dragon = game.dragon.as_ref().unwrap().id;
+    game.enter_level(Dim::Overworld).unwrap();
+    assert!(game.run_command(concat!(
+        "summon minecraft:pig 1 64 1 ",
+        "{Passengers:[{id:\"minecraft:cow\"},{id:\"minecraft:ender_dragon\"}]}"
+    )));
+    let root = game
+        .mobs
+        .iter()
+        .find(|mob| mob.extra.mount.is_none())
+        .unwrap()
+        .id;
+    let [cow, dragon] = game.ordered_live_passengers(root).try_into().unwrap();
+    assert_eq!(
+        game.level_entity(dragon as i32),
+        Some(Target::Dragon(dragon))
+    );
+    let vehicles = [Target::Mob(root), Target::Mob(cow), Target::Dragon(dragon)];
+    let poses = vehicles.map(|target| {
+        (
+            game.target_position(target).unwrap(),
+            game.target_rotation(target),
+        )
+    });
+    let attachment = AttachmentType {
+        namespace: "mymod",
+        name: "vehicle_rider",
+        default: || 0,
+        codec: None,
+        copy_on_death: false,
+        sync: false,
+    };
+    let mut values = Attachments::default();
+    attachment
+        .set(&mut values, Holder::Entity(cow), 41)
+        .unwrap();
+    game.entity_attachments.insert(cow, values);
+
+    let destination = [8.0, 72.0, 8.0];
+    let error = game
+        .teleport_vehicle_across(
+            Target::Mob(root),
+            Dim::Nether,
+            destination,
+            Some([90.0, 10.0]),
+            true,
+            TeleportMotion::Stop,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("already has an ender dragon"));
+    assert_eq!(game.dim, Dim::Overworld);
+    assert_eq!(game.ordered_live_passengers(root), [cow, dragon]);
+    for (target, (position, rotation)) in vehicles.into_iter().zip(poses) {
+        assert_eq!(game.target_position(target), Some(position));
+        assert_eq!(game.target_rotation(target), rotation);
+    }
+    assert_eq!(
+        attachment.get(
+            game.entity_attachments.get_mut(&cow).unwrap(),
+            Holder::Entity(cow)
+        ),
+        Ok(41),
+    );
+    game.enter_level(Dim::Nether).unwrap();
+    assert_eq!(game.dragon.as_ref().unwrap().id, destination_dragon);
+    assert!(game.mobs.is_empty());
+    game.discard_resident_dragon();
+    game.enter_level(Dim::Overworld).unwrap();
+
+    assert!(
+        game.teleport_vehicle_across(
+            Target::Mob(root),
+            Dim::Nether,
+            destination,
+            None,
+            false,
+            TeleportMotion::Stop,
+        )
+        .unwrap()
+    );
+    assert!(game.mobs.is_empty());
+    assert!(game.dragon.as_ref().is_none());
+    game.enter_level(Dim::Nether).unwrap();
+    let root = game
+        .mobs
+        .iter()
+        .find(|mob| mob.extra.mount.is_none())
+        .unwrap()
+        .id;
+    let [cow, dragon] = game.ordered_live_passengers(root).try_into().unwrap();
+    assert_eq!(game.target_position(Target::Mob(root)), Some(destination));
+    assert_eq!(game.dragon.as_ref().unwrap().id, dragon);
+    assert_eq!(
+        attachment.get(
+            game.entity_attachments.get_mut(&cow).unwrap(),
+            Holder::Entity(cow)
+        ),
+        Ok(41),
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_conflicting_dragon_destination_still_accepts_the_root_after_rider_veto() {
+    use super::{Target, TeleportMotion};
+    use mod_api::{EntityTravelToDimensionEvent, Flow, Hooks, ServerHost};
+
+    struct VetoCow;
+    #[mod_api::__subscriptions]
+    impl Hooks for VetoCow {
+        fn entity_travel_to_dimension(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut EntityTravelToDimensionEvent,
+        ) -> Flow {
+            if event.entity.kind(host).map(|kind| kind.id(host)).as_deref() == Some("minecraft:cow")
+            {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    mod_platform::testing::with_mods(
+        vec![mod_api::ModEntry::new("veto_cow", Box::new(VetoCow))].into(),
+        || {
+            let mut game = game();
+            game.enter_level(Dim::Nether).unwrap();
+            assert!(game.run_command("summon minecraft:ender_dragon 15 65 15"));
+            let destination_dragon = game.dragon.as_ref().unwrap().id;
+            game.enter_level(Dim::Overworld).unwrap();
+            assert!(game.run_command(concat!(
+                "summon minecraft:pig 1 64 1 ",
+                "{Passengers:[{id:\"minecraft:cow\",Passengers:[{id:\"minecraft:ender_dragon\"}]}]}"
+            )));
+            let root = game
+                .mobs
+                .iter()
+                .find(|mob| mob.extra.mount.is_none())
+                .unwrap()
+                .id;
+            let [cow] = game.ordered_live_passengers(root).try_into().unwrap();
+            let dragon = game.dragon.as_ref().unwrap().id;
+            assert_eq!(game.ordered_live_passengers(cow), [dragon]);
+
+            let destination = [8.0, 72.0, 8.0];
+            assert!(
+                game.teleport_vehicle_across(
+                    Target::Mob(root),
+                    Dim::Nether,
+                    destination,
+                    None,
+                    false,
+                    TeleportMotion::Stop,
+                )
+                .unwrap()
+            );
+            assert!(game.mob_object(root).is_none());
+            assert_eq!(game.mob_object(cow).unwrap().extra.mount, None);
+            assert_eq!(game.ordered_live_passengers(cow), [dragon]);
+            game.enter_level(Dim::Nether).unwrap();
+            assert_eq!(game.dragon.as_ref().unwrap().id, destination_dragon);
+            assert_eq!(game.mobs.len(), 1);
+            assert_eq!(
+                game.target_position(Target::Mob(game.mobs[0].id)),
+                Some(destination)
+            );
+        },
+    );
+}
+
 /// `Level.isInSpawnableBounds` on `BlockPos.containing`: the lower bounds are
 /// inside, the upper bounds outside, so `/tp` accepts the world border
 /// coordinates. Pins the bound (already true before the cross-dimension move).
