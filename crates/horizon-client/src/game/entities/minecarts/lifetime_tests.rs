@@ -242,11 +242,11 @@ fn activator_respects_canceled_player_dismount() {
             let mut cart = Minecart::new(71, CartKind::Rideable, Vec3::ZERO);
             game.carts.push(cart.clone());
             game.riding = Some(71);
-            game.activate_cart(&mut cart, true);
+            game.activate_cart(&mut cart, true, &mut CartRiderTick::default());
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
             assert_eq!(game.riding, Some(71));
             cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-            game.activate_cart(&mut cart, true);
+            game.activate_cart(&mut cart, true, &mut CartRiderTick::default());
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
             assert_eq!(game.riding, None);
         });

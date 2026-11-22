@@ -134,6 +134,16 @@ fn lay_rails(game: &mut Game<'_>) {
 #[test]
 #[ignore = "daily"]
 fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
+    check_guest_dismount(false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn powered_activator_rail_checks_the_landing_at_ejection() {
+    check_guest_dismount(true);
+}
+
+fn check_guest_dismount(powered_rail: bool) {
     use mod_api::PlayerPositionCommittedEvent;
 
     #[derive(Debug, PartialEq)]
@@ -148,6 +158,16 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
     struct Protection(Arc<Landing>);
     #[mod_api::__subscriptions]
     impl Hooks for Protection {
+        fn ridden_vehicle_move_pre(
+            &self,
+            _: &dyn Host,
+            event: &mut RiddenVehicleMovePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.vehicle, CART);
+            event.paper_rollback = true;
+            Flow::Cancel
+        }
+
         fn player_teleport_pre(
             &self,
             host: &mut dyn ServerHost,
@@ -187,7 +207,7 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
         }
     }
 
-    run_on_guest_stack(|| {
+    run_on_guest_stack(move || {
         let landing = Arc::new(Landing::default());
         mod_platform::testing::with_mods(
             vec![ModEntry::new(
@@ -199,17 +219,42 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
                 with_guests(|game| {
                     game.options.dedicated = Some(Vec::new());
                     lay_rails(game);
-                    let stone = game
-                        .pack
-                        .assets
-                        .registry
-                        .default_state("minecraft:stone")
-                        .unwrap();
+                    let registry = game.pack.assets.registry;
+                    let stone = registry.default_state("minecraft:stone").unwrap();
                     game.world.set(7, 63, 7, stone).unwrap();
+                    let (input, target) = if powered_rail {
+                        let activator = registry.default_state("minecraft:activator_rail").unwrap();
+                        let east_west = crate::game::native_hooks::with_property(
+                            registry,
+                            activator,
+                            "shape",
+                            "east_west",
+                        )
+                        .unwrap();
+                        let powered = crate::game::native_hooks::with_property(
+                            registry, east_west, "powered", "true",
+                        )
+                        .unwrap();
+                        game.world.set(7, 64, 8, powered).unwrap();
+                        game.world.set(8, 63, 9, stone).unwrap();
+                        // The cart still faces north at ejection, so the east
+                        // landing wins. Using its later east-facing yaw would
+                        // choose the southern platform instead.
+                        (0, [9.5, 64.0, 8.5])
+                    } else {
+                        (32, [7.5, 64.0, 7.5])
+                    };
                     let cart = game.entity(CART).unwrap();
-                    let target = [7.5, 64.0, 7.5];
                     let velocity = Vec3::new(0.25, 0.0, 0.0);
                     for uuid in [FIRST_RIDER, SECOND_RIDER] {
+                        if powered_rail {
+                            game.carts.update(0, |cart| {
+                                cart.position = START;
+                                cart.yaw = 90.0;
+                                cart.flipped = false;
+                                cart.velocity = Vec3::new(0.4, 0.0, 0.0);
+                            });
+                        }
                         let conn = uuid as u32;
                         let rider = game.player(uuid).unwrap().entity();
                         assert!(game.entity_start_riding(rider, cart, true));
@@ -220,9 +265,9 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
                             guest.awaiting_teleport = None;
                             guest.motion.as_mut().unwrap().velocity = velocity;
                         });
-                        game.lan_player_input(conn, 32, true);
+                        game.lan_player_input(conn, input, true);
                         let guest = game.command_guest(conn).unwrap();
-                        assert!(guest.sneaking);
+                        assert_eq!(guest.sneaking, !powered_rail);
                         let (from, view) = (guest.position, [guest.yaw, guest.pitch]);
                         assert_ne!(from.map(f64::floor), target.map(f64::floor));
                         game.guest_vehicle_tick(conn);
@@ -239,7 +284,12 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
                             guest.motion.as_ref().unwrap().velocity,
                             if allowed { velocity } else { Vec3::ZERO }
                         );
-                        assert_eq!(game.carts[0].position, START);
+                        if powered_rail {
+                            assert!(game.carts[0].position.x >= 8.0);
+                            assert_eq!(game.carts[0].yaw, 180.0);
+                        } else {
+                            assert_eq!(game.carts[0].position, START);
+                        }
                         assert_eq!(
                             std::mem::take(&mut *landing.proposed.lock().unwrap()),
                             [Move(uuid, from, target)]

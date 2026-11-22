@@ -15,8 +15,8 @@ mod save_lending;
 #[path = "minecarts/section_steps.rs"]
 mod section_steps;
 
-use super::native_hooks::VehicleRollback;
 use super::{Game, Hit, InteractTarget, Keys, entity::Entity};
+use super::{lan_vehicles::GuestDismount, native_hooks::VehicleRollback};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
 use horizon_client::fast_hash::FxHashSet;
@@ -51,6 +51,14 @@ mod hit;
 mod seat;
 pub(super) use hit::CartHit;
 use seat::*;
+
+#[derive(Default)]
+struct CartRiderTick {
+    rollback: Option<VehicleRollback>,
+    // A callback can move the guest itself, leaving no landing to commit.
+    guest_ejected: bool,
+    dismount: Option<GuestDismount>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum CartKind {
@@ -1143,6 +1151,7 @@ impl Game<'_> {
         c: &mut Minecart,
         intent: [f64; 2],
         hopper_consumed: &mut bool,
+        rider: &mut CartRiderTick,
     ) {
         // `TrackIteration`: the slope, halt and boost speeds each apply once
         // per tick, and the iteration keeps moving while distance is left.
@@ -1173,7 +1182,7 @@ impl Game<'_> {
             step_start = c.position;
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
-                self.activate_cart(c, rail.powered);
+                self.activate_cart(c, rail.powered, rider);
             }
             let ridden = self.cart_is_vehicle(c.id);
             let initial_h = c.velocity.horizontal_distance();
@@ -1439,7 +1448,7 @@ impl Game<'_> {
         intent: [f64; 2],
         slot: usize,
         index: &mut CartIndex,
-        rider_rollback: &mut Option<VehicleRollback>,
+        rider: &mut CartRiderTick,
     ) -> bool {
         c.tick_count += 1;
         c.previous = c.position;
@@ -1468,7 +1477,7 @@ impl Game<'_> {
         let experimental = self.minecart_improvements();
         let mut hopper_consumed = false;
         let old_rail = if experimental {
-            self.move_along_track_new(c, intent, &mut hopper_consumed);
+            self.move_along_track_new(c, intent, &mut hopper_consumed, rider);
             None
         } else if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
             self.move_along_track(c, pos, &rail, intent, slot);
@@ -1477,6 +1486,17 @@ impl Game<'_> {
             self.come_off_track(c);
             None
         };
+        let ejecting_rail = old_rail.as_ref().is_some_and(|rail| {
+            c.kind == CartKind::Rideable
+                && rail.powered
+                && &*rail.name == "minecraft:activator_rail"
+        });
+        // Paper observes the remaining passengers after the rail behavior
+        // runs, so a rider already ejected cannot veto the cart's movement.
+        if ejecting_rail {
+            self.note_cart_pass(c, pos);
+            self.activate_cart(c, true, rider);
+        }
         let denied = self.ridden_hull_move_denial(c.id, c.previous, c.position);
         let restore_pose = |cart: &mut Minecart| {
             cart.position = cart.previous;
@@ -1490,10 +1510,10 @@ impl Game<'_> {
             if !paper_rollback {
                 restore_pose(c);
             }
-        } else if let Some(rail) = old_rail {
+        } else if !ejecting_rail && let Some(rail) = old_rail {
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
-                self.activate_cart(c, rail.powered);
+                self.activate_cart(c, rail.powered, rider);
             }
         }
         c.first_tick = false;
@@ -1518,13 +1538,13 @@ impl Game<'_> {
             c.pitch %= 360.0;
         }
         if let Some((player, true)) = denied {
-            *rider_rollback = self.edit_vehicle_rollback(
+            rider.rollback = self.edit_vehicle_rollback(
                 c.id,
                 player,
                 (c.position, [c.yaw, c.pitch]),
                 (c.previous, [c.previous_yaw, c.previous_pitch]),
             );
-            if !matches!(rider_rollback, Some(VehicleRollback::Eject { .. })) {
+            if !matches!(rider.rollback, Some(VehicleRollback::Eject { .. })) {
                 restore_pose(c);
             }
         }
@@ -1637,7 +1657,7 @@ impl Game<'_> {
         );
     }
     /// `activateMinecart` on an activator rail.
-    fn activate_cart(&mut self, c: &mut Minecart, powered: bool) {
+    fn activate_cart(&mut self, c: &mut Minecart, powered: bool, tick: &mut CartRiderTick) {
         match c.kind {
             CartKind::Rideable if powered => {
                 // Minecart.activateMinecart: ejectPassengers.
@@ -1646,6 +1666,18 @@ impl Game<'_> {
                     && self.riding == Some(c.id)
                 {
                     self.riding = None;
+                    if self.lan_acting.is_some() {
+                        tick.guest_ejected = true;
+                        // stopRiding chooses the landing before the rest of
+                        // the cart tick can change its position or heading.
+                        if !self.dismount_in_portal(c.position)
+                            && let Some(rider) = self.player.as_ref()
+                        {
+                            let target = self.cart_dismount_target(c, rider);
+                            let landing = self.apply_cart_dismount_pose(target);
+                            tick.dismount = self.admit_guest_dismount(landing);
+                        }
+                    }
                 }
                 for (_, rider, player) in self.seated_passengers(c.id) {
                     if !player
@@ -2074,12 +2106,12 @@ impl Game<'_> {
             // opening the cart, a command or a save reads it, never a tick, and
             // a mineshaft's chest cart carries its whole roll as NBT. The
             // stored cart keeps its slots for whatever reads them meanwhile.
-            let mut rider_rollback = None;
+            let mut rider = CartRiderTick::default();
             let (due, section_step) = self.with_entity_held_out(id, |game| {
-                section_steps::tick(game, id, i, &mut index, &mut rider_rollback)
+                section_steps::tick(game, id, i, &mut index, &mut rider)
             });
             section_steps::tell(self, id, section_step);
-            if self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider_rollback) {
+            if self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider.rollback) {
                 index.forget_carts();
             }
             if due {
@@ -2181,14 +2213,19 @@ impl Game<'_> {
         }
         (vehicle, carts)
     }
-    /// The rider's tick: the cart moves with the rider's input as its push.
+    #[cfg(test)]
     pub(super) fn tick_cart_riding(&mut self, keys: Keys) -> bool {
+        self.tick_cart_riding_turn(keys).0
+    }
+
+    /// The cart moves with the rider's input. An activator rail may end the ride.
+    pub(super) fn tick_cart_riding_turn(&mut self, keys: Keys) -> (bool, Option<GuestDismount>) {
         let Some(i) = self.carts.iter().position(|c| Some(c.id) == self.riding) else {
-            return false;
+            return (false, None);
         };
         if keys.shift {
             self.dismount_cart(i);
-            return true;
+            return (true, None);
         }
         // ServerPlayer.getLastClientMoveIntent: getInputVector((left, 0, forward), 1, yRot).
         let left = f64::from(i8::from(keys.left) - i8::from(keys.right));
@@ -2203,26 +2240,26 @@ impl Game<'_> {
         let (s, co) = (f64::from(r.sin()), f64::from(r.cos()));
         let intent = [left * co - forward * s, forward * co + left * s];
         let id = self.carts[i].id;
-        let mut rider_rollback = None;
+        let mut rider = CartRiderTick::default();
         let result = self.with_entity_held_out(id, |game| {
-            section_steps::tick_riding(game, id, i, intent, &mut rider_rollback)
+            section_steps::tick_riding(game, id, i, intent, &mut rider)
         });
         let Some((_, alive, cart_step, player_step)) = result else {
-            return true;
+            return (true, rider.dismount);
         };
         section_steps::tell(self, id, cart_step);
         section_steps::tell_player(self, player_step);
-        // AbstractMinecart.activateMinecart: a powered activator rail ejects
-        // the rider, and getDismountLocationForPassenger places it beside the
-        // cart instead of leaving it at the seat.
-        if alive
+        // The local simulation can place the rider directly. A server guest's
+        // seat update must be sent before committing the admitted landing.
+        if !rider.guest_ejected
+            && alive
             && self.riding.is_none()
             && let Some(i) = self.carts.iter().position(|cart| cart.id == id)
         {
             self.dismount_cart(i);
         }
-        self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider_rollback);
-        true
+        self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider.rollback);
+        (true, rider.dismount)
     }
 
     /// `getDismountLocationForPassenger`: beside the cart's motion direction,
@@ -2250,14 +2287,18 @@ impl Game<'_> {
         if self.dismount_in_portal(self.carts[i].position) {
             return None;
         }
-        let (target, pose) = self.cart_player_dismount_target(i, self.player.as_ref()?);
+        let landing = self.cart_player_dismount_target(i, self.player.as_ref()?);
+        Some(self.apply_cart_dismount_pose(landing))
+    }
+
+    fn apply_cart_dismount_pose(&mut self, (target, pose): (Vec3, Option<Pose>)) -> Vec3 {
         if let Some(pose) = pose
             && let Some(player) = self.player.as_mut()
             && let Err(error) = player.set_pose(pose)
         {
             log::warn!("dismount pose: {error}");
         }
-        Some(target)
+        target
     }
 
     /// Search each pose's heights and side offsets in vanilla's order.
@@ -2266,7 +2307,10 @@ impl Game<'_> {
         i: usize,
         rider: &PlayerMotion,
     ) -> (Vec3, Option<Pose>) {
-        let c = &self.carts[i];
+        self.cart_dismount_target(&self.carts[i], rider)
+    }
+
+    fn cart_dismount_target(&self, c: &Minecart, rider: &PlayerMotion) -> (Vec3, Option<Pose>) {
         let [bx, by, bz] = c.position.components().map(|v| v.floor() as i32);
         let face = cart_motion_face(c.yaw, c.flipped, self.minecart_improvements());
         let offsets = dismount_offsets(face);
@@ -3423,7 +3467,7 @@ mod tnt_impact_tests {
                     [0.0; 2],
                     0,
                     &mut super::CartIndex::default(),
-                    &mut None,
+                    &mut super::CartRiderTick::default(),
                 ) {
                     result = true;
                     break;
@@ -3517,7 +3561,7 @@ mod tnt_impact_tests {
             [0.0; 2],
             0,
             &mut super::CartIndex::default(),
-            &mut None,
+            &mut super::CartRiderTick::default(),
         ));
         let powered = registry
             .state(game.world.block(6, 65, 8))
@@ -3957,7 +4001,7 @@ mod rejected_passenger_tests {
             active.position = Vec3::new(40.0, 70.0, 40.0);
             active.yaw = 90.0;
             active.flipped = true;
-            game.activate_cart(&mut active, true);
+            game.activate_cart(&mut active, true, &mut CartRiderTick::default());
             let rider = game.mob_object(ghost).unwrap();
             assert_eq!(rider.extra.mount, None);
             assert_eq!(rider.position, Vec3::new(40.0, 70.0 + HEIGHT, 40.0));
@@ -4058,7 +4102,7 @@ mod hook_mutation_regressions {
                     game.mobs.push(mob);
                 }
                 let mut active = game.carts[0].clone();
-                game.activate_cart(&mut active, true);
+                game.activate_cart(&mut active, true, &mut CartRiderTick::default());
                 assert_eq!(game.mob_object(73).unwrap().extra.mount, Some(74));
                 assert_eq!(
                     heard
@@ -4099,7 +4143,7 @@ mod hook_mutation_regressions {
                 game.mobs.push(child);
                 let mut active = game.carts[0].clone();
                 active.position = Vec3::new(40.0, 70.0, 40.0);
-                game.activate_cart(&mut active, true);
+                game.activate_cart(&mut active, true, &mut CartRiderTick::default());
                 assert!(game.mob_object(72).unwrap().removed);
                 assert_eq!(game.mob_object(72).unwrap().position, original);
                 assert_eq!(game.mob_object(73).unwrap().position, original);

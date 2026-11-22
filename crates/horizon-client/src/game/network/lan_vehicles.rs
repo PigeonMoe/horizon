@@ -52,7 +52,7 @@ pub(super) struct WatchedVehicle {
     still: u32,
 }
 
-struct GuestDismount {
+pub(super) struct GuestDismount {
     player: u128,
     entity: i32,
     level: Dim,
@@ -316,9 +316,13 @@ impl Game<'_> {
                 dismount = game
                     .prepare_cart_dismount(i)
                     .and_then(|landing| game.admit_guest_dismount(landing));
-            } else if !game.tick_cart_riding(keys) && game.tick_mount_riding(keys) {
-                game.riding?;
-                game.position_rider();
+            } else {
+                let (cart, ejected) = game.tick_cart_riding_turn(keys);
+                dismount = ejected;
+                if !cart && game.tick_mount_riding(keys) {
+                    game.riding?;
+                    game.position_rider();
+                }
             }
             game.riding?;
             let p = game.player.as_ref()?.position;
@@ -337,7 +341,7 @@ impl Game<'_> {
         }
     }
 
-    fn admit_guest_dismount(&mut self, landing: Vec3) -> Option<GuestDismount> {
+    pub(super) fn admit_guest_dismount(&mut self, landing: Vec3) -> Option<GuestDismount> {
         let rider = self.player.as_ref()?;
         let (entity, from, level) = (rider.entity_id, rider.position, self.dim);
         let player = horizon_client::lan::playerdata::ints_uuid(self.acting_uuid());
