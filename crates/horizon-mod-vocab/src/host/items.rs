@@ -103,6 +103,13 @@ pub trait ItemsServerHost {
     #[access(WorldOnly)]
     fn item_from_saved_gzip_nbt(&self, bytes: Vec<u8>) -> Option<ItemStack>;
 
+    /// Encode an item with its saved components and this world's `DataVersion` as
+    /// named gzip NBT in the same format as Paper's `ItemStack.serializeAsBytes`.
+    /// The reader must support this game version. Returns None for unknown or air
+    /// items, counts outside 1 to 99, or data that cannot fit the decoder's bounds.
+    #[access(WorldOnly)]
+    fn item_to_saved_gzip_nbt(&self, stack: &ItemStack) -> Option<Vec<u8>>;
+
     /// Side: server.
     /// Drop one item as DefaultDispenseItemBehavior does. For a dispenser hook:
     /// return this remainder in its answer with `CLICK`; the caller plays the

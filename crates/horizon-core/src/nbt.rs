@@ -1024,15 +1024,25 @@ impl Writer {
 /// `NbtIo.write`: a file root. A string too long for modified UTF-8 is
 /// written empty, as vanilla's disk writer does; [`write_network`] refuses it.
 pub fn write_named(root: &NamedTag, limits: Limits) -> Result<Vec<u8>, Error> {
-    write_named_parts(&root.name, &root.tag, limits)
+    write_named_parts(&root.name, &root.tag, limits, true)
 }
 
-fn write_named_parts(name: &JavaString, tag: &Tag, limits: Limits) -> Result<Vec<u8>, Error> {
+/// Write a named file root, refusing strings that cannot fit in modified UTF-8.
+pub fn write_named_strict(root: &NamedTag, limits: Limits) -> Result<Vec<u8>, Error> {
+    write_named_parts(&root.name, &root.tag, limits, false)
+}
+
+fn write_named_parts(
+    name: &JavaString,
+    tag: &Tag,
+    limits: Limits,
+    empty_long_strings: bool,
+) -> Result<Vec<u8>, Error> {
     let mut writer = Writer {
         bytes: Vec::new(),
         limits,
         nodes: 0,
-        empty_long_strings: true,
+        empty_long_strings,
         canonical_nan: true,
     };
     writer.put(&[tag.id()])?;
@@ -1076,7 +1086,7 @@ pub fn validate_component_value(value: &Tag) -> Result<(), String> {
         ..Limits::default()
     };
     // Disk NBT canonicalizes NaNs and normalizes negative zero when read.
-    let saved = write_named_parts(&JavaString::default(), value, limits)
+    let saved = write_named_parts(&JavaString::default(), value, limits, true)
         .map_err(|error| error.to_string())?;
     let (loaded, _) = read_named(&saved, limits).map_err(|error| error.to_string())?;
     if loaded.tag != *value {
@@ -1330,6 +1340,7 @@ mod tests {
             [0x0a, 0, 0, 0x08, 0, 1, b's', 0, 0, 0]
         );
         assert!(write_network(&root.tag, Limits::saved()).is_err());
+        assert!(write_named_strict(&root, Limits::saved()).is_err());
         // The rest of the tree is kept.
         let root = NamedTag {
             name: "".into(),
