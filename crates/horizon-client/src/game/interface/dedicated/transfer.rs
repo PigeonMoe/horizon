@@ -15,6 +15,9 @@ use horizon_protocol::packets::play::{self, Clientbound as C};
 use serde_json::{Value, json};
 use std::time::Instant;
 
+#[path = "transfer_receipt.rs"]
+pub(super) mod receipt;
+
 impl Game<'_> {
     /// A proxy's `player-*` request; the reply is one JSON line, `{"ok": true, ...}` or
     /// `{"error": "..."}`. Each request writes one line to the log with what became of it
@@ -187,6 +190,23 @@ impl Game<'_> {
         };
         let transfers = host.hub.transfers.as_ref().expect("transfers are enabled");
         let required = &transfers.settings.required_profiles;
+        let strict = if transfers.settings.backend_id.is_some() {
+            let binding = match receipt::Binding::from_import(&transfers.settings, uuid, &request) {
+                Ok(binding) => binding,
+                Err(error) => return json!({ "error": error }),
+            };
+            match receipt::lookup(&self.world_root, &binding) {
+                Ok(Some(committed)) => {
+                    let currently_placed =
+                        host.hub.placed_arrival(uuid, binding.handover).is_some();
+                    return committed.commit_reply(currently_placed, true);
+                }
+                Ok(None) => Some(binding),
+                Err(error) => return json!({ "error": error }),
+            }
+        } else {
+            None
+        };
         if required.is_empty()
             && let Err(error) = import::check_record_profiles(&request["record"])
         {
@@ -199,6 +219,9 @@ impl Game<'_> {
             .and_then(arrivals::parse_handover)
             .and_then(|id| host.hub.placed_arrival(uuid, id).map(|g| (id, g)));
         if let Some((id, i)) = retried {
+            if strict.is_some() {
+                return json!({ "error": "the placed hand-over has no matching durable arrival receipt" });
+            }
             if !required.is_empty()
                 && !import::is_profile_import_retry(&host.hub.guests[i], &request)
             {
@@ -256,23 +279,52 @@ impl Game<'_> {
         };
         match result {
             Ok(done) => {
+                let index = hub
+                    .imported_arrival(uuid, done.handover)
+                    .expect("the import just succeeded");
+                let received = hub.guests.update(index, |guest| {
+                    // Portable player data must not supply local authorities or receipts.
+                    let _ = receipt::Hidden::take(guest);
+                    strict
+                        .as_ref()
+                        .map(|binding| {
+                            receipt::set_staged(
+                                guest,
+                                &receipt::Receipt::new(
+                                    binding.clone(),
+                                    done.announce,
+                                    done.recentered,
+                                ),
+                            )
+                        })
+                        .transpose()
+                });
+                if let Err(error) = received {
+                    return json!({ "error": error });
+                }
                 self.take_arrival_records(uuid, &done);
                 self.sync_replaced_book_settings(uuid);
                 let handover = arrivals::handover_text(done.handover);
                 let placed = if done.place {
-                    self.place_arrival(uuid, done.handover)
+                    self.place_arrival(uuid, done.handover, None)
                 } else {
                     Ok(false)
                 };
                 match placed {
-                    Ok(placed) => json!({
+                    Ok(placed) => {
+                        let mut reply = json!({
                         "ok": true,
                         "handover": handover,
                         "parts": done.parts,
                         "placed": placed,
                         "announced": done.announce,
                         "recentered": done.recentered,
-                    }),
+                        });
+                        if let Some(binding) = strict {
+                            binding.add_to_reply(&mut reply);
+                        }
+                        reply
+                    }
                     Err(e) => json!({ "error": e }),
                 }
             }
@@ -311,6 +363,14 @@ impl Game<'_> {
         let Some(host) = self.lan.as_ref() else {
             return json!({ "error": "the server is not open to players" });
         };
+        if host
+            .hub
+            .transfers
+            .as_ref()
+            .is_some_and(|transfer| transfer.settings.backend_id.is_some())
+        {
+            return self.confirm_profile_arrival(args);
+        }
         match arrivals::confirm_args(&host.hub, args) {
             // A retry after the commit, whose reply was lost: the same answer.
             Ok((uuid, id)) if host.hub.placed_arrival(uuid, id).is_some() => {
@@ -322,7 +382,7 @@ impl Game<'_> {
                     "retried": true,
                 })
             }
-            Ok((uuid, id)) => match self.place_arrival(uuid, id) {
+            Ok((uuid, id)) => match self.place_arrival(uuid, id, None) {
                 Ok(_) => {
                     let announced = self
                         .lan
@@ -341,12 +401,53 @@ impl Game<'_> {
         }
     }
 
+    /// The authenticated proxy sends this after retiring the bound source record.
+    fn confirm_profile_arrival(&mut self, args: &str) -> Value {
+        let host = self.lan.as_ref().expect("the server is open");
+        let transfers = host.hub.transfers.as_ref().expect("transfers are enabled");
+        let binding = match receipt::Binding::from_confirm(&transfers.settings, args) {
+            Ok(binding) => binding,
+            Err(error) => return json!({ "error": error }),
+        };
+        let (owner, id) = (binding.owner, binding.handover);
+        match receipt::lookup(&self.world_root, &binding) {
+            Ok(Some(committed)) => {
+                return committed.commit_reply(host.hub.placed_arrival(owner, id).is_some(), true);
+            }
+            Ok(None) => {}
+            Err(error) => return json!({ "error": error }),
+        }
+        if transfers.stopping {
+            return json!({ "error": arrivals::STOPPING });
+        }
+        let i = match host.hub.imported_arrival(owner, id) {
+            Ok(i) => i,
+            Err(error) => return json!({ "error": error }),
+        };
+        let staged = match receipt::staged(&host.hub.guests[i]) {
+            Ok(Some(staged)) if staged.binding == binding => staged,
+            Ok(_) => {
+                return json!({ "error": "the strict hand-over differs from the held profile stage" });
+            }
+            Err(error) => return json!({ "error": error }),
+        };
+        match self.place_arrival(owner, id, Some(&staged)) {
+            Ok(_) => staged.commit_reply(true, false),
+            Err(error) => json!({ "error": error }),
+        }
+    }
+
     /// The hand-over's commit point on the target: the arrival's player file, advancements and
     /// statistics are written, synchronously, then it is placed. Only then does the reply say
     /// `ok`, so a proxy that sends `player-release moved` to the source after it knows a copy of
     /// the player is on disk here. When the file cannot be written the player stays held and
     /// imported: the proxy can confirm again or drop it.
-    fn place_arrival(&mut self, uuid: u128, id: u128) -> Result<bool, String> {
+    fn place_arrival(
+        &mut self,
+        uuid: u128,
+        id: u128,
+        receipt: Option<&receipt::Receipt>,
+    ) -> Result<bool, String> {
         self.lan
             .as_ref()
             .expect("server host is present")
@@ -362,8 +463,28 @@ impl Game<'_> {
         let written = if playerdata::has_staged_arrival_profiles(&g) {
             // A profile marker is the single authority switch in player.dat. Nothing
             // that can refuse the placement is written after this file commits.
-            self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
-                .and_then(|()| playerdata::save_profile_arrival(&mut g, &self.world_root, id))
+            receipt
+                .map(|receipt| receipt::append_receipt(&self.world_root, &mut g, receipt))
+                .transpose()
+                .and_then(|previous| {
+                    let result = self
+                        .write_arrival_records(
+                            self.lan.as_ref().expect("server host is present"),
+                            &g,
+                        )
+                        .and_then(|()| {
+                            playerdata::save_profile_arrival(&mut g, &self.world_root, id)
+                        });
+                    if result.is_err()
+                        && let Some(previous) = previous
+                    {
+                        let _ = receipt::Hidden::take(&mut g);
+                        previous.restore(&mut g);
+                    }
+                    result
+                })
+        } else if receipt.is_some() {
+            Err("the strict hand-over has no prepared profile sections".into())
         } else {
             playerdata::save_now(&g, &self.world_root).and_then(|()| {
                 self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
@@ -451,7 +572,12 @@ impl Game<'_> {
             advancements,
             stats,
         };
-        match arrivals::export_record(&mut host.hub, i, freeze, records) {
+        let local_receipts = host.hub.guests.update(i, receipt::Hidden::take);
+        let exported = arrivals::export_record(&mut host.hub, i, freeze, records);
+        host.hub
+            .guests
+            .update(i, |guest| local_receipts.restore(guest));
+        match exported {
             Ok(record) => arrivals::export_reply(&host.hub, i, record),
             Err(e) => json!({ "error": e }),
         }
@@ -463,6 +589,202 @@ mod tests {
     use super::*;
     use horizon_client::lan::playerdata;
     use horizon_protocol::crypto::uuid_string;
+
+    #[test]
+    #[ignore = "daily"]
+    fn strict_arrival_receipts_survive_reopening_and_a_new_handover() {
+        use horizon_client::lan::playerdata;
+        use horizon_core::{identifier::Identifier, nbt::Tag};
+
+        let world = tempfile::tempdir().unwrap();
+        let uuid = uuid_string(12);
+        let file = playerdata::path(world.path(), 12);
+        let mut original = None;
+        let strict_settings = || arrivals::Settings {
+            backend_id: Some("beta".into()),
+            allowed_sources: ["alpha".into(), "gamma".into()].into(),
+            required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
+                .into(),
+            ..arrivals::Settings::default()
+        };
+        let stale = || {
+            Tag::compound([(
+                "PlayerPersisted",
+                Tag::compound([("slimefun:stale", Tag::Byte(1))]),
+            )])
+        };
+        let stage = |game: &mut Game<'_>, request: &Value| {
+            let mods = vec![mod_api::ModEntry::new(
+                "slimefun",
+                Box::new(ProfileReceiver(true)),
+            )]
+            .into();
+            mod_platform::testing::with_mods(mods, || {
+                game.player_request("player-import", &format!("{uuid} {request}"))
+            })
+        };
+        let confirm_args = |stage: &Value| {
+            let names = [
+                "handover",
+                "source",
+                "destination",
+                "record_sha256",
+                "request_sha256",
+            ];
+            let mut args = uuid.clone();
+            for name in names {
+                args.push(' ');
+                args.push_str(
+                    stage[name]
+                        .as_str()
+                        .expect("successful strict stage supplies its tuple"),
+                );
+            }
+            args
+        };
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            game.world_root = world.path().to_owned();
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            let index = hub.guests.connection_index(12).unwrap();
+            hub.transfers = Some(arrivals::Transfers::new(arrivals::Settings::default()));
+            let mut record = arrivals::export_record(hub, index, true, Default::default()).unwrap();
+            hub.transfers = Some(arrivals::Transfers::new(strict_settings()));
+            hub.guests.update(index, |guest| {
+                guest.handover = None;
+                guest.placed = false;
+                guest.held = true;
+                guest.saved = Some(Tag::compound([("NeoForgeData", stale())]));
+            });
+            record["version"] = json!(2);
+            record["source"] = json!("alpha");
+            record["destination"] = json!("beta");
+            record["profiles"] =
+                json!([{"id":"slimefun:profile","version":1,"payload":"U0ZQMQ=="}]);
+            let request = json!({"record": record, "place": false, "parts": ["experience"]});
+            let mut invalid = request.clone();
+            invalid["place"] = json!(true);
+            assert!(
+                stage(game, &invalid)["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("place: false")
+            );
+            invalid = request.clone();
+            invalid["record"]["source"] = json!("untrusted");
+            assert!(
+                stage(game, &invalid)["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("route is not approved")
+            );
+            let accepted = stage(game, &request);
+            assert_eq!(accepted["placed"], false, "{accepted}");
+            assert!(!file.exists());
+            let confirm = confirm_args(&accepted);
+            let wrong = format!("{}{}", &confirm[..confirm.len() - 64], "0".repeat(64));
+            assert!(
+                game.player_request("player-confirm", &wrong)["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("held profile stage")
+            );
+            let bare = format!("{uuid} {}", accepted["handover"].as_str().unwrap());
+            assert!(game.player_request("player-confirm", &bare)["error"].is_string());
+            assert!(!file.exists());
+            let placed = game.player_request("player-confirm", &confirm);
+            assert_eq!(placed["placed"], true, "{placed}");
+            assert_eq!(placed["currently_placed"], true);
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            hub.guests.update(index, |guest| guest.xp_level = 41);
+            playerdata::save_now(&hub.guests[index], world.path()).unwrap();
+            original = Some((request, confirm));
+        });
+        let (request, confirm) = original.unwrap();
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            game.world_root = world.path().to_owned();
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            let index = hub.guests.connection_index(12).unwrap();
+            hub.transfers = Some(arrivals::Transfers::new(strict_settings()));
+            hub.guests.update(index, |guest| {
+                assert!(playerdata::load(guest, world.path()));
+                guest.held = true;
+                guest.placed = false;
+            });
+            let recovered = std::fs::read(&file).unwrap();
+            assert!(file.with_extension("dat_old").is_file());
+            std::fs::write(&file, b"corrupt current arrival file").unwrap();
+            let corrupt = game.player_request("player-confirm", &confirm);
+            assert!(
+                corrupt["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("player file is corrupt"),
+                "{corrupt}"
+            );
+            std::fs::write(&file, &recovered).unwrap();
+            for (verb, args) in [
+                ("player-import", format!("{uuid} {request}")),
+                ("player-confirm", confirm.clone()),
+            ] {
+                let historical = game.player_request(verb, &args);
+                assert_eq!(historical["already_committed"], true, "{historical}");
+                assert_eq!(historical["currently_placed"], false);
+            }
+            for (field, replacement) in [
+                ("source", json!("gamma")),
+                (
+                    "profiles",
+                    json!([{"id":"slimefun:profile","version":1,"payload":"U0ZQMg=="}]),
+                ),
+            ] {
+                let mut substituted = request.clone();
+                substituted["record"][field] = replacement;
+                let refused =
+                    game.player_request("player-import", &format!("{uuid} {substituted}"));
+                assert!(
+                    refused["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("durable arrival receipt"),
+                    "{refused}"
+                );
+            }
+            let mut changed_options = request.clone();
+            changed_options["announce"] = json!(false);
+            assert!(
+                game.player_request("player-import", &format!("{uuid} {changed_options}"))["error"]
+                    .is_string()
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), recovered);
+            let guest = &game.lan.as_ref().unwrap().hub.guests[index];
+            assert!(guest.held && !guest.imported && !guest.placed);
+            assert_eq!(guest.xp_level, 41);
+
+            let mut next = request.clone();
+            next["record"]["handover"] = json!("00000000000000000000000000000004");
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .guests
+                .update(index, |guest| {
+                    // This is a new stage, with the owner's current package data.
+                    let Some(Tag::Compound(saved)) = guest.saved.as_mut() else {
+                        panic!("loaded player data");
+                    };
+                    saved.insert("NeoForgeData".into(), stale());
+                });
+            let next = stage(game, &next);
+            assert_eq!(next["placed"], false, "{next}");
+            let next_confirmation = game.player_request("player-confirm", &confirm_args(&next));
+            assert_eq!(next_confirmation["placed"], true, "{next_confirmation}");
+            let after = std::fs::read(&file).unwrap();
+            let historical = game.player_request("player-confirm", &confirm);
+            assert_eq!(historical["already_committed"], true, "{historical}");
+            assert_eq!(historical["currently_placed"], false);
+            assert_eq!(std::fs::read(&file).unwrap(), after);
+        });
+    }
 
     #[derive(Default)]
     struct ProfileReceiver(bool);
