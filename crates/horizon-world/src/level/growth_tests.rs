@@ -57,7 +57,7 @@ struct Level {
     events: Vec<LevelEvent>,
     biome: &'static str,
     day: i64,
-    block_entities: Vec<(BlockPos, horizon_core::nbt::Compound)>,
+    block_entities: Vec<(BlockPos, BlockStateId, horizon_core::nbt::Compound)>,
     /// What a mod's `BlockGrowFeatureEvent` grows when vanilla has no feature.
     supplied: Option<&'static str>,
     /// A mod's `CropGrowEvent.Pre` answer (`None`: `DEFAULT`).
@@ -105,7 +105,7 @@ impl LevelAccess for Level {
         Some(self.biome)
     }
     fn load_block_entity(&mut self, pos: BlockPos, nbt: horizon_core::nbt::Compound) {
-        self.block_entities.push((pos, nbt));
+        self.block_entities.push((pos, self.block_state(pos), nbt));
     }
     fn block_grow_feature<'a>(
         &mut self,
@@ -262,21 +262,28 @@ fn oak_sapling_grows_with_bone_meal() {
 #[test]
 fn a_tree_with_bees_fills_its_nest() {
     let Some(f) = fixture() else { return };
-    let mut w = World::new(f, 3);
-    w.floor("grass_block", 12);
-    let origin = BlockPos::new(0, 64, 0);
-    let placed = f.behaviours.place_feature(
-        &mut w.level,
-        &mut w.ticks,
-        "minecraft:fancy_oak_bees",
-        origin,
-    );
-    assert_eq!(placed, Some(true));
+    let grow = |denials| {
+        let mut w = World::new(f, 3);
+        w.floor("grass_block", 12);
+        w.level.growth_denials = denials;
+        let origin = BlockPos::new(0, 64, 0);
+        assert!(
+            f.behaviours
+                .sim(&mut w.level, &mut w.ticks)
+                .capture_structure(origin, |sim| {
+                    sim.place_configured_feature("minecraft:fancy_oak_bees", origin)
+                })
+        );
+        assert_eq!(w.name(origin), "minecraft:oak_log");
+        w
+    };
+    let w = grow(None);
     assert_eq!(w.count("bee_nest"), 1);
-    let [(at, nbt)] = &w.level.block_entities[..] else {
+    let [(at, state, nbt)] = &w.level.block_entities[..] else {
         panic!("one block entity: {:?}", w.level.block_entities);
     };
     assert_eq!(w.name(*at), "minecraft:bee_nest");
+    assert_eq!(*state, w.level.block_state(*at));
     let Some(horizon_core::nbt::Tag::List(bees)) = nbt.get(&"bees".into()) else {
         panic!("bees: {nbt:?}");
     };
@@ -284,6 +291,14 @@ fn a_tree_with_bees_fills_its_nest() {
         (2..=3).contains(&bees.len()),
         "BeehiveDecorator stores 2 or 3 bees"
     );
+
+    let allowed = grow(Some(HashSet::new()));
+    assert_eq!(allowed.level.block_entities, w.level.block_entities);
+    assert_eq!(allowed.level.block_state(*at), *state);
+
+    let denied = grow(Some(HashSet::from([*at])));
+    assert_eq!(denied.count("bee_nest"), 0);
+    assert!(denied.level.block_entities.is_empty());
 }
 #[test]
 fn single_saplings_grow() {

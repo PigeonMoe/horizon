@@ -198,9 +198,10 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         position: [i32; 3],
         ticks_in_hive: &[i32],
     ) -> Result<(), PlacementQueryError> {
-        let nbt = crate::worldgen::tree::beehive_occupants(ticks_in_hive);
-        self.sim.level.load_block_entity(pos(position), nbt);
-        Ok(())
+        self.set_block_entity(
+            position,
+            crate::worldgen::tree::beehive_occupants(ticks_in_hive),
+        )
     }
     /// Live levels hold no loot-table containers placed by these features.
     fn set_block_entity_loot_table(
