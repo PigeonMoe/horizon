@@ -96,30 +96,14 @@ impl Game<'_> {
         }
     }
 
-    /// Place the vehicle together with the riders it carries. A boat driver
-    /// must acknowledge the new pose before sending movement from its new baseline.
+    /// Place the vehicle together with the riders it carries.
     pub(in crate::game) fn place_vehicle_rollback(
         &mut self,
         target: Target,
         pos: [f64; 3],
         rotation: [f32; 2],
     ) -> bool {
-        if self
-            .place_teleport_filed(target, pos, Some(rotation), [false; 3], true)
-            .is_none()
-        {
-            return false;
-        }
-        let dimension = self.dim.id();
-        if let Target::Boat(id) = target
-            && let Some(host) = self.lan.as_mut()
-        {
-            host.hub.guests.update_all(|guest| {
-                if guest.vehicle == Some(id) && guest.dimension == dimension {
-                    guest.vehicle_good = Some(pos);
-                }
-            });
-        }
-        true
+        self.place_teleport_filed(target, pos, Some(rotation), [false; 3], true)
+            .is_some()
     }
 }

@@ -127,6 +127,22 @@ fn launch(game: &mut Game<'_>) {
     game.boats.push(boat);
 }
 
+fn received_packets(packets: &mpsc::Receiver<Out>) -> Vec<Clientbound> {
+    packets
+        .try_iter()
+        .flat_map(|out| match out {
+            Out::Packet(body) => vec![body],
+            Out::Packets(bodies) => bodies,
+            _ => Vec::new(),
+        })
+        .filter_map(|body| {
+            let mut reader = Reader::new(&body);
+            let id = reader.varint().ok()?;
+            Clientbound::decode(id, reader.rest()).ok()
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "daily"]
 fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_rider() {
@@ -231,6 +247,110 @@ fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_ride
                 });
             });
         }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
+    use horizon_client::lan::guest::InboxItem;
+    use horizon_protocol::packets::play::{AcceptTeleportation, Serverbound};
+
+    run_on_guest_stack(|| {
+        with_guests(|game| {
+            launch(game);
+            let kind = game.res.mob_types().get("minecraft:camel").unwrap().clone();
+            let mut camel = Mob::new(CAMEL, kind, START, 0.0);
+            camel.extra.set_saddled(true);
+            game.mobs.push(camel);
+            let boat = game.entity(BOAT).unwrap();
+            let mount = game.entity(CAMEL).unwrap();
+            let driver = game.player(FIRST).unwrap().entity();
+            let conn = FIRST as u32;
+            assert!(game.entity_start_riding(mount, boat, true));
+            assert!(game.entity_start_riding(driver, mount, true));
+            game.position_riders();
+            game.guest_boarded(conn, None);
+            let (tx, packets) = mpsc::channel();
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .guests
+                .update_connection(conn, |guest| {
+                    guest.sender = PlayerSender::new(tx, Arc::default());
+                    guest.loaded = true;
+                    guest.load_timeout = 0;
+                    guest.awaiting_teleport = None;
+                })
+                .unwrap();
+
+            // The first ride tick installs the client controls; the next one
+            // establishes a baseline at the original mount position.
+            game.guest_vehicle_tick(conn);
+            game.guest_vehicle_tick(conn);
+            let old = game.entity_position(mount).unwrap();
+            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+            assert_eq!(guest.vehicle_good, Some(old));
+            received_packets(&packets);
+
+            assert!(game.place_vehicle_rollback(
+                crate::game::commands::Target::Boat(BOAT),
+                REDIRECTED.components(),
+                REDIRECTED_ROTATION,
+            ));
+            let at = game.entity_position(mount).unwrap();
+            assert_ne!(
+                at,
+                REDIRECTED.components(),
+                "the camel has its own seat offset"
+            );
+            let pose = received_packets(&packets)
+                .into_iter()
+                .filter_map(|packet| match packet {
+                    Clientbound::TeleportEntity(packet) if packet.id == CAMEL as i32 => {
+                        Some(packet.position)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(pose, [at]);
+
+            let target = [at[0] + 0.05, at[1], at[2]];
+            let mount_state = game.mob_object(CAMEL).unwrap();
+            let (yaw, pitch) = (mount_state.yaw, mount_state.head_pitch);
+            game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                assert_eq!(guest.vehicle_good, Some(at));
+                let (id, [x, y, z]) = guest.awaiting_teleport.unwrap();
+                for packet in [
+                    Serverbound::AcceptTeleportation(AcceptTeleportation {
+                        id,
+                        x,
+                        y,
+                        z,
+                        yaw: guest.yaw,
+                        pitch: guest.pitch,
+                    }),
+                    Serverbound::MoveVehicle(MoveVehicleRequest {
+                        position: target,
+                        yaw,
+                        pitch,
+                        on_ground: false,
+                    }),
+                ] {
+                    guest.inbox.push_back(InboxItem::Packet(packet, None));
+                }
+            });
+            // No additional ride tick has repaired a stale movement baseline.
+            game.tick_lan_packets();
+            assert_eq!(game.entity_position(mount), Some(target));
+            assert_eq!(game.entity_vehicle(driver), Some(mount));
+            assert!(
+                received_packets(&packets)
+                    .iter()
+                    .all(|packet| !matches!(packet, Clientbound::MoveVehicle(_)))
+            );
+        });
     });
 }
 
@@ -475,21 +595,7 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
                             },
                         );
                     };
-                    let received = || {
-                        packets
-                            .try_iter()
-                            .flat_map(|out| match out {
-                                Out::Packet(body) => vec![body],
-                                Out::Packets(bodies) => bodies,
-                                _ => Vec::new(),
-                            })
-                            .filter_map(|body| {
-                                let mut reader = Reader::new(&body);
-                                let id = reader.varint().ok()?;
-                                Clientbound::decode(id, reader.rest()).ok()
-                            })
-                            .collect::<Vec<_>>()
-                    };
+                    let received = || received_packets(&packets);
 
                     // Initialize the tick baseline while both guests are seated.
                     game.guest_vehicle_tick(FIRST as u32);

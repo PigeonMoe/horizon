@@ -724,6 +724,12 @@ impl Game<'_> {
             }
         }
         let [yaw, pitch] = self.vehicle_rotation(vehicle);
+        // Recursion carries the root's translation, but a rider's client
+        // drives the immediate mount from that mount's own committed pose.
+        let vehicle_at = self
+            .level_entity(vehicle as i32)
+            .and_then(|target| self.target_position(target));
+        let dimension = self.dim.id();
         if let Some(host) = self.lan.as_mut() {
             for i in 0..host.hub.guests.len() {
                 if host.hub.guests[i].vehicle != Some(vehicle) {
@@ -732,24 +738,29 @@ impl Game<'_> {
                 // Entity.sendTeleportTransitionToRidingPlayers: the rider's
                 // client moves the vehicle it drives itself, so it hears the
                 // vehicle's teleport (else its next MoveVehicle undoes it).
-                host.hub.guests[i].send(&C::TeleportEntity(play::TeleportEntity {
-                    id: vehicle as i32,
-                    position: [new.x, new.y, new.z],
-                    delta: [0.0; 3],
-                    yaw,
-                    pitch,
-                    relatives: 0,
-                    on_ground: false,
-                }));
-                if let Some(placed) = rotation {
-                    host.hub.guests.update(i, |g| {
+                host.hub.guests.update(i, |g| {
+                    if let Some(at) = vehicle_at
+                        && g.dimension == dimension
+                    {
+                        g.vehicle_good = Some(at);
+                    }
+                    g.send(&C::TeleportEntity(play::TeleportEntity {
+                        id: vehicle as i32,
+                        position: vehicle_at.unwrap_or_else(|| new.components()),
+                        delta: [0.0; 3],
+                        yaw,
+                        pitch,
+                        relatives: 0,
+                        on_ground: false,
+                    }));
+                    if let Some(placed) = rotation {
                         let [yaw, pitch] =
                             passenger_rotation(placed.before, placed.after, [g.yaw, g.pitch]);
                         g.yaw = yaw;
                         g.head_yaw = yaw;
                         g.pitch = pitch;
-                    });
-                }
+                    }
+                });
                 let id = host.hub.guests[i].entity_id as u32;
                 let g = host.hub.guests[i].position;
                 let from = Vec3::new(g[0], g[1], g[2]);
