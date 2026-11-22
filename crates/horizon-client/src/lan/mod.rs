@@ -538,6 +538,27 @@ impl Shared {
         uuid: u128,
         name: &str,
     ) -> Option<horizon_core::nbt::Tag> {
+        self.try_admit_with_replacement(address, uuid, name, true)
+    }
+
+    /// A return may hold a vacant place, never evict an active or still
+    /// configuring connection. The vacancy check and reservation are atomic.
+    pub(super) fn try_admit_return(
+        &self,
+        address: SocketAddr,
+        uuid: u128,
+        name: &str,
+    ) -> Option<horizon_core::nbt::Tag> {
+        self.try_admit_with_replacement(address, uuid, name, false)
+    }
+
+    fn try_admit_with_replacement(
+        &self,
+        address: SocketAddr,
+        uuid: u128,
+        name: &str,
+        replace: bool,
+    ) -> Option<horizon_core::nbt::Tag> {
         if self.shutting_down.load(Ordering::Relaxed) {
             return Some(translatable("multiplayer.disconnect.server_shutdown", &[]));
         }
@@ -579,6 +600,9 @@ impl Shared {
             if !online.iter().any(|(active, _, _)| *active == uuid) {
                 online.push((uuid, name.to_owned(), true));
                 return None;
+            }
+            if !replace {
+                return Some(translatable("multiplayer.disconnect.duplicate_login", &[]));
             }
             drop(online);
             let deadline = deadline.get_or_insert_with(|| {

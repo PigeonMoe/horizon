@@ -1776,6 +1776,63 @@ impl Hub {
         self.lan.shared.source_frozen_handover(owner)
     }
 
+    pub(super) fn profile_return_allowed(
+        &self,
+        owner: u128,
+        authorization: &super::source_handover::ReturnAuthorization,
+    ) -> bool {
+        let Some(settings) = self.transfers.as_ref().map(|transfer| &transfer.settings) else {
+            return false;
+        };
+        let Some(backend) = settings.backend_id.as_deref() else {
+            return false;
+        };
+        !settings.required_profiles.is_empty()
+            && authorization.retired.owner == owner
+            && self.source_frozen_handover(owner) == Some(authorization.retired.handover)
+            && settings.allowed_sources.contains(&authorization.source)
+            && self.lan.shared.config.forwarding_secret.is_some()
+            && self
+                .lan
+                .shared
+                .config
+                .source_handovers
+                .as_ref()
+                .is_some_and(|journal| journal.validate_return(backend, authorization).is_ok())
+    }
+
+    /// A verified binding before or during the hold. The join path can use
+    /// it to avoid loading the old local player before validation.
+    pub fn pending_profile_return(
+        &self,
+        conn: u32,
+    ) -> Option<&super::source_handover::ReturnAuthorization> {
+        let guest = self.guest(conn)?;
+        if !guest.expected
+            || guest.placed
+            || !guest.participates_online()
+            || !guest.left_reason.is_empty()
+        {
+            return None;
+        }
+        let authorization = guest.sender.profile_return()?;
+        self.profile_return_allowed(guest.uuid, authorization)
+            .then_some(authorization)
+    }
+
+    /// Authority bound to the current held connection by its verified login.
+    /// The control handler still compares the complete staged receipt tuple.
+    pub fn held_profile_return(
+        &self,
+        owner: u128,
+    ) -> Option<&super::source_handover::ReturnAuthorization> {
+        let guest = self
+            .guests
+            .iter()
+            .find(|guest| guest.uuid == owner && guest.held)?;
+        self.pending_profile_return(guest.conn)
+    }
+
     /// Keep this backend connection responsive to the proxy while the
     /// source fence owns its state. The game calls this between guest turns.
     pub fn park_profile_source(&mut self, index: usize, id: u128) -> bool {
@@ -1843,7 +1900,11 @@ impl Hub {
     /// The guest index of the held player `uuid` whose record of the hand-over `id` was
     /// imported, and that has not been dropped or kicked meanwhile.
     pub fn imported_arrival(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
-        if self.source_frozen_handover(uuid).is_some() {
+        if self.source_frozen_handover(uuid).is_some()
+            && self
+                .held_profile_return(uuid)
+                .is_none_or(|authorization| authorization.handover != id)
+        {
             return Err("the player is fenced by a source hand-over");
         }
         let Some(i) = self
@@ -1871,6 +1932,9 @@ impl Hub {
     /// What the client did since the import was not acted on, so it is put back where the
     /// server has it: the position to confirm again and the inventory.
     pub fn confirm_arrival(&mut self, uuid: u128, id: u128) -> Result<bool, &'static str> {
+        if self.source_frozen_handover(uuid).is_some() {
+            return Err("the return authority is still fenced");
+        }
         let i = self.imported_arrival(uuid, id)?;
         if self.guests[i].arrival_profiles.is_some() {
             return Err("the required profile sections have not been saved");
@@ -2466,7 +2530,17 @@ impl Hub {
                 NetEvent::Joined(j) => {
                     credits.push(credit);
                     // Login can race publication while it is in configuration.
-                    if self.source_frozen_handover(j.uuid).is_some() {
+                    let may_join = match j.sender.profile_return() {
+                        Some(authorization) => {
+                            j.expected
+                                && self.profile_return_allowed(j.uuid, authorization)
+                                && !self.guests.iter().any(|guest| {
+                                    guest.uuid == j.uuid && guest.participates_online()
+                                })
+                        }
+                        None => self.source_frozen_handover(j.uuid).is_none(),
+                    };
+                    if !may_join {
                         j.sender.disconnect(super::source_handover::refusal());
                         continue;
                     }
