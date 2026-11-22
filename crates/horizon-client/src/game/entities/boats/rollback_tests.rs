@@ -250,6 +250,45 @@ fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_ride
     });
 }
 
+fn launch_nested_camel_driver(game: &mut Game<'_>) -> mpsc::Receiver<Out> {
+    launch(game);
+    let kind = game.res.mob_types().get("minecraft:camel").unwrap().clone();
+    let mut camel = Mob::new(CAMEL, kind, START, 0.0);
+    camel.extra.set_saddled(true);
+    game.mobs.push(camel);
+    let boat = game.entity(BOAT).unwrap();
+    let mount = game.entity(CAMEL).unwrap();
+    let driver = game.player(FIRST).unwrap().entity();
+    let conn = FIRST as u32;
+    assert!(game.entity_start_riding(mount, boat, true));
+    assert!(game.entity_start_riding(driver, mount, true));
+    game.position_riders();
+    game.guest_boarded(conn, None);
+    let (tx, packets) = mpsc::channel();
+    game.lan
+        .as_mut()
+        .unwrap()
+        .hub
+        .guests
+        .update_connection(conn, |guest| {
+            guest.sender = PlayerSender::new(tx, Arc::default());
+            guest.loaded = true;
+            guest.load_timeout = 0;
+            guest.awaiting_teleport = None;
+        })
+        .unwrap();
+
+    // The first ride tick installs the client controls; the next one
+    // establishes a baseline at the original mount position.
+    game.guest_vehicle_tick(conn);
+    game.guest_vehicle_tick(conn);
+    let mount = game.entity_position(mount).unwrap();
+    let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+    assert_eq!(guest.vehicle_good, Some(mount));
+    received_packets(&packets);
+    packets
+}
+
 #[test]
 #[ignore = "daily"]
 fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
@@ -258,41 +297,10 @@ fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
 
     run_on_guest_stack(|| {
         with_guests(|game| {
-            launch(game);
-            let kind = game.res.mob_types().get("minecraft:camel").unwrap().clone();
-            let mut camel = Mob::new(CAMEL, kind, START, 0.0);
-            camel.extra.set_saddled(true);
-            game.mobs.push(camel);
-            let boat = game.entity(BOAT).unwrap();
+            let packets = launch_nested_camel_driver(game);
             let mount = game.entity(CAMEL).unwrap();
             let driver = game.player(FIRST).unwrap().entity();
             let conn = FIRST as u32;
-            assert!(game.entity_start_riding(mount, boat, true));
-            assert!(game.entity_start_riding(driver, mount, true));
-            game.position_riders();
-            game.guest_boarded(conn, None);
-            let (tx, packets) = mpsc::channel();
-            game.lan
-                .as_mut()
-                .unwrap()
-                .hub
-                .guests
-                .update_connection(conn, |guest| {
-                    guest.sender = PlayerSender::new(tx, Arc::default());
-                    guest.loaded = true;
-                    guest.load_timeout = 0;
-                    guest.awaiting_teleport = None;
-                })
-                .unwrap();
-
-            // The first ride tick installs the client controls; the next one
-            // establishes a baseline at the original mount position.
-            game.guest_vehicle_tick(conn);
-            game.guest_vehicle_tick(conn);
-            let old = game.entity_position(mount).unwrap();
-            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
-            assert_eq!(guest.vehicle_good, Some(old));
-            received_packets(&packets);
 
             assert!(game.place_vehicle_rollback(
                 crate::game::commands::Target::Boat(BOAT),
@@ -350,6 +358,59 @@ fn a_nested_drivers_next_packet_uses_its_immediate_mounts_new_pose() {
                     .iter()
                     .all(|packet| !matches!(packet, Clientbound::MoveVehicle(_)))
             );
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_nested_driver_keeps_only_the_player_teleport_for_an_off_level_mount() {
+    use crate::game::persist::OffLevel;
+
+    run_on_guest_stack(|| {
+        with_guests(|game| {
+            let packets = launch_nested_camel_driver(game);
+            let conn = FIRST as u32;
+            let driver = game.player(FIRST).unwrap().entity();
+            let from = game.entity_position(driver).unwrap();
+            let index = game.mobs.iter().position(|mob| mob.id == CAMEL).unwrap();
+            let mount = game.mobs.remove(index);
+            let moved_mount = REDIRECTED.add_vector(mount.position.subtract(START));
+            game.persist.off_level.insert(CAMEL, OffLevel::Mob(mount));
+            assert!(game.entity(CAMEL).is_none());
+
+            assert!(game.place_vehicle_rollback(
+                crate::game::commands::Target::Boat(BOAT),
+                REDIRECTED.components(),
+                REDIRECTED_ROTATION,
+            ));
+            assert!(game.entity(CAMEL).is_none());
+            let mount = game.mob_object(CAMEL).unwrap();
+            assert_eq!(mount.position, moved_mount);
+            assert_eq!(mount.extra.mount, Some(BOAT));
+
+            // Keep the edge through placement; cross-level transfer reads it
+            // to map the player to the replacement vehicle.
+            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+            assert_eq!(guest.vehicle, Some(CAMEL));
+            assert_eq!(guest.vehicle_good, None);
+            let at = REDIRECTED.add_vector(Vec3::new(from[0], from[1], from[2]).subtract(START));
+            assert_eq!(guest.position, at.components());
+            let (_, pending) = guest.awaiting_teleport.unwrap();
+            assert_eq!(pending, at.components());
+            let messages = received_packets(&packets);
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Clientbound::PlayerPosition(packet) if packet.position == at.components()
+            )));
+            assert!(messages.iter().all(|message| !matches!(
+                message,
+                Clientbound::TeleportEntity(packet) if packet.id == CAMEL as i32
+            )));
+
+            game.guest_vehicle_tick(conn);
+            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+            assert_eq!((guest.vehicle, guest.vehicle_good), (None, None));
         });
     });
 }

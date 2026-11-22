@@ -724,8 +724,8 @@ impl Game<'_> {
             }
         }
         let [yaw, pitch] = self.vehicle_rotation(vehicle);
-        // Recursion carries the root's translation, but a rider's client
-        // drives the immediate mount from that mount's own committed pose.
+        // The client drives its immediate mount from that mount's committed
+        // pose. A retained off-level mount has no client entity or driving base.
         let vehicle_at = self
             .level_entity(vehicle as i32)
             .and_then(|target| self.target_position(target));
@@ -739,20 +739,20 @@ impl Game<'_> {
                 // client moves the vehicle it drives itself, so it hears the
                 // vehicle's teleport (else its next MoveVehicle undoes it).
                 host.hub.guests.update(i, |g| {
-                    if let Some(at) = vehicle_at
-                        && g.dimension == dimension
-                    {
-                        g.vehicle_good = Some(at);
+                    if g.dimension == dimension {
+                        g.vehicle_good = vehicle_at;
                     }
-                    g.send(&C::TeleportEntity(play::TeleportEntity {
-                        id: vehicle as i32,
-                        position: vehicle_at.unwrap_or_else(|| new.components()),
-                        delta: [0.0; 3],
-                        yaw,
-                        pitch,
-                        relatives: 0,
-                        on_ground: false,
-                    }));
+                    if let Some(position) = vehicle_at {
+                        g.send(&C::TeleportEntity(play::TeleportEntity {
+                            id: vehicle as i32,
+                            position,
+                            delta: [0.0; 3],
+                            yaw,
+                            pitch,
+                            relatives: 0,
+                            on_ground: false,
+                        }));
+                    }
                     if let Some(placed) = rotation {
                         let [yaw, pitch] =
                             passenger_rotation(placed.before, placed.after, [g.yaw, g.pitch]);
