@@ -24,12 +24,15 @@ const FIRST: u128 = 13;
 const SECOND: u128 = 12;
 const START: Vec3 = Vec3::new(7.875, 200.0, 8.5);
 const CROSSING_OFFSET: f64 = 1.3;
+const REDIRECTED: Vec3 = Vec3::new(5.625, 200.0, 8.75);
+const REDIRECTED_ROTATION: [f32; 2] = [37.0, -8.0];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Policy {
     Allow,
     Stop,
     RecoverHull,
+    RedirectHull,
     RecoverRider,
     DenyRiderReturn,
 }
@@ -76,10 +79,15 @@ impl Hooks for Boundary {
         assert_eq!(event.cause, "vehicle_rollback");
         assert_eq!(event.dimension, "minecraft:overworld");
         assert!(event.from[0] >= 8.0);
-        assert_eq!(event.to, START.components());
+        assert_eq!(*event.to, START.components());
         self.attempts.lock().unwrap().push(Attempt::HullTeleport);
         match self.policy {
             Policy::RecoverHull => Flow::Continue,
+            Policy::RedirectHull => {
+                *event.to = REDIRECTED.components();
+                *event.to_rotation = REDIRECTED_ROTATION;
+                Flow::Continue
+            }
             Policy::RecoverRider | Policy::DenyRiderReturn => Flow::Cancel,
             _ => panic!("the policy didn't request a hull teleport"),
         }
@@ -127,6 +135,7 @@ fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_ride
             Policy::Allow,
             Policy::Stop,
             Policy::RecoverHull,
+            Policy::RedirectHull,
             Policy::RecoverRider,
             Policy::DenyRiderReturn,
         ] {
@@ -155,6 +164,14 @@ fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_ride
                         Some(vec![camel, first, second])
                     );
 
+                    let previous_positions = (policy == Policy::RedirectHull).then(|| {
+                        // Native mounting establishes the links. Seat the chain
+                        // as the server would before its next hull tick.
+                        game.position_riders();
+                        game.guest_boarded(FIRST as u32, None);
+                        game.guest_boarded(SECOND as u32, None);
+                        [camel, first, second].map(|rider| game.entity_position(rider).unwrap())
+                    });
                     // Its direct passenger is a mob, so the server moves the hull.
                     game.tick_boats();
                     let mut expected = vec![Attempt::Move(FIRST)];
@@ -174,6 +191,27 @@ fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_ride
                             assert_eq!(hull.velocity, Vec3::ZERO);
                             assert_eq!(game.entity_vehicle(camel), Some(boat));
                             assert_eq!(game.entity_vehicle(first), Some(camel));
+                        }
+                        Policy::RedirectHull => {
+                            expected.push(Attempt::HullTeleport);
+                            assert_eq!(hull.position, REDIRECTED);
+                            assert_eq!([hull.yaw, hull.pitch], REDIRECTED_ROTATION);
+                            assert_eq!(hull.velocity, Vec3::ZERO);
+                            assert_eq!(game.entity_vehicle(camel), Some(boat));
+                            assert_eq!(game.entity_vehicle(first), Some(camel));
+                            let delta = REDIRECTED.subtract(START).components();
+                            for (rider, previous) in [camel, first, second]
+                                .into_iter()
+                                .zip(previous_positions.unwrap())
+                            {
+                                let actual = game.entity_position(rider).unwrap();
+                                for axis in 0..3 {
+                                    assert!(
+                                        (actual[axis] - previous[axis] - delta[axis]).abs() < 1e-8,
+                                        "seat {rider:?}, from {previous:?} to {actual:?}"
+                                    );
+                                }
+                            }
                         }
                         Policy::RecoverRider | Policy::DenyRiderReturn => {
                             expected.extend([Attempt::HullTeleport, Attempt::RiderTeleport(FIRST)]);
@@ -274,6 +312,9 @@ enum GuestPolicy {
     DenyDriver,
     LegacyVeto,
     RecoverHull,
+    Rewrite,
+    InvalidRewrite,
+    VetoRewrite,
     Eject,
 }
 
@@ -318,7 +359,7 @@ impl Hooks for GuestBoundary {
 
     fn entity_teleport_pre(&self, _: &dyn Host, event: &mut EntityTeleportPreEvent<'_>) -> Flow {
         assert_eq!(event.entity, BOAT);
-        assert_eq!(event.to, START.components());
+        assert_eq!(*event.to, START.components());
         self.checks.lock().unwrap().push(200);
         if self.policy == GuestPolicy::Eject {
             Flow::Cancel
@@ -339,6 +380,29 @@ impl Hooks for GuestBoundary {
     }
 }
 
+struct HullDestination {
+    policy: GuestPolicy,
+    checks: Arc<Mutex<Vec<u128>>>,
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for HullDestination {
+    fn entity_teleport_pre(&self, _: &dyn Host, event: &mut EntityTeleportPreEvent<'_>) -> Flow {
+        assert_eq!(*event.to, START.components());
+        self.checks.lock().unwrap().push(201);
+        *event.to = REDIRECTED.components();
+        *event.to_rotation = REDIRECTED_ROTATION;
+        match self.policy {
+            GuestPolicy::VetoRewrite => Flow::Cancel,
+            GuestPolicy::InvalidRewrite => {
+                event.to[0] = f64::NAN;
+                Flow::Continue
+            }
+            _ => Flow::Continue,
+        }
+    }
+}
+
 #[test]
 #[ignore = "daily"]
 fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
@@ -347,16 +411,32 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
             GuestPolicy::DenyDriver,
             GuestPolicy::LegacyVeto,
             GuestPolicy::RecoverHull,
+            GuestPolicy::Rewrite,
+            GuestPolicy::InvalidRewrite,
+            GuestPolicy::VetoRewrite,
             GuestPolicy::Eject,
         ] {
             let checks = Arc::new(Mutex::new(Vec::new()));
-            let mods = [ModEntry::new(
+            let mut mods = vec![ModEntry::new(
                 "guest-boat-move-phases",
                 Box::new(GuestBoundary {
                     policy,
                     checks: checks.clone(),
                 }),
             )];
+            let edited = matches!(
+                policy,
+                GuestPolicy::Rewrite | GuestPolicy::InvalidRewrite | GuestPolicy::VetoRewrite
+            );
+            if edited {
+                mods.push(ModEntry::new(
+                    "guest-boat-rollback-destination",
+                    Box::new(HullDestination {
+                        policy,
+                        checks: checks.clone(),
+                    }),
+                ));
+            }
             mod_platform::testing::with_mods(mods.into(), || {
                 with_guests(|game| {
                     launch(game);
@@ -452,32 +532,41 @@ fn a_guest_boat_keeps_immediate_vetoes_and_checks_the_final_hull_once() {
                     game.tick_boats();
                     let mut expected =
                         vec![SECOND, FIRST, SECOND, FIRST, FIRST + 100, SECOND + 100, 200];
+                    if edited {
+                        expected.push(201);
+                    }
                     let messages = received();
                     assert!(
                         messages
                             .iter()
                             .all(|p| !matches!(p, Clientbound::MoveVehicle(_)))
                     );
-                    if policy == GuestPolicy::RecoverHull {
-                        assert_eq!(game.boats[0].position, START);
+                    if matches!(policy, GuestPolicy::RecoverHull | GuestPolicy::Rewrite) {
+                        let (destination, rotation) = if policy == GuestPolicy::Rewrite {
+                            (REDIRECTED, REDIRECTED_ROTATION)
+                        } else {
+                            (START, [20.0, 0.0])
+                        };
+                        assert_eq!(game.boats[0].position, destination);
+                        assert_eq!([game.boats[0].yaw, game.boats[0].pitch], rotation);
                         for (conn, rider, before) in
                             [(FIRST, first, old_seats[0]), (SECOND, second, old_seats[1])]
                         {
-                            assert_eq!(good(game, conn as u32), Some(START.components()));
+                            assert_eq!(good(game, conn as u32), Some(destination.components()));
                             assert_eq!(game.entity_vehicle(rider), Some(boat));
                             let at = game.entity_position(rider).unwrap();
-                            assert!((at[0] - before[0]).abs() < 1e-8);
+                            assert!((at[0] - before[0] - (destination.x - START.x)).abs() < 1e-8);
                         }
                         let saved = messages
                             .iter()
                             .filter_map(|p| match p {
                                 Clientbound::TeleportEntity(p) if p.id == BOAT as i32 => {
-                                    Some(p.position)
+                                    Some((p.position, [p.yaw, p.pitch]))
                                 }
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        assert_eq!(saved, [START.components()]);
+                        assert_eq!(saved, [(destination.components(), rotation)]);
                         let driver = game.lan.as_ref().unwrap().hub.guest(FIRST as u32).unwrap();
                         assert!(driver.awaiting_teleport.is_some());
                     } else {

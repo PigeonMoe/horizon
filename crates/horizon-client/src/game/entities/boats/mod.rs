@@ -12,7 +12,7 @@ mod placement;
 mod rollback_tests;
 pub(super) use placement::OutlineFluidRay;
 
-use super::native_hooks::{BlockClickAnswer, VehicleRiderRecovery};
+use super::native_hooks::{BlockClickAnswer, VehicleRollback};
 use super::{Game, Hit, InteractTarget, entity::Entity, entity_culling::at, view_vector};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
@@ -779,7 +779,7 @@ impl Game<'_> {
         &mut self,
         mut b: Boat,
         controlled: bool,
-    ) -> (Boat, Option<VehicleRiderRecovery>) {
+    ) -> (Boat, Option<VehicleRollback>) {
         b.previous = b.position;
         b.previous_yaw = b.yaw;
         // Entity.baseTick ends with Leashable.tickLeash, on a server only
@@ -955,14 +955,14 @@ impl Game<'_> {
             b.velocity = Vec3::ZERO;
             b.delta_rotation = 0.0;
             if paper_rollback {
-                recovery = self.vehicle_recovery_if_rollback_denied(
+                recovery = self.edit_vehicle_rollback(
                     b.id,
                     player,
                     (b.position, [b.yaw, b.pitch]),
                     (b.previous, [b.previous_yaw, b.pitch]),
                 );
             }
-            if recovery.is_none() {
+            if !matches!(recovery, Some(VehicleRollback::Eject { .. })) {
                 b.position = b.previous;
                 b.yaw = b.previous_yaw;
             }
@@ -1111,7 +1111,7 @@ impl Game<'_> {
                     });
                     if let Some((from, to, recovery)) = section_step {
                         self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
-                        self.complete_vehicle_rider_recovery(id, recovery);
+                        self.finish_vehicle_rollback(super::commands::Target::Boat(id), recovery);
                     }
                     if checks_guest_move {
                         self.remember_boat_pose(i, id);
@@ -1146,7 +1146,7 @@ impl Game<'_> {
                 boat.velocity = Vec3::ZERO;
                 boat.delta_rotation = 0.0;
             });
-            let recovery = self.vehicle_recovery_if_rollback_denied(id, player, attempted, origin);
+            let recovery = self.edit_vehicle_rollback(id, player, attempted, origin);
             // The driver's packet moves its seat immediately. A second seat
             // may still be at the boat's earlier packet baseline this tick.
             let dimension = self.dim.id();
@@ -1166,22 +1166,13 @@ impl Game<'_> {
                 });
             }
             if recovery.is_some() {
-                self.complete_vehicle_rider_recovery(id, recovery);
+                self.finish_vehicle_rollback(super::commands::Target::Boat(id), recovery);
             } else {
-                self.place_teleport_filed(
+                self.place_vehicle_rollback(
                     super::commands::Target::Boat(id),
                     origin.0.components(),
-                    Some(origin.1),
-                    [false; 3],
-                    true,
+                    origin.1,
                 );
-                if let Some(host) = self.lan.as_mut() {
-                    host.hub.guests.update_all(|guest| {
-                        if guest.vehicle == Some(id) && guest.dimension == dimension {
-                            guest.vehicle_good = Some(origin.0.components());
-                        }
-                    });
-                }
             }
         }
         self.remember_boat_pose(i, id);

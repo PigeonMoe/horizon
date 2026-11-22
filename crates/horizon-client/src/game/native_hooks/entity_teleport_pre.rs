@@ -1,10 +1,17 @@
 use super::*;
+use crate::game::{commands::Target, native_entities::target_id, native_entity_moves::in_bounds};
 use horizon_core::geometry::Vec3;
 
-pub(in crate::game) struct VehicleRiderRecovery {
-    player: u128,
-    pos: [f64; 3],
-    rotation: [f32; 2],
+pub(in crate::game) enum VehicleRollback {
+    Redirect {
+        pos: [f64; 3],
+        rotation: [f32; 2],
+    },
+    Eject {
+        player: u128,
+        pos: [f64; 3],
+        rotation: [f32; 2],
+    },
 }
 
 impl Game<'_> {
@@ -16,54 +23,102 @@ impl Game<'_> {
     }
 
     /// The hull is still held out. Its movement supplies both poses to listeners.
-    pub(in crate::game) fn vehicle_recovery_if_rollback_denied(
+    pub(in crate::game) fn edit_vehicle_rollback(
         &self,
         entity: u32,
         player: u128,
         (from, from_rotation): (Vec3, [f32; 2]),
-        (to, to_rotation): (Vec3, [f32; 2]),
-    ) -> Option<VehicleRiderRecovery> {
+        (original, original_rotation): (Vec3, [f32; 2]),
+    ) -> Option<VehicleRollback> {
         if !mod_api::__private::listened(mod_api::HookId::EntityTeleportPre) {
             return None;
         }
         let mut cancel = false;
+        let original = original.components();
+        let mut to = original;
+        let mut to_rotation = original_rotation;
         self.native_entity_teleport_pre(mod_api::__private::EntityTeleportPreCall {
             entity,
             dimension: self.dim.id(),
             from: from.components(),
-            to: to.components(),
+            to: &mut to,
             from_rotation,
-            to_rotation,
+            to_rotation: &mut to_rotation,
             cause: "vehicle_rollback",
             cancel: &mut cancel,
         });
-        cancel.then_some(VehicleRiderRecovery {
-            player,
-            pos: to.components(),
+        // The normal rewind keeps its existing placement rules when a mod only observes.
+        let changed = to.map(f64::to_bits) != original.map(f64::to_bits)
+            || to_rotation.map(f32::to_bits) != original_rotation.map(f32::to_bits);
+        if cancel
+            || (changed && (!in_bounds(to) || to_rotation.iter().any(|angle| !angle.is_finite())))
+        {
+            return Some(VehicleRollback::Eject {
+                player,
+                pos: original,
+                rotation: original_rotation,
+            });
+        }
+        changed.then_some(VehicleRollback::Redirect {
+            pos: to,
             rotation: to_rotation,
         })
     }
 
-    /// Complete a failed hull teleport once its new position is public.
-    pub(in crate::game) fn complete_vehicle_rider_recovery(
+    /// Complete an edited or refused hull teleport once the vehicle is available.
+    pub(in crate::game) fn finish_vehicle_rollback(
         &mut self,
-        id: u32,
-        recovery: Option<VehicleRiderRecovery>,
+        target: Target,
+        rollback: Option<VehicleRollback>,
     ) -> bool {
-        let Some(recovery) = recovery else {
+        let Some(rollback) = rollback else {
             return false;
         };
-        let Some(vehicle) = self.entity(id) else {
-            return false;
-        };
-        self.entity_eject_passengers(vehicle);
-        if let Some(player) = self.player(recovery.player) {
-            let _ = self.player_teleport_checked(
+        match rollback {
+            VehicleRollback::Redirect { pos, rotation } => {
+                self.place_vehicle_rollback(target, pos, rotation)
+            }
+            VehicleRollback::Eject {
                 player,
-                self.dim.id(),
-                recovery.pos,
-                Some(recovery.rotation),
-            );
+                pos,
+                rotation,
+            } => {
+                let Some(vehicle) = target_id(target).and_then(|id| self.entity(id)) else {
+                    return false;
+                };
+                self.entity_eject_passengers(vehicle);
+                if let Some(player) = self.player(player) {
+                    let _ =
+                        self.player_teleport_checked(player, self.dim.id(), pos, Some(rotation));
+                }
+                true
+            }
+        }
+    }
+
+    /// Place the vehicle together with the riders it carries. A boat driver
+    /// must acknowledge the new pose before sending movement from its new baseline.
+    pub(in crate::game) fn place_vehicle_rollback(
+        &mut self,
+        target: Target,
+        pos: [f64; 3],
+        rotation: [f32; 2],
+    ) -> bool {
+        if self
+            .place_teleport_filed(target, pos, Some(rotation), [false; 3], true)
+            .is_none()
+        {
+            return false;
+        }
+        let dimension = self.dim.id();
+        if let Target::Boat(id) = target
+            && let Some(host) = self.lan.as_mut()
+        {
+            host.hub.guests.update_all(|guest| {
+                if guest.vehicle == Some(id) && guest.dimension == dimension {
+                    guest.vehicle_good = Some(pos);
+                }
+            });
         }
         true
     }

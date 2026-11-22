@@ -13,12 +13,15 @@ const MOUNT: u32 = 901;
 const FIRST_RIDER: u128 = 13;
 const SECOND_RIDER: u128 = 12;
 const START: Vec3 = Vec3::new(7.875, 64.0625, 8.5);
+const REDIRECTED: Vec3 = Vec3::new(6.5, 64.0625, 8.25);
+const REDIRECTED_ROTATION: [f32; 2] = [51.0, 12.0];
 
 #[derive(Clone, Copy, Debug)]
 enum Policy {
     MoveAllowed,
     OrdinaryVeto,
     RollbackAllowed,
+    RollbackRedirected,
     RollbackVeto,
     RecoveryVeto,
 }
@@ -66,10 +69,15 @@ impl Hooks for Boundary {
         assert_eq!(event.cause, "vehicle_rollback");
         assert_eq!(event.dimension, "minecraft:overworld");
         assert!(event.from[0] >= 8.0);
-        assert_eq!(event.to, START.components());
+        assert_eq!(*event.to, START.components());
         self.attempts.lock().unwrap().push(Attempt::CartReturn);
         match self.policy {
             Policy::RollbackAllowed => Flow::Continue,
+            Policy::RollbackRedirected => {
+                *event.to = REDIRECTED.components();
+                *event.to_rotation = REDIRECTED_ROTATION;
+                Flow::Continue
+            }
             Policy::RollbackVeto | Policy::RecoveryVeto => Flow::Cancel,
             _ => panic!("an ordinary move should not attempt a cart teleport"),
         }
@@ -131,6 +139,7 @@ fn a_requested_cart_rollback_keeps_ordinary_vetoes_and_checks_rider_recovery() {
             Policy::MoveAllowed,
             Policy::OrdinaryVeto,
             Policy::RollbackAllowed,
+            Policy::RollbackRedirected,
             Policy::RollbackVeto,
             Policy::RecoveryVeto,
         ] {
@@ -164,6 +173,16 @@ fn a_requested_cart_rollback_keeps_ordinary_vetoes_and_checks_rider_recovery() {
                             assert_eq!(at, START);
                             assert_eq!(game.carts[0].velocity, Vec3::ZERO);
                             assert_eq!(game.entity_vehicle(rider), Some(cart));
+                        }
+                        Policy::RollbackRedirected => {
+                            expected.push(Attempt::CartReturn);
+                            let cart_state = &game.carts[0];
+                            assert_eq!(at, REDIRECTED);
+                            assert_eq!([cart_state.yaw, cart_state.pitch], REDIRECTED_ROTATION);
+                            assert_eq!(cart_state.velocity, Vec3::ZERO);
+                            assert_eq!(game.entity_vehicle(rider), Some(cart));
+                            let position = game.entity_position(rider).unwrap();
+                            assert_eq!([position[0], position[2]], [REDIRECTED.x, REDIRECTED.z]);
                         }
                         Policy::RollbackVeto | Policy::RecoveryVeto => {
                             expected

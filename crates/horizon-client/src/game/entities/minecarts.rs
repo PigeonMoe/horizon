@@ -15,7 +15,7 @@ mod save_lending;
 #[path = "minecarts/section_steps.rs"]
 mod section_steps;
 
-use super::native_hooks::VehicleRiderRecovery;
+use super::native_hooks::VehicleRollback;
 use super::{Game, Hit, InteractTarget, Keys, entity::Entity};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
@@ -1438,7 +1438,7 @@ impl Game<'_> {
         intent: [f64; 2],
         slot: usize,
         index: &mut CartIndex,
-        rider_rollback: &mut Option<VehicleRiderRecovery>,
+        rider_rollback: &mut Option<VehicleRollback>,
     ) -> bool {
         c.tick_count += 1;
         c.previous = c.position;
@@ -1517,13 +1517,13 @@ impl Game<'_> {
             c.pitch %= 360.0;
         }
         if let Some((player, true)) = denied {
-            *rider_rollback = self.vehicle_recovery_if_rollback_denied(
+            *rider_rollback = self.edit_vehicle_rollback(
                 c.id,
                 player,
                 (c.position, [c.yaw, c.pitch]),
                 (c.previous, [c.previous_yaw, c.previous_pitch]),
             );
-            if rider_rollback.is_none() {
+            if !matches!(rider_rollback, Some(VehicleRollback::Eject { .. })) {
                 restore_pose(c);
             }
         }
@@ -2078,7 +2078,7 @@ impl Game<'_> {
                 section_steps::tick(game, id, i, &mut index, &mut rider_rollback)
             });
             section_steps::tell(self, id, section_step);
-            if self.complete_vehicle_rider_recovery(id, rider_rollback) {
+            if self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider_rollback) {
                 index.forget_carts();
             }
             if due {
@@ -2220,7 +2220,7 @@ impl Game<'_> {
         {
             self.dismount_cart(i);
         }
-        self.complete_vehicle_rider_recovery(id, rider_rollback);
+        self.finish_vehicle_rollback(super::commands::Target::Cart(id), rider_rollback);
         true
     }
 
