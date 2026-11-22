@@ -146,6 +146,16 @@ fn received_packets(packets: &mpsc::Receiver<Out>) -> Vec<Clientbound> {
 #[test]
 #[ignore = "daily"]
 fn a_boat_dismount_teleport_can_be_denied_without_keeping_the_seat() {
+    check_boat_dismount(false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_boat_in_a_portal_checks_its_free_dismount_landing() {
+    check_boat_dismount(true);
+}
+
+fn check_boat_dismount(portal: bool) {
     use horizon_client::lan::guest::InboxItem;
     use horizon_protocol::packets::play::{PlayerInput, Serverbound, relative};
     use mod_api::PlayerPositionCommittedEvent;
@@ -198,7 +208,7 @@ fn a_boat_dismount_teleport_can_be_denied_without_keeping_the_seat() {
         }
     }
 
-    run_on_guest_stack(|| {
+    run_on_guest_stack(move || {
         let seen = Arc::new(Mutex::new(Vec::new()));
         mod_platform::testing::with_mods(
             vec![ModEntry::new(
@@ -217,6 +227,15 @@ fn a_boat_dismount_teleport_can_be_denied_without_keeping_the_seat() {
                         .default_state("minecraft:stone")
                         .unwrap();
                     game.world.set(7, 199, 9, stone).unwrap();
+                    if portal {
+                        let portal = game
+                            .pack
+                            .assets
+                            .registry
+                            .default_state("minecraft:nether_portal")
+                            .unwrap();
+                        game.world.set(7, 200, 8, portal).unwrap();
+                    }
                     let hull = game.entity(BOAT).unwrap();
                     let velocity = Vec3::new(0.25, 0.0, 0.0);
                     for uuid in [FIRST, SECOND] {
@@ -241,7 +260,11 @@ fn a_boat_dismount_teleport_can_be_denied_without_keeping_the_seat() {
                         let guest = game.command_guest(conn).unwrap();
                         assert!(guest.sneaking, "player {uuid} did not receive sneak input");
                         let from = guest.position;
-                        let target = game.boat_player_dismount_target(0, guest.yaw).components();
+                        let target = if portal {
+                            [from[0], START.y, from[2]]
+                        } else {
+                            game.boat_player_dismount_target(0, guest.yaw).components()
+                        };
                         assert_ne!(from.map(f64::floor), target.map(f64::floor));
                         game.guest_vehicle_tick(conn);
 

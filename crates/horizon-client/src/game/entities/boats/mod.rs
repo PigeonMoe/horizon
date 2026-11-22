@@ -1724,10 +1724,10 @@ impl Game<'_> {
         // of coasting on the velocity of the ride that just ended.
         self.boats.update(i, |b| b.velocity = Vec3::ZERO);
         self.boats.update(i, |b| b.delta_rotation = 0.0);
-        if self.dismount_in_portal(self.boats[i].position) {
-            return None;
-        }
-        Some(self.boat_player_dismount_target(i, self.yaw))
+        Some(
+            self.portal_dismount_point(self.boats[i].position)
+                .unwrap_or_else(|| self.boat_player_dismount_target(i, self.yaw)),
+        )
     }
     /// Where the boat at `i` lets a player facing `yaw` off.
     pub(super) fn boat_player_dismount_target(&self, i: usize, yaw: f32) -> Vec3 {

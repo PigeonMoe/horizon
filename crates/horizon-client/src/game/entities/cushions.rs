@@ -585,20 +585,24 @@ impl Game<'_> {
     /// `Cushion.removePassenger` plays none once the cushion is removed.
     pub(super) fn dismount_removed_vehicle(&mut self, vehicle_y: f64) {
         self.riding = None;
-        let Some(p) = self.player.as_ref() else {
-            return;
-        };
-        let (w, h) = (
-            f64::from(p.dimensions.width),
-            f64::from(p.dimensions.height),
-        );
-        let at = self.removed_vehicle_dismount_point(p.position, w, h, vehicle_y);
-        if let Some(p) = self.player.as_mut() {
+        if let Some(at) = self.player_free_dismount_point(vehicle_y)
+            && let Some(p) = self.player.as_mut()
+        {
             self.previous_position = p.position;
             p.position = at;
             p.velocity = Vec3::ZERO;
             p.fall_distance = 0.0;
         }
+    }
+
+    fn player_free_dismount_point(&self, vehicle_y: f64) -> Option<Vec3> {
+        let rider = self.player.as_ref()?;
+        Some(self.removed_vehicle_dismount_point(
+            rider.position,
+            f64::from(rider.dimensions.width),
+            f64::from(rider.dimensions.height),
+            vehicle_y,
+        ))
     }
 
     /// Free-position branch shared by removed vehicles and portal dismounts.
@@ -636,18 +640,17 @@ impl Game<'_> {
     /// `LivingEntity.dismountVehicle` from a live vehicle at `vehicle` whose
     /// block (`blockPosition`) is in `#minecraft:portals`: the rider leaves by
     /// the same free-position branch as from a removed vehicle, not beside it.
-    /// True when it did.
-    pub(super) fn dismount_in_portal(&mut self, vehicle: Vec3) -> bool {
+    /// Return the landing before the player's cancellable `dismountTo`.
+    pub(super) fn portal_dismount_point(&self, vehicle: Vec3) -> Option<Vec3> {
         let pos = [
             vehicle.x.floor() as i32,
             vehicle.y.floor() as i32,
             vehicle.z.floor() as i32,
         ];
         if !self.named_block_in_tag("minecraft:portals", &self.block_name(pos)) {
-            return false;
+            return None;
         }
-        self.dismount_removed_vehicle(vehicle.y);
-        true
+        self.player_free_dismount_point(vehicle.y)
     }
 
     /// `Entity.positionRider` for the mobs (and other players) sitting on a

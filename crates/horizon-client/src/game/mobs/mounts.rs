@@ -733,8 +733,8 @@ impl Game<'_> {
             return None;
         }
         let mount = Mount::of(m);
-        if self.dismount_in_portal(mount.position) {
-            return None;
+        if let Some(at) = self.portal_dismount_point(mount.position) {
+            return Some(at);
         }
         let p = self.player.as_ref()?;
         let (spot, pose) = self.mount_player_dismount(&mount, self.yaw, p);

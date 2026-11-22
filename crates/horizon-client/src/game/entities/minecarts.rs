@@ -1670,11 +1670,14 @@ impl Game<'_> {
                         tick.guest_ejected = true;
                         // stopRiding chooses the landing before the rest of
                         // the cart tick can change its position or heading.
-                        if !self.dismount_in_portal(c.position)
-                            && let Some(rider) = self.player.as_ref()
-                        {
-                            let target = self.cart_dismount_target(c, rider);
-                            let landing = self.apply_cart_dismount_pose(target);
+                        if let Some(rider) = self.player.as_ref() {
+                            let landing =
+                                if let Some(landing) = self.portal_dismount_point(c.position) {
+                                    landing
+                                } else {
+                                    let target = self.cart_dismount_target(c, rider);
+                                    self.apply_cart_dismount_pose(target)
+                                };
                             tick.dismount = self.admit_guest_dismount(landing);
                         }
                     }
@@ -2284,8 +2287,8 @@ impl Game<'_> {
         }
         let i = self.carts.iter().position(|c| c.id == id)?;
         self.riding = None;
-        if self.dismount_in_portal(self.carts[i].position) {
-            return None;
+        if let Some(at) = self.portal_dismount_point(self.carts[i].position) {
+            return Some(at);
         }
         let landing = self.cart_player_dismount_target(i, self.player.as_ref()?);
         Some(self.apply_cart_dismount_pose(landing))
