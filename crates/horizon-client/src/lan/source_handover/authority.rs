@@ -178,6 +178,15 @@ impl CurrentReturn {
         Self::read_player(world, owner).map(|read| read.map(|(current, _)| current))
     }
 
+    /// Read the current player only when it proves this exact authorization.
+    pub fn read_matching_player(
+        world: &Path,
+        expected: &ReturnAuthorization,
+    ) -> io::Result<Option<(Self, Tag)>> {
+        Self::read_player(world, expected.retired.owner)
+            .map(|read| read.filter(|(current, _)| current.authorization() == expected))
+    }
+
     /// The same checked file and its player data for an interrupted confirmation.
     pub fn read_player(world: &Path, owner: u128) -> io::Result<Option<(Self, Tag)>> {
         let file = crate::lan::playerdata::path(world, owner);

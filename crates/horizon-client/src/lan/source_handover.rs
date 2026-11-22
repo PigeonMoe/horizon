@@ -296,6 +296,16 @@ impl Journal {
         Ok(())
     }
 
+    /// This process activated the exact return and has not since reserved another export.
+    pub fn active_return_matches(&self, expected: &ReturnAuthorization) -> bool {
+        self.fences
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&expected.retired.owner)
+            .and_then(|active| active.local_return.as_ref())
+            == Some(expected)
+    }
+
     /// Publish a new frozen hand-over, or acknowledge the same immutable
     /// hand-over. The caller must first settle all mutable state on the game
     /// thread; this does not park a player or perform plugin capture.

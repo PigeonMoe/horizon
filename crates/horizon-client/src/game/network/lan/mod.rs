@@ -1662,7 +1662,7 @@ impl Game<'_> {
     /// `PlayerAdvancements.load` and `ServerStatsCounter.parseLocal` of a
     /// network player who joined; every statistic goes out on the first
     /// request (`PlayerList.placeNewPlayer`'s `markAllDirty`).
-    fn load_guest_records(&mut self, conn: u32) {
+    pub(in crate::game) fn load_guest_records(&mut self, conn: u32) {
         let Some(host) = self.lan.as_ref() else {
             return;
         };
@@ -2961,7 +2961,21 @@ impl Game<'_> {
         let root = self.world_root.clone();
         let in_place = host.hub.config.dimension.clone();
         let levels = host.hub.config.levels;
-        let returning = host.hub.pending_profile_return(conn).is_some();
+        let returning = host.hub.pending_profile_return(conn);
+        // An already committed return needs the saved level in its first Login packet.
+        // Leave the profile itself unloaded until the coordinator authorizes this connection.
+        let committed_level = returning
+            .and_then(|authorization| {
+                horizon_client::lan::source_handover::CurrentReturn::read_matching_player(
+                    &root,
+                    authorization,
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|(_, tag)| playerdata::saved_player(tag).dimension)
+            .filter(|dimension| levels.has(dimension));
+        let returning = returning.is_some();
         let owner = host.owner.as_mut();
         let Some((known, uuid, name)) = host.hub.update_guest(conn, |g| {
             // PlayerList.loadPlayerData: the owner gets the world's player file,
@@ -3027,7 +3041,8 @@ impl Game<'_> {
                     g.head_yaw = g.yaw;
                     g.health = 20.0;
                     g.food = 20;
-                    g.dimension = super::Dim::Overworld.id().to_owned();
+                    g.dimension =
+                        committed_level.unwrap_or_else(|| super::Dim::Overworld.id().to_owned());
                 })
                 .is_none()
             {

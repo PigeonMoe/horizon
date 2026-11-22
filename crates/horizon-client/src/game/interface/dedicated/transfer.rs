@@ -20,6 +20,10 @@ use std::time::Instant;
 #[path = "transfer_receipt.rs"]
 pub(super) mod receipt;
 
+#[cfg(test)]
+#[path = "transfer_resume_tests.rs"]
+mod resume_tests;
+
 impl Game<'_> {
     /// A proxy's `player-*` request; the reply is one JSON line, `{"ok": true, ...}` or
     /// `{"error": "..."}`. Each request writes one line to the log with what became of it
@@ -147,6 +151,7 @@ impl Game<'_> {
                 Some(host) => arrivals::expect_return_request(&mut host.hub, args, Instant::now()),
                 None => json!({ "error": "the server is not open to players" }),
             },
+            "player-profile-resume" => self.resume_profile_owner(args),
             "player-drop" => match self.lan.as_mut() {
                 Some(host) => arrivals::drop_request(&mut host.hub, args),
                 None => json!({ "error": "the server is not open to players" }),
@@ -546,22 +551,122 @@ impl Game<'_> {
         let host = self.lan.as_mut().expect("server host is present");
         host.hub.guests.insert(i, g);
         written?;
-        self.finish_arrival(uuid, id, returning.as_ref())?;
+        self.finish_arrival(uuid, id, returning.as_ref(), true)?;
         Ok(true)
     }
 
     fn reconcile_return(&mut self, authorization: &ReturnAuthorization) -> Result<(), String> {
         let (uuid, id) = (authorization.retired.owner, authorization.handover);
-        let (current, tag) = CurrentReturn::read_player(&self.world_root, uuid)
+        let (current, tag) = CurrentReturn::read_matching_player(&self.world_root, authorization)
             .map_err(|error| error.to_string())?
-            .filter(|(current, _)| current.authorization() == authorization)
             .ok_or("the current player file does not confirm this return")?;
         let host = self.lan.as_mut().expect("server host is present");
         let i = host.hub.imported_arrival(uuid, id)?;
         host.hub.guests.update(i, |guest| {
             playerdata::reconcile_profile_arrival(guest, current, tag)
         })?;
-        self.finish_arrival(uuid, id, Some(authorization))
+        self.finish_arrival(uuid, id, Some(authorization), true)
+    }
+
+    /// A current SQL owner can resume an already committed return. The authenticated
+    /// coordinator checks the exact owner token, backend and revision before requesting this.
+    fn resume_profile_owner(&mut self, args: &str) -> Value {
+        let reply = (|| {
+            let (owner, request) = args
+                .trim()
+                .split_once(char::is_whitespace)
+                .ok_or("player-profile-resume needs the player's unique id and authorization")?;
+            let owner = arrivals::parse_uuid(owner).ok_or("invalid player unique id")?;
+            let authorization: ReturnAuthorization = serde_json::from_str(request.trim())
+                .map_err(|_| "invalid profile resume authorization")?;
+            if authorization.retired.owner != owner {
+                return Err("the resume authorization belongs to a different owner".into());
+            }
+            let retried = self.resume_committed_profile(&authorization)?;
+            Ok(json!({
+                "ok": true,
+                "placed": true,
+                "currently_placed": true,
+                "handover": arrivals::handover_text(authorization.handover),
+                "authority_revision": u64::from(authorization.revision),
+                "retried": retried,
+            }))
+        })();
+        reply.unwrap_or_else(|error: String| json!({ "error": error }))
+    }
+
+    fn resume_committed_profile(
+        &mut self,
+        authorization: &ReturnAuthorization,
+    ) -> Result<bool, String> {
+        let (owner, id) = (authorization.retired.owner, authorization.handover);
+        let hub = &self.lan.as_ref().expect("the server is open").hub;
+        let transfers = hub.transfers.as_ref().expect("transfers are enabled");
+        if transfers.stopping {
+            return Err(arrivals::STOPPING.into());
+        }
+        if hub.placed_arrival(owner, id).is_some_and(|i| {
+            let guest = &hub.guests[i];
+            guest.participates_in_player_simulation() && guest.left_reason.is_empty()
+        }) && hub
+            .lan
+            .shared
+            .config
+            .source_handovers
+            .as_ref()
+            .is_some_and(|journal| journal.active_return_matches(authorization))
+        {
+            return Ok(true);
+        }
+        if hub.held_profile_return(owner) != Some(authorization) {
+            return Err("no forwarded held player matches the current-owner authorization".into());
+        }
+        self.finish_player_autosaves(true)
+            .map_err(|error| error.to_string())?;
+        let (current, tag) = CurrentReturn::read_matching_player(&self.world_root, authorization)
+            .map_err(|error| error.to_string())?
+            .ok_or("the current player file does not confirm this return")?;
+        let hub = &mut self.lan.as_mut().expect("the server is open").hub;
+        for (profile, &schema) in &hub
+            .transfers
+            .as_ref()
+            .expect("transfers are enabled")
+            .settings
+            .required_profiles
+        {
+            playerdata::verify_committed_return_profile(
+                &self.world_root,
+                &current,
+                &tag,
+                profile,
+                schema,
+            )?;
+        }
+        let mut level = playerdata::saved_player(tag);
+        if !hub.config.levels.has(&level.dimension) {
+            level.dimension = "minecraft:overworld".into();
+        }
+        let i = hub
+            .guests
+            .iter()
+            .position(|g| g.uuid == owner && g.held)
+            .ok_or("the return connection went away")?;
+        let forced_mode = hub
+            .config
+            .force_game_mode
+            .then_some(hub.config.default_game_mode);
+        hub.guests.update(i, |guest| {
+            playerdata::resume_profile_arrival(guest, &current, &level)?;
+            if let Some(mode) = forced_mode {
+                guest.game_mode = mode;
+                guest.abilities.update_for_mode(mode);
+            }
+            Ok::<_, String>(())
+        })?;
+        let conn = hub.guests[i].conn;
+        self.load_guest_records(conn);
+        self.finish_arrival(owner, id, Some(authorization), false)?;
+        Ok(false)
     }
 
     fn finish_arrival(
@@ -569,6 +674,7 @@ impl Game<'_> {
         uuid: u128,
         id: u128,
         returning: Option<&ReturnAuthorization>,
+        saved: bool,
     ) -> Result<(), String> {
         let host = self.lan.as_mut().expect("server host is present");
         let i = host.hub.imported_arrival(uuid, id)?;
@@ -588,13 +694,22 @@ impl Game<'_> {
                 .activate_return(&authorization.destination, authorization)
                 .map_err(|error| error.to_string())?;
         }
+        if !saved {
+            host.hub.send_arrival_state(i);
+        }
         let announced = host.hub.confirm_arrival(uuid, id)?;
+        if !saved {
+            host.hub.send_post_effects(i);
+            self.sync_replaced_book_settings(uuid);
+        }
         let directory = playerdata::directory(&self.world_root);
         if returning.is_some() {
             self.bind_player_attachments(conn, false);
             self.native_player_load_from_file(uuid, &name, &directory);
         }
-        self.native_player_save_to_file(uuid, &name, &directory);
+        if saved {
+            self.native_player_save_to_file(uuid, &name, &directory);
+        }
         self.arrival_placed(uuid, &name, announced);
         Ok(())
     }

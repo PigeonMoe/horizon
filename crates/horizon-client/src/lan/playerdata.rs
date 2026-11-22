@@ -82,6 +82,12 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
     let Some(tag) = read_dat(&file).or_else(|| read_dat(&file.with_extension("dat_old"))) else {
         return false;
     };
+    apply(guest, &saved_player(tag));
+    true
+}
+
+/// Decode the same player state for ordinary joins and canonical return resumption.
+pub fn saved_player(tag: Tag) -> Level {
     let mut level = Level {
         health: 20.0,
         food: 20,
@@ -90,8 +96,7 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
     };
     level.read_player(&tag);
     level.player_extra = Some(tag);
-    apply(guest, &level);
-    true
+    level
 }
 
 /// `PlayerList.loadPlayerData` for the world's single-player owner: the file
@@ -421,6 +426,58 @@ pub fn reconcile_profile_arrival(
     guest.saved = Some(tag);
     guest.arrival_profiles = None;
     Ok(())
+}
+
+/// Restore into a held slot after a trusted current-owner command. The caller
+/// has read the exact canonical file and verified all configured profiles.
+pub fn resume_profile_arrival(
+    guest: &mut Guest,
+    current: &super::source_handover::CurrentReturn,
+    level: &Level,
+) -> Result<(), String> {
+    let authorization = current.authorization();
+    if !guest.held
+        || guest.placed
+        || !guest.left_reason.is_empty()
+        || guest.uuid != authorization.retired.owner
+        || guest
+            .arrival_handover
+            .is_some_and(|id| id != authorization.handover)
+        || guest.dimension != level.dimension
+    {
+        return Err("the committed return belongs to another held player or level".into());
+    }
+    guest.inventory.fill(None);
+    guest.armor = Default::default();
+    guest.offhand = None;
+    guest.equipment = Default::default();
+    guest.ender_items.fill(None);
+    apply(guest, level);
+    guest.imported = true;
+    guest.arrival_handover = Some(authorization.handover);
+    guest.arrival_announce = true;
+    guest.arrival_profiles = None;
+    guest.arrival_profile_fingerprint = None;
+    Ok(())
+}
+
+/// Verify required immutable sidecars before restored local gameplay can write player data.
+pub fn verify_committed_return_profile(
+    world: &Path,
+    current: &super::source_handover::CurrentReturn,
+    tag: &Tag,
+    id: &horizon_core::identifier::Identifier,
+    schema: u32,
+) -> Result<(), String> {
+    let authorization = current.authorization();
+    super::profile_storage::verify_committed_profile(
+        world,
+        authorization.retired.owner,
+        Some(tag),
+        id,
+        schema,
+        authorization.handover,
+    )
 }
 
 fn replace_profile_pdc(tag: &mut Tag, pdc: Compound) {

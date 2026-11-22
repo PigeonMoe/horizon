@@ -243,6 +243,26 @@ pub(super) fn active_payload(
         .map_err(|_| TransferProfileReadError::Corrupt)
 }
 
+pub(super) fn verify_committed_profile(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &Identifier,
+    schema: u32,
+    generation: u128,
+) -> Result<(), String> {
+    let marker = read_marker(saved, id)
+        .ok()
+        .flatten()
+        .filter(|marker| marker.generation == generation && marker.schema == schema)
+        .ok_or_else(|| format!("required profile {id} does not match the committed return"))?;
+    let file = marker.path(&world.join("players").join("data"), owner, id);
+    marker
+        .verify_read(&file)
+        .map(|_| ())
+        .map_err(|error| format!("required profile {id} could not be verified: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
