@@ -16,8 +16,9 @@ pub const VERSION: &str = "0.1.0";
 const URL_ENV: &str = "HORIZON_PIGEONAUTH_URL";
 const HOST_ENV: &str = "HORIZON_PIGEONAUTH_OFFLINE_HOST";
 const KEY_ENV: &str = "HORIZON_PIGEONAUTH_KEY";
-const SUBMIT: &str = "pigeonauth:submit";
-pub(super) const SET: &str = "pigeonauth:set";
+/// Custom dialog actions for offline admission and premium password setup.
+pub const SUBMIT: &str = "pigeonauth:submit";
+pub const SET: &str = "pigeonauth:set";
 pub(super) const UNAVAILABLE: Message =
     Message("unavailable", "PigeonAuth 暂时无法处理登录，请稍后再试。");
 pub(super) const RESERVED: Message = Message(
@@ -200,8 +201,14 @@ fn form(kind: Form, error: Option<Message>) -> Tag {
             "can_close_with_escape",
             Tag::Byte(i8::from(matches!(kind, Form::Set))),
         ),
-        // Close before later configuration prompts such as a resource pack or rules.
-        ("after_action", string("close")),
+        (
+            "after_action",
+            string(if matches!(kind, Form::Set) {
+                "close"
+            } else {
+                "wait_for_response"
+            }),
+        ),
         (
             "body",
             Tag::compound([
@@ -417,6 +424,7 @@ mod tests {
         let dialog = crate::dialog::Dialog::parse(&dialog).expect("valid play dialog");
         assert!(dialog.can_close_with_escape);
         assert_eq!(dialog.inputs.len(), 1);
+        assert_eq!(dialog.after_action, crate::dialog::AfterAction::Close);
     }
 
     #[test]
@@ -562,7 +570,10 @@ mod tests {
                 let dialog = crate::dialog::Dialog::parse(&p.dialog).expect("valid client dialog");
                 assert_eq!(dialog.inputs.len(), 1);
                 assert!(!dialog.can_close_with_escape);
-                assert_eq!(dialog.after_action, crate::dialog::AfterAction::Close);
+                assert_eq!(
+                    dialog.after_action,
+                    crate::dialog::AfterAction::WaitForResponse
+                );
                 assert_eq!(
                     p.dialog.get("title").unwrap().get("translate"),
                     Some(&string(expected_title))
