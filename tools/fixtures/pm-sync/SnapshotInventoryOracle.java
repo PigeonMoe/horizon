@@ -28,7 +28,9 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.util.Util;
 import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.food.FoodData;
 import net.william278.husksync.HuskSync;
+import net.william278.husksync.adapter.Adaptable;
 import net.william278.husksync.adapter.SnappyGsonAdapter;
 import net.william278.husksync.libraries.desertwell.util.Version;
 import net.william278.husksync.libraries.gson.JsonParser;
@@ -156,6 +158,35 @@ public final class SnapshotInventoryOracle {
         }
         Files.write(output.resolve("husk-26.2.snappy"), bytes);
         Files.writeString(output.resolve("husk-26.2.json"), packed.asJson(plugin));
+
+        var food = new FoodData();
+        food.setFoodLevel(27);
+        food.setSaturation(-0.0f);
+        // CraftHumanEntity.setExhaustion writes this field directly.
+        food.exhaustionLevel = -3.25f;
+        var vitals = new LinkedHashMap<>(data);
+        vitals.put(Identifier.HEALTH.toString(), normalizedVital(plugin, BukkitData.Health.class,
+                BukkitData.Health.from(73.12345678912345, -0.0, true)));
+        vitals.put(Identifier.HUNGER.toString(), normalizedVital(plugin, BukkitData.Hunger.class,
+                BukkitData.Hunger.from(food.getFoodLevel(), food.getSaturationLevel(), food.exhaustionLevel)));
+        vitals.put(Identifier.EXPERIENCE.toString(), normalizedVital(plugin, BukkitData.Experience.class,
+                BukkitData.Experience.from(123456789, 37, 0.23456788f)));
+        var precise = new Serializer.Json<>(plugin, BukkitData.Experience.class).deserialize(
+                "{\"total_experience\":10,\"exp_level\":3,\"exp_progress\":0.5000000298023223876953125000000001}");
+        if (Float.floatToRawIntBits(precise.getExpProgress()) != Float.floatToRawIntBits(0.5f)) {
+            throw new AssertionError("HuskSync changed the double-to-float rounding");
+        }
+        var vitalsPacked = new DataSnapshot.Packed(id, false, savedAt, "API", "fixture", vitals, version, "bukkit", 5);
+        Files.writeString(output.resolve("husk-vitals-26.2.json"), vitalsPacked.asJson(plugin));
+    }
+
+    private static <T extends Data & Adaptable> String normalizedVital(HuskSync plugin, Class<T> type, T value) {
+        var codec = new Serializer.Json<>(plugin, type);
+        String json = codec.serialize(value);
+        if (!codec.serialize(codec.deserialize(json)).equals(json)) {
+            throw new AssertionError("HuskSync changed the normalized " + type.getSimpleName() + " fields");
+        }
+        return json;
     }
 
     private static void assertEquivalent(String java, String rust) throws Exception {

@@ -19,6 +19,7 @@ pub mod firework;
 pub mod flowers;
 pub mod husksync_inventory;
 pub mod husksync_packed;
+pub mod husksync_vitals;
 pub mod item_abilities;
 pub mod item_data;
 pub mod item_nbt;
