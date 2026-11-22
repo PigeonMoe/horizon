@@ -133,6 +133,132 @@ fn lay_rails(game: &mut Game<'_>) {
 
 #[test]
 #[ignore = "daily"]
+fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
+    use mod_api::PlayerPositionCommittedEvent;
+
+    #[derive(Debug, PartialEq)]
+    struct Move(u128, [f64; 3], [f64; 3]);
+
+    #[derive(Default)]
+    struct Landing {
+        proposed: Mutex<Vec<Move>>,
+        committed: Mutex<Vec<Move>>,
+    }
+
+    struct Protection(Arc<Landing>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn player_teleport_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.cause, "dismount");
+            assert_eq!(event.from_level, "minecraft:overworld");
+            assert_eq!(event.to_level, event.from_level);
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.vehicle(host), None);
+            assert_eq!(rider.position(host), Some(event.from));
+            self.0
+                .proposed
+                .lock()
+                .unwrap()
+                .push(Move(event.player, event.from, event.to));
+            if event.player == FIRST_RIDER {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_position_committed(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerPositionCommittedEvent<'_>,
+        ) {
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.vehicle(host), None);
+            assert_eq!(rider.position(host), Some(event.to));
+            self.0
+                .committed
+                .lock()
+                .unwrap()
+                .push(Move(event.player, event.from, event.to));
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let landing = Arc::new(Landing::default());
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new(
+                "minecart-dismount",
+                Box::new(Protection(landing.clone())),
+            )]
+            .into(),
+            || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    lay_rails(game);
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world.set(7, 63, 7, stone).unwrap();
+                    let cart = game.entity(CART).unwrap();
+                    let target = game.cart_player_dismount_target(0).components();
+                    let velocity = Vec3::new(0.25, 0.0, 0.0);
+                    for uuid in [FIRST_RIDER, SECOND_RIDER] {
+                        let conn = uuid as u32;
+                        let rider = game.player(uuid).unwrap().entity();
+                        assert!(game.entity_start_riding(rider, cart, true));
+                        game.guest_boarded(conn, None);
+                        game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                            guest.loaded = true;
+                            guest.load_timeout = 0;
+                            guest.awaiting_teleport = None;
+                            guest.motion.as_mut().unwrap().velocity = velocity;
+                        });
+                        game.lan_player_input(conn, 32, true);
+                        let guest = game.command_guest(conn).unwrap();
+                        assert!(guest.sneaking);
+                        let (from, view) = (guest.position, [guest.yaw, guest.pitch]);
+                        assert_ne!(from.map(f64::floor), target.map(f64::floor));
+                        game.guest_vehicle_tick(conn);
+
+                        let allowed = uuid == SECOND_RIDER;
+                        let expected = if allowed { target } else { from };
+                        let guest = game.command_guest(conn).unwrap();
+                        assert_eq!(guest.vehicle, None);
+                        assert_eq!(guest.position, expected);
+                        assert_eq!(guest.awaiting_teleport.unwrap().1, expected);
+                        assert_eq!(guest.awaiting_keeps_motion, allowed);
+                        assert_eq!([guest.yaw, guest.pitch], view);
+                        assert_eq!(
+                            guest.motion.as_ref().unwrap().velocity,
+                            if allowed { velocity } else { Vec3::ZERO }
+                        );
+                        assert_eq!(game.carts[0].position, START);
+                        assert_eq!(
+                            std::mem::take(&mut *landing.proposed.lock().unwrap()),
+                            [Move(uuid, from, target)]
+                        );
+                        let committed = std::mem::take(&mut *landing.committed.lock().unwrap());
+                        if allowed {
+                            assert_eq!(committed, [Move(uuid, from, target)]);
+                        } else {
+                            assert!(committed.is_empty());
+                        }
+                    }
+                });
+            },
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_requested_cart_rollback_keeps_ordinary_vetoes_and_checks_rider_recovery() {
     run_on_guest_stack(|| {
         for policy in [

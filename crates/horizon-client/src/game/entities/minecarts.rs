@@ -2227,21 +2227,29 @@ impl Game<'_> {
     /// `getDismountLocationForPassenger`: beside the cart's motion direction,
     /// else on top.
     pub(super) fn dismount_cart(&mut self, i: usize) {
-        let id = self.carts[i].id;
-        if self.riding == Some(id) && !self.native_may_leave(id) {
+        let Some(target) = self.prepare_cart_dismount(i) else {
             return;
-        }
-        self.riding = None;
-        if self.dismount_in_portal(self.carts[i].position) {
-            return;
-        }
-        let target = self.cart_player_dismount_target(i);
+        };
         let from = self.player.as_ref().map(|player| player.position);
         if let Some(p) = self.player.as_mut() {
             p.position = target;
             p.velocity = Vec3::ZERO;
         }
         section_steps::tell_player(self, from.map(|from| (from, target)));
+    }
+
+    /// Detach the rider and calculate the ordinary landing before placing them.
+    pub(super) fn prepare_cart_dismount(&mut self, i: usize) -> Option<Vec3> {
+        let id = self.carts[i].id;
+        if self.riding == Some(id) && (!self.native_may_leave(id) || self.riding != Some(id)) {
+            return None;
+        }
+        let i = self.carts.iter().position(|c| c.id == id)?;
+        self.riding = None;
+        if self.dismount_in_portal(self.carts[i].position) {
+            return None;
+        }
+        Some(self.cart_player_dismount_target(i))
     }
     /// Where the cart at `i` lets a player off.
     pub(super) fn cart_player_dismount_target(&self, i: usize) -> Vec3 {

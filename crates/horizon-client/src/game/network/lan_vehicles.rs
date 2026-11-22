@@ -52,7 +52,7 @@ pub(super) struct WatchedVehicle {
     still: u32,
 }
 
-struct BoatDismount {
+struct GuestDismount {
     player: u128,
     entity: i32,
     level: Dim,
@@ -279,9 +279,9 @@ impl Game<'_> {
                     .update(gi, |guest| guest.vehicle_good = value);
             }
         }
-        // The guest turn publishes the seat change. A boat's landing is
-        // committed separately after the teleport hook has run.
-        let mut boat_dismount = None;
+        // The guest turn publishes the seat change before an ordinary boat
+        // or minecart dismount commits its landing.
+        let mut dismount = None;
         let seat = self.as_guest(conn, |game| {
             // A cushion does not move: the rider sits on it until it sneaks
             // (`Cushion.removePassenger` plays the get-up sound).
@@ -302,16 +302,21 @@ impl Game<'_> {
             }
             if let Some(i) = game.boats.iter().position(|b| Some(b.id) == game.riding) {
                 if keys.shift || ejected {
-                    boat_dismount = game.admit_guest_boat_dismount(i);
+                    dismount = game
+                        .prepare_boat_dismount(i)
+                        .and_then(|landing| game.admit_guest_dismount(landing));
                     return None;
                 }
                 let p = game.player_boat_seat(i);
                 return Some([p.x, p.y, p.z]);
             }
-            // The minecart moves with the rider's input, and lets it out when
-            // it sneaks or the cart breaks. An animal takes the rider's input
-            // for its own tick (`travelRidden`), or lets it off.
-            if !game.tick_cart_riding(keys) && game.tick_mount_riding(keys) {
+            if keys.shift
+                && let Some(i) = game.carts.iter().position(|c| Some(c.id) == game.riding)
+            {
+                dismount = game
+                    .prepare_cart_dismount(i)
+                    .and_then(|landing| game.admit_guest_dismount(landing));
+            } else if !game.tick_cart_riding(keys) && game.tick_mount_riding(keys) {
                 game.riding?;
                 game.position_rider();
             }
@@ -319,8 +324,8 @@ impl Game<'_> {
             let p = game.player.as_ref()?.position;
             Some([p.x, p.y, p.z])
         });
-        if let Some(dismount) = boat_dismount {
-            self.finish_guest_boat_dismount(conn, dismount);
+        if let Some(dismount) = dismount {
+            self.finish_guest_dismount(conn, dismount);
         }
         if let Some(Some(at)) = seat
             && let Some(host) = self.lan.as_mut()
@@ -332,8 +337,7 @@ impl Game<'_> {
         }
     }
 
-    fn admit_guest_boat_dismount(&mut self, boat: usize) -> Option<BoatDismount> {
-        let landing = self.prepare_boat_dismount(boat)?;
+    fn admit_guest_dismount(&mut self, landing: Vec3) -> Option<GuestDismount> {
         let rider = self.player.as_ref()?;
         let (entity, from, level) = (rider.entity_id, rider.position, self.dim);
         let player = horizon_client::lan::playerdata::ints_uuid(self.acting_uuid());
@@ -345,7 +349,7 @@ impl Game<'_> {
             && self.player.as_ref().is_some_and(|rider| {
                 rider.entity_id == entity && rider.position == from && !rider.health.dead_or_dying()
             }))
-        .then_some(BoatDismount {
+        .then_some(GuestDismount {
             player,
             entity,
             level,
@@ -356,7 +360,7 @@ impl Game<'_> {
 
     /// The guest turn has detached the seat. Send its separately cancellable
     /// `ServerPlayer.dismountTo` position packet after the passenger update.
-    fn finish_guest_boat_dismount(&mut self, conn: u32, dismount: BoatDismount) {
+    fn finish_guest_dismount(&mut self, conn: u32, dismount: GuestDismount) {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
