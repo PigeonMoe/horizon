@@ -207,7 +207,7 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
                         .unwrap();
                     game.world.set(7, 63, 7, stone).unwrap();
                     let cart = game.entity(CART).unwrap();
-                    let target = game.cart_player_dismount_target(0).components();
+                    let target = [7.5, 64.0, 7.5];
                     let velocity = Vec3::new(0.25, 0.0, 0.0);
                     for uuid in [FIRST_RIDER, SECOND_RIDER] {
                         let conn = uuid as u32;
@@ -251,6 +251,91 @@ fn sneaking_off_a_minecart_checks_the_landing_after_detaching() {
                             assert!(committed.is_empty());
                         }
                     }
+                });
+            },
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn minecart_dismount_chooses_floor_height_and_pose_before_admission() {
+    use horizon_client::pose::Pose;
+
+    struct Landing(Arc<Mutex<Vec<[f64; 3]>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Landing {
+        fn player_teleport_pre(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.cause, "dismount");
+            self.0.lock().unwrap().push(event.to);
+            Flow::Continue
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let proposed = Arc::new(Mutex::new(Vec::new()));
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new(
+                "minecart-landing-geometry",
+                Box::new(Landing(proposed.clone())),
+            )]
+            .into(),
+            || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    lay_rails(game);
+                    let registry = game.pack.assets.registry;
+                    let air = registry.default_state("minecraft:air").unwrap();
+                    let stone = registry.default_state("minecraft:stone").unwrap();
+                    let slab = crate::game::native_hooks::with_property(
+                        registry,
+                        registry.default_state("minecraft:stone_slab").unwrap(),
+                        "type",
+                        "bottom",
+                    )
+                    .unwrap();
+                    for x in [6, 8, 9, 10] {
+                        game.world.set(x, 63, 8, air).unwrap();
+                        game.world.set(x, 64, 8, air).unwrap();
+                    }
+                    // The preferred side has an unsupported bottom slab with
+                    // exactly 1.5 blocks between its surface and the ceiling.
+                    game.world.set(7, 64, 7, slab).unwrap();
+                    game.world.set(7, 66, 7, stone).unwrap();
+                    let cart = game.entity(CART).unwrap();
+                    let rider = game.player(FIRST_RIDER).unwrap().entity();
+                    let conn = FIRST_RIDER as u32;
+                    let dismount = |game: &mut Game<'_>, expected: [f64; 3], pose: Pose| {
+                        assert!(game.entity_start_riding(rider, cart, true));
+                        game.guest_boarded(conn, None);
+                        game.lan_player_input(conn, 32, true);
+                        game.guest_vehicle_tick(conn);
+                        let guest = game.command_guest(conn).unwrap();
+                        assert_eq!(guest.vehicle, None);
+                        assert_eq!(guest.position, expected);
+                        assert_eq!(guest.awaiting_teleport.unwrap().1, expected);
+                        assert_eq!(guest.pose(), pose);
+                        assert_eq!(std::mem::take(&mut *proposed.lock().unwrap()), [expected]);
+                    };
+                    dismount(game, [7.5, 64.5, 7.5], Pose::Crouching);
+
+                    // Try all standing positions before offering a crouching
+                    // position closer to the preferred side.
+                    game.world.set(7, 63, 9, stone).unwrap();
+                    dismount(game, [7.5, 64.0, 9.5], Pose::Standing);
+
+                    // With no side floor, the rider lands on top of the cart.
+                    // Its own column now fits only the swimming pose.
+                    game.world.set(7, 64, 7, air).unwrap();
+                    game.world.set(7, 66, 7, air).unwrap();
+                    game.world.set(7, 63, 9, air).unwrap();
+                    game.world.set(7, 66, 8, stone).unwrap();
+                    let above_cart = [START.x, game.carts[0].bounds().max_position().y, START.z];
+                    dismount(game, above_cart, Pose::Swimming);
                 });
             },
         );

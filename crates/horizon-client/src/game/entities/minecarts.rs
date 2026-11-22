@@ -23,18 +23,19 @@ use horizon_client::fast_hash::FxHashSet;
 use horizon_client::join_seq::{JoinList, ListStamp};
 use horizon_client::mobs::{Mob, seen_grid::SeenGrid};
 use horizon_client::{
-    blocks::Fluid,
     containers::BlockEntity,
     items::{ItemStack, Items},
     mesher::Vertex,
     mobs::{Part, Species, Who, anim::Poses, riders},
+    motion::PlayerMotion,
     particles::{ParticleOptions, ParticleType},
+    pose::Pose,
     random_source,
     scoreboard::pushable_by,
     sound_engine::{BLOCKS, CartSound, PlayResult, SoundInstance, Sounds},
 };
 use horizon_core::{
-    geometry::{Aabb, Vec3, trig},
+    geometry::{Aabb, Axis, Vec3, VoxelShape, block_floor_height, trig},
     position::BlockPos,
     random::{EntityRandom, RandomSource},
 };
@@ -2249,40 +2250,91 @@ impl Game<'_> {
         if self.dismount_in_portal(self.carts[i].position) {
             return None;
         }
-        Some(self.cart_player_dismount_target(i))
+        let (target, pose) = self.cart_player_dismount_target(i, self.player.as_ref()?);
+        if let Some(pose) = pose
+            && let Some(player) = self.player.as_mut()
+            && let Err(error) = player.set_pose(pose)
+        {
+            log::warn!("dismount pose: {error}");
+        }
+        Some(target)
     }
-    /// Where the cart at `i` lets a player off.
-    pub(super) fn cart_player_dismount_target(&self, i: usize) -> Vec3 {
+
+    /// Search each pose's heights and side offsets in vanilla's order.
+    pub(super) fn cart_player_dismount_target(
+        &self,
+        i: usize,
+        rider: &PlayerMotion,
+    ) -> (Vec3, Option<Pose>) {
         let c = &self.carts[i];
-        let (bx, by, bz) = (
-            c.position.x.floor() as i32,
-            c.position.y.floor() as i32,
-            c.position.z.floor() as i32,
-        );
-        let mut target = None;
+        let [bx, by, bz] = c.position.components().map(|v| v.floor() as i32);
         let face = cart_motion_face(c.yaw, c.flipped, self.minecart_improvements());
-        'search: for dy in [0, 1, -1] {
-            for (dx, dz) in dismount_offsets(face) {
-                let (x, y, z) = (bx + dx, by + dy, bz + dz);
-                let below = self.res.facts().get(self.world.block(x, y - 1, z));
-                let here = self.res.facts().get(self.world.block(x, y, z));
-                let head = self.res.facts().get(self.world.block(x, y + 1, z));
-                if (below.full_collision || below.legacy_solid)
-                    && !here.full_collision
-                    && !head.full_collision
-                    && here.fluid == Fluid::None
-                {
-                    target = Some(Vec3::new(
-                        f64::from(x) + 0.5,
-                        f64::from(y),
-                        f64::from(z) + 0.5,
-                    ));
-                    break 'search;
+        let offsets = dismount_offsets(face);
+        let poses = super::mounts::rider_poses(rider);
+        for &(pose, mut dimensions) in &poses {
+            dimensions.width = dimensions.width.min(1.0);
+            let heights: &[i32] = if pose == Pose::Swimming {
+                &[0, 1]
+            } else {
+                &[0, 1, -1]
+            };
+            for &dy in heights {
+                for (dx, dz) in offsets {
+                    let (x, y, z) = (bx + dx, by + dy, bz + dz);
+                    let shape = self.minecart_dismount_floor_shape([x, y, z]);
+                    let below = std::cell::OnceCell::new();
+                    let floor = block_floor_height(&shape, || {
+                        below.get_or_init(|| self.minecart_dismount_floor_shape([x, y - 1, z]))
+                    });
+                    if !floor.is_finite() || floor >= 1.0 {
+                        continue;
+                    }
+                    let target =
+                        Vec3::new(f64::from(x) + 0.5, f64::from(y) + floor, f64::from(z) + 0.5);
+                    if self.can_dismount_to(dimensions.bounds(target)) {
+                        return (target, Some(pose));
+                    }
                 }
             }
         }
+
+        // The fallback is on top of the cart. Choose the first pose that
+        // fits below the first collision shape in its column.
         let top = c.bounds().max_position().y;
-        target.unwrap_or(Vec3::new(c.position.x, top, c.position.z))
+        let bottom = top.floor() as i32;
+        let pose = poses.into_iter().find_map(|(pose, dimensions)| {
+            let height = f64::from(dimensions.height);
+            let blocks = (top - f64::from(bottom) + height).ceil() as i32;
+            let ceiling = (bottom..bottom + blocks)
+                .find_map(|y| {
+                    let shape = self.block_collision_shape([bx, y, bz]);
+                    (!shape.is_empty()).then(|| f64::from(y) + shape.min(Axis::Y))
+                })
+                .unwrap_or(f64::INFINITY);
+            (top + height <= ceiling).then_some(pose)
+        });
+        (Vec3::new(c.position.x, top, c.position.z), pose)
+    }
+
+    /// `DismountHelper.nonClimbableShape`: climbing blocks and open
+    /// trapdoors do not count as footing.
+    fn minecart_dismount_floor_shape(&self, pos: [i32; 3]) -> VoxelShape {
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let name = &self.res.facts().get(state).name;
+        if self.named_block_in_tag("minecraft:climbable", name)
+            || (self.named_block_in_tag("minecraft:trapdoors", name)
+                && self
+                    .pack
+                    .assets
+                    .registry
+                    .state(state)
+                    .and_then(|state| state.properties.get("open"))
+                    .is_some_and(|open| open == "true"))
+        {
+            VoxelShape::empty()
+        } else {
+            self.block_collision_shape(pos)
+        }
     }
     /// `MinecartItem.useOn`: a cart on the clicked rail.
     pub(super) fn place_minecart(&mut self, hit: &Hit, stack: &ItemStack) -> bool {

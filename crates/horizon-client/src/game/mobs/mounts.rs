@@ -771,7 +771,7 @@ impl Game<'_> {
             return Some(self.boat_player_dismount_target(i, yaw));
         }
         if let Some(i) = self.carts.iter().position(|c| c.id == vehicle) {
-            return Some(self.cart_player_dismount_target(i));
+            return Some(self.cart_player_dismount_target(i, p).0);
         }
         let mount = self.mobs.iter().find(|m| m.id == vehicle)?;
         if mount.species() == Species::HappyGhast {
@@ -1074,7 +1074,7 @@ struct Rider {
 /// `Player.getDismountPoses`: standing, crouching, then crawling.
 const DISMOUNT_POSES: [Pose; 3] = [Pose::Standing, Pose::Crouching, Pose::Swimming];
 /// The rider's box in each dismount pose, at their `minecraft:scale`.
-fn rider_poses(p: &PlayerMotion) -> Vec<(Pose, Dimensions)> {
+pub(super) fn rider_poses(p: &PlayerMotion) -> Vec<(Pose, Dimensions)> {
     // EntityDimensions.scale: every player pose scales alike, so the
     // standing width gives the scale without a mutable attribute lookup.
     let scale = p.dimensions.width / Pose::Standing.dimensions(1.0).width;
@@ -1846,7 +1846,8 @@ mod tests {
         let mut m = horizon_client::mobs::Mob::new(id, kind, Vec3::new(at[0], at[1], at[2]), 0.0);
         m.extra.tame = true;
         m.health = m.attrs.max_health;
-        m.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
+        m.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
         game.mobs.clear();
         game.mobs.push(m);
     }
