@@ -56,6 +56,7 @@ use crate::{
     ClientHost, Commands, EntityRef, FluidStack, Host, ItemPlace, ItemStack, LevelRef, Messages,
     Mods, PlayerRef, Players, ServerHost, TEST_MODS, Tag, Text, TicketController, WorldEpoch,
 };
+use std::collections::BTreeMap;
 
 /// The world epoch of every fake's handles.
 const FAKE_EPOCH: u64 = 1;
@@ -194,6 +195,8 @@ pub struct FakeHost {
     pub registries: FakeRegistries,
     /// The players online.
     pub players: FakePlayers,
+    /// Source hand-overs that currently freeze a player's state.
+    pub frozen_player_handovers: BTreeMap<u128, u128>,
     /// The one level.
     pub level: FakeLevel,
     /// The command service.
@@ -328,6 +331,12 @@ impl crate::prelude::PlayersHost for FakeHost {
         self.players.handle(uuid)
     }
 }
+
+impl crate::prelude::PlayersServerHost for FakeHost {
+    fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
+        self.frozen_player_handovers.get(&owner).copied()
+    }
+}
 impl crate::prelude::ItemsHost for FakeHost {
     fn item_key(&self, id: &crate::Identifier) -> Option<crate::ItemKey> {
         crate::content::registry_keys::item_key_by_identifier(id)
@@ -453,7 +462,7 @@ impl crate::prelude::ServicesServerHost for FakeHost {
         &self.players
     }
 }
-crate::impl_server_host_areas!(FakeHost, except(mod_state, services));
+crate::impl_server_host_areas!(FakeHost, except(mod_state, players, services));
 impl ClientHost for FakeHost {}
 crate::impl_client_host_areas!(FakeHost);
 

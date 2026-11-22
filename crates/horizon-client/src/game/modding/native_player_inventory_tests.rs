@@ -146,6 +146,100 @@ fn each_inventory_refusal_has_its_own_name_and_writes_nothing() {
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn a_source_handover_freezes_mod_writes_until_the_matching_abort() {
+    use horizon_client::lan::arrivals::{self, Records, Settings, Transfers};
+    use mod_api::{ItemPlace, ItemResource, ServerHost};
+
+    with_guests(|game| {
+        let players = game.players().server_players();
+        let (other, player) = (players[0], players[1]);
+        let stone = stack(game, r#"{id:"minecraft:stone",count:2}"#);
+        let resource = ItemResource::of(&stone);
+        let slot = ItemPlace::PlayerSlot {
+            player: player.uuid(),
+            slot: 0,
+        };
+        let edit = |game: &mut super::Game<'_>| {
+            game.transaction(|host, tx| {
+                Ok::<_, ()>((
+                    slot.extract(host, tx, &resource, 1),
+                    slot.insert(host, tx, &resource, 1),
+                ))
+            })
+        };
+        player
+            .set_inventory_slot(game, 0, Some(stone.clone()))
+            .unwrap();
+        player
+            .set_ender_chest_slot(game, 0, Some(stone.clone()))
+            .unwrap();
+
+        let index = {
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            hub.transfers = Some(Transfers::new(Settings::default()));
+            let index = hub.guests.connection_index(13).unwrap();
+            let inspection =
+                arrivals::export_record(hub, index, false, Records::default()).unwrap();
+            assert!(inspection["handover"].is_null());
+            index
+        };
+        let handover = |game: &super::Game<'_>, owner| {
+            let host: &dyn ServerHost = game;
+            host.player_frozen_handover(owner)
+        };
+        assert_eq!(handover(game, player.uuid()), None);
+        assert_eq!(edit(game), Ok((1, 1)));
+
+        let frozen = {
+            let hub = &mut game.lan.as_mut().unwrap().hub;
+            arrivals::export_record(hub, index, true, Records::default()).unwrap()
+        };
+        let id = arrivals::parse_handover(frozen["handover"].as_str().unwrap()).unwrap();
+        assert_eq!(handover(game, player.uuid()), Some(id));
+        assert_eq!(handover(game, other.uuid()), None);
+        assert_eq!(player.inventory_slots(game), Some(vec![(0, stone.clone())]));
+        assert_eq!(
+            player.set_inventory_slot(game, 0, None),
+            Err(PlayerDataRefusal::Transferring)
+        );
+        assert_eq!(
+            player.give_stack(game, stone.clone()),
+            Err(PlayerDataRefusal::Transferring)
+        );
+        assert_eq!(edit(game), Ok((0, 0)));
+        game.as_guest(13, |game| {
+            assert_eq!(handover(game, player.uuid()), Some(id));
+            assert_eq!(
+                player.set_ender_chest_slot(game, 0, None),
+                Err(PlayerDataRefusal::Transferring)
+            );
+            assert_eq!(edit(game), Ok((0, 0)));
+        })
+        .unwrap();
+        assert_eq!(player.inventory_slots(game), Some(vec![(0, stone.clone())]));
+        assert_eq!(player.ender_chest(game), Some(vec![(0, stone)]));
+
+        let uuid = horizon_protocol::crypto::uuid_string(player.uuid());
+        let hub = &mut game.lan.as_mut().unwrap().hub;
+        assert_eq!(
+            arrivals::export_record(hub, index, true, Records::default()).unwrap(),
+            frozen
+        );
+        let wrong = format!("{uuid} {} abort", arrivals::handover_text(id ^ 1));
+        assert!(arrivals::release_request(hub, &wrong)["error"].is_string());
+        assert_eq!(handover(game, player.uuid()), Some(id));
+
+        let abort = format!("{uuid} {} abort", arrivals::handover_text(id));
+        let hub = &mut game.lan.as_mut().unwrap().hub;
+        assert_eq!(arrivals::release_request(hub, &abort)["released"], "abort");
+        assert_eq!(handover(game, player.uuid()), None);
+        assert_eq!(edit(game), Ok((1, 1)));
+        assert_eq!(player.set_inventory_slot(game, 0, None), Ok(()));
+    });
+}
+
 /// A stack written to a slot the open inventory menu shows replaces the old one in that
 /// menu slot, and clicking the slot picks up the new stack: no stale copy of the old one.
 #[test]

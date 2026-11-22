@@ -785,6 +785,15 @@ impl Game<'_> {
         ))
     }
 
+    pub(super) fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
+        let hub = &self.lan.as_ref()?.hub;
+        hub.transfers.as_ref()?;
+        let guest = hub.guests.iter().find(|guest| {
+            guest.uuid == owner && guest.placed && !guest.held && guest.participates_online()
+        })?;
+        guest.handover.as_ref().map(|handover| handover.id)
+    }
+
     /// The chunks players started and stopped watching that the hub
     /// recorded (`lan::chunk_watch`), told to the mods in the hub's order,
     /// with no player's state swapped in, and a sent chunk's passages sent
@@ -1905,6 +1914,9 @@ impl Game<'_> {
         let Some(read) = self.player_handle_read(player) else {
             return false;
         };
+        if self.player_frozen_handover(player.uuid()).is_some() {
+            return false;
+        }
         let conn = match read {
             PlayerRead::Acting { .. } => None,
             PlayerRead::Guest(g) if !g.dead => Some(g.conn),

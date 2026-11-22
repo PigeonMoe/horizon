@@ -20,6 +20,13 @@ pub trait PlayersHost {
 /// The server host's methods of the `players` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait PlayersServerHost {
+    /// The current source hand-over id while a placed player is frozen by
+    /// `player-export <uuid> freeze`. The target's held arrival has no source
+    /// hand-over. Use this when a mod exposes that player's data to someone
+    /// else, for example an open menu for an owner-keyed backpack.
+    #[access(WorldOnly)]
+    fn player_frozen_handover(&self, owner: u128) -> Option<u128>;
+
     /// Side: server. Select which of the requested `PlayerPersisted` byte
     /// flags are exactly 1. Every key must belong to the calling package's
     /// namespace. The returned keys follow the request order.

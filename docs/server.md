@@ -223,6 +223,10 @@ player who is not connected, is held, has not finished joining, is leaving, is r
 While frozen, the player takes no damage (as vanilla's `Abilities.invulnerable`: the void and `/kill` still kill)
 and picks nothing up (items, arrows, experience orbs), so its record stays what it is until the release. A player
 who dies while frozen all the same ends the hand-over, with a warning in the log.
+Mods can still read that player. `PlayerRef` inventory, ender chest and persistent-data writes, and
+transactional `ItemPlace` writes to their slots and hands, refuse while the hand-over is frozen.
+`ServerHost::player_frozen_handover` lets a mod check that same source freeze for owner-keyed data
+another player can reach, such as a borrowed backpack.
 
 `player-release <uuid> <hand-over> moved [announce]` and `player-release <uuid> <hand-over> abort` end the
 hand-over, on the source server. Both name the hand-over the export returned. `moved` takes the player out of the

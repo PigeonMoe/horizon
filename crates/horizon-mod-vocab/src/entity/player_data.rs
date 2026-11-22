@@ -24,6 +24,8 @@ pub enum PlayerDataRefusal {
     /// The game's item conversion boundary refused the supplied stack: an item the world
     /// lacks, a count or damage the item does not allow, malformed components.
     Stack(crate::StackWriteError),
+    /// A source hand-over has frozen this player's state until it releases.
+    Transferring,
 }
 
 impl From<crate::StackWriteError> for PlayerDataRefusal {
