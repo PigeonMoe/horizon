@@ -132,7 +132,7 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         state: BlockStateId,
     ) -> Result<(), PlacementQueryError> {
         if let Some(capture) = self.sim.growth_capture.as_mut() {
-            capture.stage(pos(position), state, None);
+            capture.stage(self.sim.b, pos(position), state, None);
         } else {
             self.sim.level.set_raw(pos(position), state);
         }
