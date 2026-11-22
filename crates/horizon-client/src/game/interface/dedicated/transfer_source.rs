@@ -1,10 +1,12 @@
 //! Source commands for an owned, durable player hand-over.
 
-use super::transfer::receipt::{Hidden, digest_hex};
+use super::transfer::receipt::{
+    Hidden, digest_hex, parse_authority_revision, record_authority_revision,
+};
 use crate::game::{Dim, Game};
 use horizon_client::lan::{
     arrivals, base64, playerdata,
-    source_handover::{Handover, Journal, Phase},
+    source_handover::{AuthorityRevision, Handover, Journal, Phase},
 };
 use horizon_core::nbt::{Limits, NamedTag, write_named};
 use horizon_protocol::packets::play::{self, Clientbound as C};
@@ -83,10 +85,21 @@ impl Game<'_> {
             .next()
             .filter(|destination| valid_backend_id(destination))
             .ok_or("a source hand-over needs a valid destination backend id")?;
-        let digest = fields.next();
-        if fields.next().is_some() || (verb == "player-profile-retire") != digest.is_some() {
-            return Err("source export or status takes a unique id, hand-over id and destination; retirement also requires the record digest".into());
+        let extra = fields.next();
+        if fields.next().is_some() {
+            return Err("unexpected argument after the source hand-over binding".into());
         }
+        let (revision, digest) = match (verb, extra) {
+            ("player-profile-export", extra) => {
+                (extra.map(parse_authority_revision).transpose()?, None)
+            }
+            ("player-profile-status", None) => (None, None),
+            ("player-profile-retire", Some(digest)) => (None, Some(digest)),
+            _ => return Err(
+                "source status takes no extra arguments and retirement requires the record digest"
+                    .into(),
+            ),
+        };
 
         let journal = self
             .lan
@@ -95,7 +108,7 @@ impl Game<'_> {
             .ok_or("the source hand-over journal is unavailable")?;
         if verb == "player-profile-export" && journal.fenced_handover(owner).is_none() {
             let (handover, phase) =
-                self.prepare_profile_source(&journal, owner, id, destination)?;
+                self.prepare_profile_source(&journal, owner, id, destination, revision)?;
             return source_reply(&handover, phase, true);
         }
 
@@ -122,7 +135,12 @@ impl Game<'_> {
                 .detach_retired_profile_source(owner);
             return source_reply(&handover, Phase::Retired, false);
         }
-        source_reply(&handover, phase, verb == "player-profile-export")
+        let exporting = verb == "player-profile-export";
+        let reply = source_reply(&handover, phase, exporting)?;
+        if exporting && record_authority_revision(&reply)? != revision {
+            return Err("the requested revision differs from the prepared source hand-over".into());
+        }
+        Ok(reply)
     }
 
     fn prepare_profile_source(
@@ -131,6 +149,7 @@ impl Game<'_> {
         owner: u128,
         id: u128,
         destination: &str,
+        revision: Option<AuthorityRevision>,
     ) -> Result<(Handover, Phase), String> {
         let host = self.lan.as_ref().ok_or("the server is not open")?;
         let transfers = host.hub.transfers.as_ref().ok_or(arrivals::OFF)?;
@@ -230,6 +249,9 @@ impl Game<'_> {
         record["source"] = json!(source);
         record["destination"] = json!(destination);
         record["profiles"] = json!(sections);
+        if let Some(revision) = revision {
+            record["authority_revision"] = json!(u64::from(revision));
+        }
         let record = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
         // Reserve room for destination import options and control framing.
         if record.len() + (64 << 10) > horizon_client::control::MAX_LINE as usize {
@@ -248,7 +270,10 @@ impl Game<'_> {
         let guest = &host.hub.guests[index];
         self.write_arrival_records(host, guest)?;
         playerdata::save_now(guest, &self.world_root)?;
-        let result = journal.prepare(&handover);
+        let result = match revision {
+            Some(revision) => journal.prepare_versioned(&handover, revision),
+            None => journal.prepare(&handover),
+        };
         if journal.fenced_handover(owner) == Some(id) {
             let hub = &mut self.lan.as_mut().expect("the server is open").hub;
             if !hub.park_profile_source(index, id) {
@@ -275,6 +300,9 @@ fn source_reply(handover: &Handover, phase: Phase, include_record: bool) -> Resu
         "record_sha256": digest_hex(handover.record_digest()),
         "phase": match phase { Phase::Pending => "pending", Phase::Retired => "retired" },
     });
+    if let Some(revision) = record_authority_revision(&record)? {
+        reply["authority_revision"] = json!(u64::from(revision));
+    }
     if include_record {
         reply["record"] = record;
     }

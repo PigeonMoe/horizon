@@ -403,6 +403,26 @@ pub fn save_profile_arrival(guest: &mut Guest, world: &Path, handover: u128) -> 
     Ok(())
 }
 
+/// Finish the in-memory half of an interrupted confirmation. The verified current player
+/// file was already written for this exact held import. No data needs to be written again.
+pub fn reconcile_profile_arrival(
+    guest: &mut Guest,
+    current: super::source_handover::CurrentReturn,
+    tag: Tag,
+) -> Result<(), String> {
+    let authorization = current.authorization();
+    if !guest.held
+        || guest.placed
+        || guest.uuid != authorization.retired.owner
+        || guest.arrival_handover != Some(authorization.handover)
+    {
+        return Err("the committed return belongs to another held hand-over".into());
+    }
+    guest.saved = Some(tag);
+    guest.arrival_profiles = None;
+    Ok(())
+}
+
 fn replace_profile_pdc(tag: &mut Tag, pdc: Compound) {
     if let Tag::Compound(root) = tag {
         root.insert("NeoForgeData".into(), Tag::Compound(pdc));

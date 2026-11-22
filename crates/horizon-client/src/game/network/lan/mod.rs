@@ -2384,7 +2384,11 @@ impl Game<'_> {
                     }
                 }
                 HostEvent::PlayerMove(conn) => self.lan_player_move(conn),
-                HostEvent::Input { conn, flags, loaded } => self.lan_player_input(conn, flags, loaded),
+                HostEvent::Input {
+                    conn,
+                    flags,
+                    loaded,
+                } => self.lan_player_input(conn, flags, loaded),
                 HostEvent::ClientInformation(conn, old, new) => {
                     if let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
                         let (uuid, entity_id, name) = (g.uuid, g.entity_id, g.name.clone());
@@ -2957,14 +2961,16 @@ impl Game<'_> {
         let root = self.world_root.clone();
         let in_place = host.hub.config.dimension.clone();
         let levels = host.hub.config.levels;
+        let returning = host.hub.pending_profile_return(conn).is_some();
         let owner = host.owner.as_mut();
         let Some((known, uuid, name)) = host.hub.update_guest(conn, |g| {
             // PlayerList.loadPlayerData: the owner gets the world's player file,
-            // everyone else their own.
-            let known = match owner.filter(|o| o.uuid == g.uuid) {
-                Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref()),
-                None => playerdata::load(g, &root),
-            };
+            // everyone else their own. A return starts without the retired profile.
+            let known = !returning
+                && match owner.filter(|o| o.uuid == g.uuid) {
+                    Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref()),
+                    None => playerdata::load(g, &root),
+                };
             // `PlayerList.placeNewPlayer`: a saved level the world no longer has is the Overworld.
             if !levels.has(&g.dimension) {
                 g.dimension = "minecraft:overworld".to_owned();
@@ -2976,7 +2982,9 @@ impl Game<'_> {
             return false;
         };
         self.initialize_server_player(uuid, conn);
-        self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
+        if !returning {
+            self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
+        }
         let Some(host) = self.lan.as_mut() else {
             return false;
         };
@@ -3041,7 +3049,9 @@ impl Game<'_> {
         }) else {
             return false;
         };
-        self.load_guest_records(conn);
+        if !returning {
+            self.load_guest_records(conn);
+        }
         // Collect the recipient's recipe types and filter their command tree.
         self.prepare_recipe_join(conn);
         // A level that will not open, its generator gone with a mod, is one the
@@ -3094,7 +3104,7 @@ impl Game<'_> {
         if elsewhere && let Err(e) = self.enter_level(back) {
             log::error!("could not reopen {}: {e}", back.id());
         }
-        !known
+        !known && !returning
     }
 
     /// Level events the game queued, for the guests (`process_level_events`).

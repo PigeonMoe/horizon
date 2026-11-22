@@ -10,7 +10,10 @@
 //! tick. Legacy transfers and new source captures require `[transfer]`. The strict source's
 //! status and retirement commands can reconcile existing journal entries after a config change.
 use crate::game::Game;
-use horizon_client::lan::{arrivals, import};
+use horizon_client::lan::{
+    arrivals, import, playerdata,
+    source_handover::{CurrentReturn, ReturnAuthorization},
+};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -140,6 +143,10 @@ impl Game<'_> {
                 Some(host) => arrivals::expect_request(&mut host.hub, args, Instant::now()),
                 None => json!({ "error": "the server is not open to players" }),
             },
+            "player-profile-expect-return" => match self.lan.as_mut() {
+                Some(host) => arrivals::expect_return_request(&mut host.hub, args, Instant::now()),
+                None => json!({ "error": "the server is not open to players" }),
+            },
             "player-drop" => match self.lan.as_mut() {
                 Some(host) => arrivals::drop_request(&mut host.hub, args),
                 None => json!({ "error": "the server is not open to players" }),
@@ -206,9 +213,17 @@ impl Game<'_> {
                         host.hub.placed_arrival(uuid, binding.handover).is_some();
                     return committed.commit_reply(currently_placed, true);
                 }
-                Ok(None) => Some(binding),
+                Ok(None) => {}
                 Err(error) => return json!({ "error": error }),
             }
+            if host
+                .hub
+                .held_profile_return(uuid)
+                .is_some_and(|authorization| !binding.matches_return(authorization))
+            {
+                return json!({ "error": "the profile import differs from the held return authorization" });
+            }
+            Some(binding)
         } else {
             None
         };
@@ -417,7 +432,22 @@ impl Game<'_> {
         let (owner, id) = (binding.owner, binding.handover);
         match receipt::lookup(&self.world_root, &binding) {
             Ok(Some(committed)) => {
-                return committed.commit_reply(host.hub.placed_arrival(owner, id).is_some(), true);
+                let returning = host
+                    .hub
+                    .held_profile_return(owner)
+                    .filter(|authorization| binding.matches_return(authorization))
+                    .filter(|_| host.hub.imported_arrival(owner, id).is_ok())
+                    .cloned();
+                let placed = host.hub.placed_arrival(owner, id).is_some();
+                return match returning {
+                    Some(authorization) if !transfers.stopping => {
+                        match self.reconcile_return(&authorization) {
+                            Ok(()) => committed.commit_reply(true, true),
+                            Err(error) => json!({ "error": error }),
+                        }
+                    }
+                    _ => committed.commit_reply(placed, true),
+                };
             }
             Ok(None) => {}
             Err(error) => return json!({ "error": error }),
@@ -436,6 +466,13 @@ impl Game<'_> {
             }
             Err(error) => return json!({ "error": error }),
         };
+        if host
+            .hub
+            .held_profile_return(owner)
+            .is_some_and(|authorization| !binding.matches_return(authorization))
+        {
+            return json!({ "error": "the confirmation differs from the held return authorization" });
+        }
         match self.place_arrival(owner, id, Some(&staged)) {
             Ok(_) => staged.commit_reply(true, false),
             Err(error) => json!({ "error": error }),
@@ -453,23 +490,34 @@ impl Game<'_> {
         id: u128,
         receipt: Option<&receipt::Receipt>,
     ) -> Result<bool, String> {
-        self.lan
-            .as_ref()
-            .expect("server host is present")
-            .hub
-            .imported_arrival(uuid, id)?;
+        let hub = &self.lan.as_ref().expect("server host is present").hub;
+        hub.imported_arrival(uuid, id)?;
+        let returning = hub.held_profile_return(uuid).cloned();
+        if let Some(authorization) = &returning {
+            let journal = hub
+                .lan
+                .shared
+                .config
+                .source_handovers
+                .as_ref()
+                .ok_or("the source hand-over journal is unavailable")?;
+            journal
+                .validate_return(&authorization.destination, authorization)
+                .map_err(|error| error.to_string())?;
+        }
         // An autosave of this player still in flight must not land after this write.
         // Its completion fires save hooks, so the Host must still see the server.
-        let _ = self.finish_player_autosaves(true);
+        self.finish_player_autosaves(true)
+            .map_err(|error| error.to_string())?;
         let host = self.lan.as_mut().expect("server host is present");
         let i = host.hub.imported_arrival(uuid, id)?;
         let mut g = host.hub.guests.take_for_save(i);
-        use horizon_client::lan::playerdata;
         let written = if playerdata::has_staged_arrival_profiles(&g) {
-            // A profile marker is the single authority switch in player.dat. Nothing
-            // that can refuse the placement is written after this file commits.
+            // The current player.dat activates the profile and records the durable receipt.
             receipt
-                .map(|receipt| receipt::append_receipt(&self.world_root, &mut g, receipt))
+                .map(|receipt| {
+                    receipt::append_receipt(&self.world_root, &mut g, receipt, returning.as_ref())
+                })
                 .transpose()
                 .and_then(|previous| {
                     let result = self
@@ -495,15 +543,60 @@ impl Game<'_> {
                 self.write_arrival_records(self.lan.as_ref().expect("server host is present"), &g)
             })
         };
-        let name = g.name.clone();
         let host = self.lan.as_mut().expect("server host is present");
         host.hub.guests.insert(i, g);
         written?;
+        self.finish_arrival(uuid, id, returning.as_ref())?;
+        Ok(true)
+    }
+
+    fn reconcile_return(&mut self, authorization: &ReturnAuthorization) -> Result<(), String> {
+        let (uuid, id) = (authorization.retired.owner, authorization.handover);
+        let (current, tag) = CurrentReturn::read_player(&self.world_root, uuid)
+            .map_err(|error| error.to_string())?
+            .filter(|(current, _)| current.authorization() == authorization)
+            .ok_or("the current player file does not confirm this return")?;
+        let host = self.lan.as_mut().expect("server host is present");
+        let i = host.hub.imported_arrival(uuid, id)?;
+        host.hub.guests.update(i, |guest| {
+            playerdata::reconcile_profile_arrival(guest, current, tag)
+        })?;
+        self.finish_arrival(uuid, id, Some(authorization))
+    }
+
+    fn finish_arrival(
+        &mut self,
+        uuid: u128,
+        id: u128,
+        returning: Option<&ReturnAuthorization>,
+    ) -> Result<(), String> {
+        let host = self.lan.as_mut().expect("server host is present");
+        let i = host.hub.imported_arrival(uuid, id)?;
+        let guest = &host.hub.guests[i];
+        if playerdata::has_staged_arrival_profiles(guest) {
+            return Err("the required profile sections have not been saved".into());
+        }
+        let (conn, name) = (guest.conn, guest.name.clone());
+        if let Some(authorization) = returning {
+            host.hub
+                .lan
+                .shared
+                .config
+                .source_handovers
+                .as_ref()
+                .ok_or("the source hand-over journal is unavailable")?
+                .activate_return(&authorization.destination, authorization)
+                .map_err(|error| error.to_string())?;
+        }
         let announced = host.hub.confirm_arrival(uuid, id)?;
-        let directory = horizon_client::lan::playerdata::directory(&self.world_root);
+        let directory = playerdata::directory(&self.world_root);
+        if returning.is_some() {
+            self.bind_player_attachments(conn, false);
+            self.native_player_load_from_file(uuid, &name, &directory);
+        }
         self.native_player_save_to_file(uuid, &name, &directory);
         self.arrival_placed(uuid, &name, announced);
-        Ok(true)
+        Ok(())
     }
 
     /// What the game does once a held player is placed: the log's lines, and the mods' "logged
@@ -555,8 +648,103 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_client::lan::playerdata;
     use horizon_protocol::crypto::uuid_string;
+
+    #[test]
+    fn versioned_receipt_binds_exact_return_in_current_player_file() {
+        use horizon_client::lan::{
+            Joined, PlayerSender, guest::Guest, source_handover::RetiredAnchor,
+        };
+        use horizon_core::identifier::Identifier;
+        use horizon_protocol::packets::configuration::ClientInformation;
+        use std::sync::{Arc, mpsc};
+
+        let world = tempfile::tempdir().unwrap();
+        let owner = 12;
+        let id = 51;
+        let settings = arrivals::Settings {
+            backend_id: Some("west".into()),
+            allowed_sources: ["east".into()].into(),
+            required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
+                .into(),
+            ..arrivals::Settings::default()
+        };
+        let request = json!({
+            "record": {
+                "version": 2,
+                "uuid": uuid_string(owner),
+                "handover": arrivals::handover_text(id),
+                "source": "east",
+                "destination": "west",
+                "authority_revision": 9,
+            },
+            "place": false,
+        });
+        let binding = receipt::Binding::from_import(&settings, owner, &request).unwrap();
+        let authorization = ReturnAuthorization {
+            retired: RetiredAnchor {
+                owner,
+                handover: 49,
+                revision: 7.try_into().unwrap(),
+                record_sha256: [11; 32],
+            },
+            handover: id,
+            revision: 9.try_into().unwrap(),
+            source: "east".into(),
+            destination: "west".into(),
+            record_sha256: receipt::record_digest(&request["record"]).unwrap(),
+            request_sha256: receipt::record_digest(&request).unwrap(),
+        };
+        let confirm = format!(
+            "{} {} east west {} {}",
+            uuid_string(owner),
+            arrivals::handover_text(id),
+            receipt::digest_hex(authorization.record_sha256),
+            receipt::digest_hex(authorization.request_sha256),
+        );
+        assert_ne!(
+            receipt::Binding::from_confirm(&settings, &confirm).unwrap(),
+            binding
+        );
+        assert_eq!(
+            receipt::Binding::from_confirm(&settings, &format!("{confirm} 9")).unwrap(),
+            binding
+        );
+        assert!(receipt::Binding::from_confirm(&settings, &format!("{confirm} 0")).is_err());
+        let received = receipt::Receipt::new(binding, false, false);
+        let (tx, _rx) = mpsc::channel();
+        let mut guest = Guest::new(
+            Joined {
+                conn: 12,
+                uuid: owner,
+                name: "guest12".into(),
+                properties: Vec::new(),
+                info: ClientInformation::new(8),
+                brand: String::new(),
+                sender: PlayerSender::new(tx, Arc::default()),
+                latency: Arc::default(),
+                address: "127.0.0.1:1".parse().unwrap(),
+                expected: true,
+            },
+            12,
+            [3.0, 64.0, 5.0],
+            10,
+        );
+        let mut wrong = authorization.clone();
+        wrong.request_sha256 = [0; 32];
+        assert!(
+            receipt::append_receipt(world.path(), &mut guest, &received, Some(&wrong)).is_err()
+        );
+        assert!(!playerdata::path(world.path(), owner).exists());
+        receipt::append_receipt(world.path(), &mut guest, &received, Some(&authorization)).unwrap();
+        playerdata::save_now(&guest, world.path()).unwrap();
+        let current = CurrentReturn::read(world.path(), owner).unwrap().unwrap();
+        assert_eq!(current.authorization(), &authorization);
+        assert_eq!(
+            receipt::lookup(world.path(), &received.binding).unwrap(),
+            Some(received)
+        );
+    }
 
     #[test]
     #[ignore = "daily"]

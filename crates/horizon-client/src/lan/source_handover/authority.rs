@@ -175,6 +175,11 @@ impl CurrentReturn {
     /// No `dat_old` fallback. The caller must own the world session and
     /// drain its player writers before using the result to reconcile authority.
     pub fn read(world: &Path, owner: u128) -> io::Result<Option<Self>> {
+        Self::read_player(world, owner).map(|read| read.map(|(current, _)| current))
+    }
+
+    /// The same checked file and its player data for an interrupted confirmation.
+    pub fn read_player(world: &Path, owner: u128) -> io::Result<Option<(Self, Tag)>> {
         let file = crate::lan::playerdata::path(world, owner);
         for directory in [world.join("players"), world.join("players/data")] {
             match fs::symlink_metadata(directory) {
@@ -199,7 +204,7 @@ impl CurrentReturn {
         }
         let tag = crate::save::decode_dat(bytes)
             .map_err(|_| invalid("return authority player file is corrupt"))?;
-        let Tag::Compound(root) = tag else {
+        let Tag::Compound(root) = &tag else {
             return Err(invalid(
                 "return authority player file is not a player compound",
             ));
@@ -238,7 +243,7 @@ impl CurrentReturn {
             file.sync_all()?;
             fs::File::open(world.join("players/data"))?.sync_all()?;
         }
-        Ok(Some(Self { authorization }))
+        Ok(Some((Self { authorization }, tag)))
     }
 }
 

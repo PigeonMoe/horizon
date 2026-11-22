@@ -3,7 +3,11 @@
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
-use horizon_client::lan::{arrivals, guest::Guest};
+use horizon_client::lan::{
+    arrivals,
+    guest::Guest,
+    source_handover::{AUTHORITY_KEY, AuthorityRevision, ReturnAuthorization},
+};
 use horizon_core::nbt::{Compound, Limits, Tag};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -23,6 +27,8 @@ pub(super) struct Binding {
     pub handover: u128,
     source: String,
     destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority_revision: Option<AuthorityRevision>,
     record_sha256: [u8; 32],
     request_sha256: [u8; 32],
     roster_sha256: [u8; 32],
@@ -62,6 +68,7 @@ impl Binding {
             handover,
             source: source.into(),
             destination: destination.into(),
+            authority_revision: record_authority_revision(record)?,
             record_sha256: record_digest(record)?,
             request_sha256: record_digest(request)?,
             roster_sha256: roster_digest(settings)?,
@@ -69,9 +76,23 @@ impl Binding {
     }
 
     pub(super) fn from_confirm(settings: &arrivals::Settings, args: &str) -> Result<Self, String> {
-        let fields = args.split_whitespace().take(7).collect::<Vec<_>>();
-        let [owner, handover, source, destination, record, request] = fields.as_slice() else {
+        let fields = args.split_whitespace().take(8).collect::<Vec<_>>();
+        let [
+            owner,
+            handover,
+            source,
+            destination,
+            record,
+            request,
+            remaining @ ..,
+        ] = fields.as_slice()
+        else {
             return Err("strict player-confirm needs unique id, hand-over id, source, destination, record digest and request digest".into());
+        };
+        let authority_revision = match remaining {
+            [] => None,
+            [revision] => Some(parse_authority_revision(revision)?),
+            _ => return Err("strict player-confirm takes at most one authority revision".into()),
         };
         check_route(settings, source, destination)?;
         Ok(Self {
@@ -83,6 +104,7 @@ impl Binding {
                 .ok_or("invalid hand-over id")?,
             source: (*source).into(),
             destination: (*destination).into(),
+            authority_revision,
             record_sha256: parse_digest(record).ok_or("invalid record digest")?,
             request_sha256: parse_digest(request).ok_or("invalid request digest")?,
             roster_sha256: roster_digest(settings)?,
@@ -95,7 +117,43 @@ impl Binding {
         reply["destination"] = json!(self.destination);
         reply["record_sha256"] = json!(digest_hex(self.record_sha256));
         reply["request_sha256"] = json!(digest_hex(self.request_sha256));
+        if let Some(revision) = self.authority_revision {
+            reply["authority_revision"] = json!(u64::from(revision));
+        }
     }
+
+    pub(super) fn matches_return(&self, authorization: &ReturnAuthorization) -> bool {
+        self.owner == authorization.retired.owner
+            && self.handover == authorization.handover
+            && self.authority_revision == Some(authorization.revision)
+            && self.source == authorization.source
+            && self.destination == authorization.destination
+            && self.record_sha256 == authorization.record_sha256
+            && self.request_sha256 == authorization.request_sha256
+    }
+}
+
+pub(in crate::game::dedicated) fn parse_authority_revision(
+    text: &str,
+) -> Result<AuthorityRevision, String> {
+    let value = text
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer authority revision")?;
+    AuthorityRevision::try_from(value).map_err(str::to_owned)
+}
+
+pub(in crate::game::dedicated) fn record_authority_revision(
+    record: &Value,
+) -> Result<Option<AuthorityRevision>, String> {
+    record
+        .get("authority_revision")
+        .map(|value| {
+            let value = value
+                .as_u64()
+                .ok_or("invalid transfer authority revision")?;
+            AuthorityRevision::try_from(value).map_err(str::to_owned)
+        })
+        .transpose()
 }
 
 pub(in crate::game::dedicated) fn record_digest(record: &Value) -> Result<[u8; 32], String> {
@@ -161,7 +219,11 @@ pub(super) struct Receipt {
 impl Receipt {
     pub(super) fn new(binding: Binding, announced: bool, recentered: bool) -> Self {
         Self {
-            version: 1,
+            version: if binding.authority_revision.is_some() {
+                2
+            } else {
+                1
+            },
             binding,
             announced,
             recentered,
@@ -182,6 +244,7 @@ impl Receipt {
 pub(in crate::game::dedicated) struct Hidden {
     receipts: Option<Tag>,
     staged: Option<Tag>,
+    authority: Option<Tag>,
 }
 
 impl Hidden {
@@ -190,21 +253,27 @@ impl Hidden {
             Self {
                 receipts: root.remove(&RECEIPTS.into()),
                 staged: root.remove(&STAGED.into()),
+                authority: root.remove(&AUTHORITY_KEY.into()),
             }
         } else {
             Self {
                 receipts: None,
                 staged: None,
+                authority: None,
             }
         }
     }
 
     pub(in crate::game::dedicated) fn restore(self, guest: &mut Guest) {
-        if self.receipts.is_none() && self.staged.is_none() {
+        if self.receipts.is_none() && self.staged.is_none() && self.authority.is_none() {
             return;
         }
         let root = root_for(guest);
-        for (key, value) in [(RECEIPTS, self.receipts), (STAGED, self.staged)] {
+        for (key, value) in [
+            (RECEIPTS, self.receipts),
+            (STAGED, self.staged),
+            (AUTHORITY_KEY, self.authority),
+        ] {
             if let Some(value) = value {
                 root.insert(key.into(), value);
             }
@@ -249,7 +318,10 @@ fn decode(value: &Tag) -> Result<Receipt, String> {
     };
     let receipt: Receipt =
         serde_json::from_slice(bytes).map_err(|_| "arrival receipt is corrupt")?;
-    if receipt.version != 1 {
+    if !matches!(
+        (receipt.version, receipt.binding.authority_revision),
+        (1, None) | (2, Some(_))
+    ) {
         return Err("arrival receipt version is not supported".into());
     }
     Ok(receipt)
@@ -261,22 +333,32 @@ pub(super) fn append_receipt(
     world: &Path,
     guest: &mut Guest,
     receipt: &Receipt,
+    returning: Option<&ReturnAuthorization>,
 ) -> Result<Hidden, String> {
     let mut history = read_history(world, guest.uuid)?;
+    let encoded = serde_json::to_vec(receipt).map_err(|error| error.to_string())?;
+    let authority = returning
+        .map(|authorization| authorization.marker(&encoded))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     if history
         .entries
         .insert(
             arrivals::handover_text(receipt.binding.handover)
                 .as_str()
                 .into(),
-            encode(receipt)?,
+            Tag::ByteArray(encoded),
         )
         .is_some()
     {
         return Err("the hand-over already has a durable arrival receipt".into());
     }
     let previous = Hidden::take(guest);
-    root_for(guest).insert(RECEIPTS.into(), Tag::Compound(history.entries));
+    let root = root_for(guest);
+    root.insert(RECEIPTS.into(), Tag::Compound(history.entries));
+    if let Some(authority) = authority {
+        root.insert(AUTHORITY_KEY.into(), authority);
+    }
     Ok(previous)
 }
 
