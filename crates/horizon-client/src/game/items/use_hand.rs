@@ -630,10 +630,16 @@ impl Game<'_> {
             item: stack.item.to_string(),
             can_use_game_master_blocks: self.can_use_game_master_blocks(),
         };
-        let outcome = if self.player_place_canceled(&ctx) {
-            PlaceOutcome::Failed
-        } else {
-            self.with_level(|b, level, ticks| b.place_block(level, ticks, &ctx))
+        let outcome = match self.player_place_decision(&ctx, &stack) {
+            native_hooks::PlayerPlacement::Proceed => {
+                self.with_level(|b, level, ticks| b.place_block(level, ticks, &ctx))
+            }
+            native_hooks::PlayerPlacement::RefusePlacement => PlaceOutcome::Failed,
+            native_hooks::PlayerPlacement::RefuseItemUse => {
+                self.process_level_events()?;
+                self.use_failed = true;
+                return Ok(true);
+            }
         };
         let PlaceOutcome::Placed { pos, state } = outcome else {
             self.process_level_events()?;

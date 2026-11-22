@@ -336,3 +336,138 @@ fn block_items_notify_after_setup_and_before_consumption() {
         assert_eq!(probe.notices.lock().unwrap().len(), 3);
     });
 }
+
+#[test]
+#[ignore = "daily"]
+fn placement_part_sees_the_replaced_cell_and_vetoes_before_global_placement() {
+    use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+    use mod_api::{BlockFace, BlockItemPlacePreEvent, EntityPlaceEvent, Flow, ModEntry};
+    use std::sync::atomic::AtomicUsize;
+
+    const REPLACED: [i32; 3] = [4, 64, 4];
+    const SUPPORT: [i32; 3] = [7, 64, 4];
+    const PLACED: [i32; 3] = [8, 64, 4];
+    const PLAYER: u128 = 123;
+
+    #[derive(Clone, Default)]
+    struct Gate {
+        parts: Arc<Mutex<Vec<([i32; 3], [i32; 3])>>>,
+        global: Arc<AtomicUsize>,
+    }
+
+    #[mod_api::horizon_part]
+    impl ItemPart for Gate {
+        fn block_item_place_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut BlockItemPlacePreEvent<'_>,
+        ) -> Flow {
+            self.parts
+                .lock()
+                .unwrap()
+                .push((event.pos, event.clicked_pos));
+            assert_eq!(event.stack.count(), 2);
+            assert_eq!(event.player.uuid(), PLAYER);
+            assert_eq!(event.face, BlockFace::East);
+            assert_eq!(event.state.block().id(host), "minecraft:player_wall_head");
+            let level = host.level("minecraft:overworld").unwrap();
+            let old = level.block_state(host, event.pos).unwrap().block().id(host);
+            if event.pos == REPLACED {
+                assert_eq!(old, "minecraft:short_grass");
+                Flow::Cancel
+            } else {
+                assert_eq!(old, "minecraft:air");
+                Flow::Continue
+            }
+        }
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Gate {
+        fn register(
+            &self,
+            registrar: &mut dyn mod_api::Registrar,
+            _: &mod_api::RegistrationContext,
+        ) {
+            let head = registrar.item_key("minecraft:player_head");
+            registrar.item_part(head, self.clone());
+        }
+
+        fn entity_place(&self, _: &mut dyn ServerHost, _: &mut EntityPlaceEvent) -> Flow {
+            self.global.fetch_add(1, Ordering::SeqCst);
+            Flow::Continue
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let gate = Gate::default();
+        let mods: mod_api::Mods = vec![ModEntry::new("head-place", Box::new(gate.clone()))].into();
+        mod_platform::testing::with_mods(mods.clone(), || {
+            crate::game::api_values::install_parts(&mods).unwrap();
+            with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.load_ticking_neighbourhood(0, 0);
+                let registry = game.pack.assets.registry;
+                let dirt = registry.default_state("minecraft:dirt").unwrap();
+                let grass = registry.default_state("minecraft:short_grass").unwrap();
+                let stone = registry.default_state("minecraft:stone").unwrap();
+                game.world.set(4, 63, 4, dirt).unwrap();
+                game.world.set(4, 64, 4, grass).unwrap();
+                game.world.set(3, 64, 4, stone).unwrap();
+                game.world.set(7, 64, 4, stone).unwrap();
+                game.world.set(7, 64, 6, stone).unwrap();
+                game.player =
+                    Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 5.5)).unwrap());
+                bind_local_player(game, 20, PLAYER);
+                game.lan_acting_name = Some("Builder".into());
+                game.lan_acting_permission = Some(0);
+                game.creative = false;
+                game.yaw = 90.0;
+
+                let click = |game: &mut Game<'_>, pos, stack| {
+                    *game.held_mut() = Some(stack);
+                    game.guest_use = Some(GuestUse::OnBlock(mod_api::Hand::Main));
+                    let [x, y, z] = pos;
+                    let hit = Hit {
+                        pos,
+                        face: [1, 0, 0],
+                        point: [f64::from(x) + 1.0, f64::from(y) + 0.5, f64::from(z) + 0.5],
+                        inside: false,
+                    };
+                    assert!(game.use_hand(Some(&hit)).unwrap());
+                };
+                let mut consumable = ItemStack::new("minecraft:player_head", 2);
+                consumable.data_mut().set_other(
+                    "minecraft:consumable",
+                    Some(Tag::compound([(
+                        "consume_seconds",
+                        Tag::Float(0.0_f32.to_bits()),
+                    )])),
+                );
+                click(game, REPLACED, consumable);
+                assert_eq!(game.world.block(4, 64, 4), grass);
+                assert_eq!(game.held().unwrap().count, 2);
+                assert!(game.use_failed);
+                assert_eq!(gate.global.load(Ordering::SeqCst), 0);
+
+                click(game, SUPPORT, ItemStack::new("minecraft:player_head", 2));
+                let wall_head = game.world.block(8, 64, 4);
+                assert_eq!(
+                    &*game.res.facts().get(wall_head).name,
+                    "minecraft:player_wall_head"
+                );
+                assert_eq!(game.held().unwrap().count, 1);
+                assert_eq!(gate.global.load(Ordering::SeqCst), 1);
+
+                click(game, [7, 64, 6], ItemStack::new("minecraft:stone", 2));
+                assert_eq!(game.world.block(8, 64, 6), stone);
+                assert_eq!(game.held().unwrap().count, 1);
+                assert_eq!(gate.global.load(Ordering::SeqCst), 2);
+                assert_eq!(
+                    *gate.parts.lock().unwrap(),
+                    [(REPLACED, REPLACED), (PLACED, SUPPORT)]
+                );
+            });
+        });
+    });
+}

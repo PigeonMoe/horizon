@@ -167,6 +167,7 @@ horizon-client game::native_guest_turn_tests::a_guest_turn_reports_the_latest_se
 horizon-client game::native_guest_turn_tests::an_arrow_contact_sends_the_shooters_explicit_velocity_after_its_checked_teleport lib daily resources
 horizon-client game::native_hooks::death_source_tests::mob_death_and_handle_preserve_namespaced_types lib daily resources
 horizon-client game::native_hooks::death_source_tests::player_drops_expose_recent_resolved_credit_separate_from_the_fatal_fall lib daily resources
+horizon-client game::native_hooks::on_block_placed_by_tests::placement_part_sees_the_replaced_cell_and_vetoes_before_global_placement lib daily resources
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::a_listener_waking_the_player_again_is_told_once lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::acting_missing_bed_death_and_generic_stop_are_immediate_before_clear lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::bed_leave_carries_the_wake_flags_before_the_sleep_clears lib daily game-boot
