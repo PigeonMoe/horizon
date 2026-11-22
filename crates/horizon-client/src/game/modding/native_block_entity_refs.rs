@@ -307,6 +307,38 @@ impl Game<'_> {
         Some(block_entity.data.clone())
     }
 
+    pub(super) fn block_entity_furnace_cooking(
+        &self,
+        entity: BlockEntityRef,
+    ) -> Option<(i32, i32)> {
+        let (_, BlockEntity::Furnace(furnace)) = self.native_block_entity_target(entity)? else {
+            return None;
+        };
+        Some((furnace.cooking_timer, furnace.cooking_total))
+    }
+
+    pub(super) fn block_entity_set_furnace_cook_time(
+        &mut self,
+        entity: BlockEntityRef,
+        elapsed: i32,
+    ) -> Result<bool, BlockEntityError> {
+        let key = self
+            .native_block_entity_write_key(entity)
+            .ok_or(BlockEntityError::Stale)?;
+        let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get(&key) else {
+            return Ok(false);
+        };
+        if !(0..furnace.cooking_total).contains(&elapsed) || furnace.cooking_timer == elapsed {
+            return Ok(false);
+        }
+        self.journal_block_entity(key);
+        if let Some(BlockEntity::Furnace(furnace)) = self.world.block_entities.get_mut(&key) {
+            furnace.cooking_timer = elapsed;
+        }
+        self.world.modified.insert((key.0 >> 4, key.2 >> 4));
+        Ok(true)
+    }
+
     /// Set a mod block entity's menu data slot silently in the current transaction.
     /// Ok(false) for a vanilla entity, invalid slot or equal value; Stale for an invalidated
     /// or unwritable handle. Notification is explicit; this does not resize slots.

@@ -91,6 +91,11 @@ pub trait BlockEntitiesBackend {
     /// client's copy. None for a stale/missing/vanilla entity. Item storage is separate.
     #[access(WorldOnly)]
     fn block_entity_data_slots(&self, entity: BlockEntityRef) -> Option<Vec<i32>>;
+    /// Side: server.
+    /// The elapsed and total cooking ticks of a loaded vanilla furnace, blast furnace
+    /// or smoker. None for a stale handle or another block entity type.
+    #[access(WorldOnly)]
+    fn block_entity_furnace_cooking(&self, entity: BlockEntityRef) -> Option<(i32, i32)>;
     /// Side: both.
     /// Read a configured mod holder's declared internal item slot or a vanilla brewing
     /// stand's ingredient slot (3), without automation policy.
@@ -142,6 +147,18 @@ pub trait BlockEntitiesBackendMut {
         &mut self,
         entity: BlockEntityRef,
         data: Compound,
+    ) -> Result<bool, BlockEntityError>;
+    /// Side: server.
+    /// Sets only the elapsed cooking time of a loaded vanilla furnace, blast furnace
+    /// or smoker in the level in place. A successful write joins the current transaction
+    /// and marks the chunk for saving. The open menu reads the live timer on its next sync.
+    /// Ok(false) for another block entity type, an unchanged timer or a value outside
+    /// `0..total`. Stale or unwritable handles return BlockEntityError::Stale.
+    #[access(WorldOnly)]
+    fn block_entity_set_furnace_cook_time(
+        &mut self,
+        entity: BlockEntityRef,
+        elapsed: i32,
     ) -> Result<bool, BlockEntityError>;
     /// Side: server.
     /// Replaces the saved payload, retaining identity and position metadata.

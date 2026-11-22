@@ -2103,6 +2103,89 @@ mod furnace_process_tests {
 
     #[test]
     #[ignore = "daily"]
+    fn a_live_furnace_timer_write_preserves_inventory_and_precedes_the_native_step() {
+        run_on_guest_stack(|| {
+            with_game(|game| {
+                use mod_api::{BlockEntityError, HostTransaction};
+
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                game.build_registries();
+                let level = game.level("minecraft:overworld").unwrap();
+                let state = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:furnace")
+                    .unwrap();
+                let mut handles = Vec::new();
+                for (pos, cooking) in [(POSITION, true), ([2, 64, 1], true), ([3, 64, 1], false)] {
+                    let [x, y, z] = pos;
+                    game.world.set(x, y, z, state).unwrap();
+                    let mut entity = BlockEntity::for_block("minecraft:furnace").unwrap();
+                    if cooking && let BlockEntity::Furnace(furnace) = &mut entity {
+                        furnace.set_input(
+                            &game.loop_context,
+                            game.recipes(),
+                            Some(ItemStack::new("minecraft:raw_iron", 2)),
+                        );
+                        furnace.items[1] = Some(ItemStack::new("minecraft:coal", 2));
+                        furnace.cooking_timer = 7;
+                    }
+                    game.world.block_entities.insert((x, y, z), entity);
+                    handles.push(game.block_entity(level, pos).unwrap());
+                }
+                let [enhanced, control, idle] = handles.as_slice() else {
+                    unreachable!()
+                };
+                let [enhanced, control, idle] = [*enhanced, *control, *idle];
+                game.world.modified.clear();
+                let host = game as &mut dyn mod_api::ServerHost;
+                assert_eq!(enhanced.furnace_cooking(host), Some((7, 200)));
+                assert_eq!(idle.furnace_cooking(host).unwrap().0, 0);
+                assert_eq!(enhanced.set_furnace_cook_time(host, 200), Ok(false));
+                let rolled_back: std::result::Result<(), ()> = host.transaction(|host, _| {
+                    assert_eq!(enhanced.set_furnace_cook_time(host, 65), Ok(true));
+                    Err(())
+                });
+                assert!(rolled_back.is_err());
+                assert_eq!(enhanced.furnace_cooking(host), Some((7, 200)));
+
+                assert_eq!(enhanced.set_furnace_cook_time(host, 199), Ok(true));
+                assert_eq!(control.furnace_cooking(host), Some((7, 200)));
+                assert!(game.world.modified.contains(&(0, 0)));
+                game.tick_furnace((1, 64, 1)).unwrap();
+                game.tick_furnace((2, 64, 1)).unwrap();
+                game.tick_furnace((3, 64, 1)).unwrap();
+                let host = game as &mut dyn mod_api::ServerHost;
+                assert_eq!(enhanced.furnace_cooking(host), Some((0, 200)));
+                assert_eq!(control.furnace_cooking(host), Some((8, 200)));
+                assert_eq!(idle.furnace_cooking(host).unwrap().0, 0);
+                let Some(BlockEntity::Furnace(furnace)) =
+                    game.world.block_entities.get(&(1, 64, 1))
+                else {
+                    panic!("expected furnace");
+                };
+                assert_eq!(furnace.items[0].as_ref().unwrap().count, 1);
+                assert_eq!(furnace.items[1].as_ref().unwrap().count, 1);
+                assert_eq!(
+                    furnace.items[2].as_ref().unwrap().item.as_ref(),
+                    "minecraft:iron_ingot"
+                );
+                game.world.block_entities.remove(&(1, 64, 1));
+                let host = game as &mut dyn mod_api::ServerHost;
+                assert_eq!(
+                    enhanced.set_furnace_cook_time(host, 7),
+                    Err(BlockEntityError::Stale)
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn stock_furnace_process_preserves_its_generation_and_native_inventory() {
         run_on_guest_stack(|| {
             for wasm in [false, true] {
