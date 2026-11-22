@@ -84,6 +84,12 @@ pub trait ConfigHost {
 /// The server host's methods of the `config` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait ConfigServerHost {
+    /// Side: server.
+    /// Looks up a template in the running game's vanilla default English language table.
+    /// The outer `None` means the table is unavailable. `Some(None)` means the loaded
+    /// table has no such key. Client languages and resource packs do not affect this lookup.
+    #[access(WorldOnly)]
+    fn server_default_translation(&self, key: &str) -> Option<Option<String>>;
     /// Startup opt-in for test-only content. Test registration runs regardless.
     #[access(Metadata)]
     fn game_tests_enabled(&self) -> bool;

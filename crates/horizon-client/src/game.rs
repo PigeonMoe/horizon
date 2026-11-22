@@ -728,6 +728,7 @@ pub struct Resources {
 }
 
 struct WorldCore {
+    server_language: Option<HashMap<String, String>>,
     item_data: Arc<horizon_world::item_defaults::ItemData>,
     facts: BlockFacts,
     biomes: Arc<Biomes>,
