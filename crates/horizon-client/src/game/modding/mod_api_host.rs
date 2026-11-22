@@ -113,6 +113,25 @@ impl Game<'_> {
         self.is_logical_server()
     }
 
+    pub(in crate::game) fn server_attachment_entries(
+        &self,
+        id: &mod_api::Identifier,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<mod_api::Compound, mod_api::AttachmentError> {
+        if !self.native_authoritative()
+            || self.world_root.as_os_str().is_empty()
+            || mod_api::content::crash::current_native_mod() != Some(id.namespace())
+        {
+            return Err(mod_api::AttachmentError::MissingHolder);
+        }
+        let value = self
+            .level
+            .server_attachments
+            .persisted_value(id.namespace(), id.path())?;
+        mod_api::Attachments::persisted_entries(value, prefix, max_entries)
+    }
+
     /// Access a holder's attachment map, to lend to a mod: a server's, whose
     /// synced changes are sent at the pass's end, or a client's copy of what
     /// its server synced.

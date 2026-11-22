@@ -53,8 +53,9 @@ use crate::runtime::Installed;
 use crate::world::ticket_controller::{ControllerInfo, TEST_CONTROLLERS};
 use crate::{
     Backend, BackendMut, BackendMutRef, BackendRef, BlockEntityRef, BlockEntityTypeKey, BlockSide,
-    ClientHost, Commands, EntityRef, FluidStack, Host, ItemPlace, ItemStack, LevelRef, Messages,
-    Mods, PlayerRef, Players, ServerHost, TEST_MODS, Tag, Text, TicketController, WorldEpoch,
+    ClientHost, Commands, Compound, EntityRef, FluidStack, Host, Identifier, ItemPlace, ItemStack,
+    LevelRef, Messages, Mods, PlayerRef, Players, ServerHost, TEST_MODS, Tag, Text,
+    TicketController, WorldEpoch,
 };
 use std::collections::BTreeMap;
 
@@ -451,6 +452,18 @@ impl crate::host::mod_state::ModStateHost for FakeHost {
     }
 }
 impl crate::prelude::ModStateServerHost for FakeHost {
+    fn server_attachment_entries(
+        &self,
+        id: &Identifier,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<Compound, mod_api::AttachmentError> {
+        let value = self
+            .attachments
+            .persisted_value(id.namespace(), id.path())?;
+        crate::Attachments::persisted_entries(value, prefix, max_entries)
+    }
+
     fn transaction_open(&mut self) -> TransactionSeal {
         self.journal.open((
             self.players.clone(),
@@ -926,7 +939,10 @@ impl crate::prelude::PlayersBackendMut for FakeHost {
         if self.frozen_player_handovers.contains_key(&owner) {
             return Err(crate::PlayerDataRefusal::Transferring);
         }
-        self.players.get_mut(owner).ok_or(crate::PlayerDataRefusal::Stale)?.persistent_data = data;
+        self.players
+            .get_mut(owner)
+            .ok_or(crate::PlayerDataRefusal::Stale)?
+            .persistent_data = data;
         Ok(())
     }
 

@@ -3459,6 +3459,21 @@ impl ServerAttachments {
         }
     }
 
+    pub fn persisted_value(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> std::result::Result<Option<&horizon_core::nbt::Compound>, AttachmentError> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Saved(Tag::Compound(raw)) => {
+                Attachments::persisted_value_from_nbt(raw, namespace, name)
+            }
+            Self::Saved(_) => Err(AttachmentError::InvalidNamespace),
+            Self::Loaded(attachments) => attachments.persisted_value(namespace, name),
+        }
+    }
+
     fn saved(&self) -> Option<Tag> {
         match self {
             Self::Missing => None,

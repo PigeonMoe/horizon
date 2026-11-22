@@ -20,6 +20,17 @@ pub trait ModStateHost {
 /// The server host's methods of the `mod_state` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait ModStateServerHost {
+    /// Snapshot the top-level entries of a persisted server-wide attachment in
+    /// the calling package's namespace. Only keys starting with `prefix` are
+    /// included. Exceeding `max_entries` refuses the query. Reading does not
+    /// decode a typed value, insert a default or mutate the attachment store.
+    #[access(WorldOnly)]
+    fn server_attachment_entries(
+        &self,
+        id: &Identifier,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<Compound, AttachmentError>;
     /// Side: server.
     /// Validate captured residency against the current dimension immediately before
     /// an ordinary journaled attachment write. This does not open a transaction.
