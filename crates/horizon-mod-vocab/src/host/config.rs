@@ -92,6 +92,10 @@ pub trait ConfigServerHost {
     /// independent of the world clock, tick rate or a paused tick loop.
     #[access(WorldOnly)]
     fn server_monotonic_millis(&self) -> u64;
+    /// A monotonic reading in nanoseconds from the same process-local clock.
+    /// Use differences to profile short operations, such as one machine update.
+    #[access(WorldOnly)]
+    fn server_monotonic_nanos(&self) -> u64;
     /// The server's current civil minute in its configured system time zone.
     /// Values are year, month (1–12), day (1–31), hour (0–23) and minute (0–59).
     /// For calendar labels, not for measuring an interval or a world tick.
