@@ -319,9 +319,13 @@ impl Game<'_> {
             } else {
                 let (cart, ejected) = game.tick_cart_riding_turn(keys);
                 dismount = ejected;
-                if !cart && game.tick_mount_riding(keys) {
-                    game.riding?;
-                    game.position_rider();
+                if !cart {
+                    let (mount, landing) = game.tick_mount_riding_turn(keys);
+                    dismount = landing;
+                    if mount {
+                        game.riding?;
+                        game.position_rider();
+                    }
                 }
             }
             game.riding?;
