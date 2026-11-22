@@ -961,6 +961,10 @@ mod hub_tests {
             "minecraft:entity_type".to_string(),
             horizon_protocol::registry::Ids::from_names(vec!["minecraft:player".to_string()]),
         );
+        sync.builtin.registries.insert(
+            "minecraft:mob_effect".into(),
+            horizon_protocol::registry::Ids::from_names(vec!["minecraft:blindness".into()]),
+        );
         let sync = std::sync::Arc::new(sync);
         // No listener: these tests drive the hub directly and never connect.
         let config = NetConfig {
@@ -2417,6 +2421,77 @@ mod hub_tests {
     }
 
     // ---- the held player's limits and its picture of the others ------------
+
+    #[test]
+    fn profile_hold_sends_empty_inventory_and_blindness_until_confirmation() {
+        use crate::items::ItemStack;
+        use horizon_core::identifier::Identifier;
+        use horizon_protocol::packets::play::Clientbound as C;
+
+        let mut hub = hub();
+        hub.transfers = Some(super::Transfers::new(super::Settings {
+            required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
+                .into(),
+            ..super::Settings::default()
+        }));
+        let (mut player, mine) = guest(5, UUID_N, "Newcomer");
+        let stack = |count| ItemStack {
+            item: "minecraft:stone".into(),
+            count,
+            damage: 0,
+            extra: None,
+        };
+        player.expected = true;
+        player.inventory[0] = Some(stack(5));
+        player.carried = Some(stack(2));
+        hub.guests.push(player);
+        place(&mut hub, 5);
+        let initial = packets(&mine);
+        hub.guests.update(0, |player| {
+            player.inventory[0] = Some(stack(3));
+            player.carried = None;
+            player.arrival_handover = Some(19);
+            player.imported = true;
+        });
+        hub.send_arrival_state(0);
+        for wave in [initial, packets(&mine)] {
+            let mut blank = false;
+            let mut blinded = false;
+            for (id, body) in wave {
+                match C::decode(id, &body) {
+                    Ok(C::ContainerSetContent(packet)) => {
+                        assert_eq!(packet.items.len(), 46);
+                        assert!(packet.items.iter().all(Option::is_none));
+                        assert!(packet.carried.is_none());
+                        blank = true;
+                    }
+                    Ok(C::UpdateMobEffect(packet)) if packet.effect == 0 => {
+                        assert_eq!(packet.duration, -1);
+                        blinded = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(blank && blinded);
+        }
+        assert!(hub.guests[0].effects.list.is_empty());
+        assert!(hub.confirm_arrival(UUID_N, 19).is_ok());
+        let mut received = false;
+        let mut unblinded = false;
+        for (id, body) in packets(&mine) {
+            match C::decode(id, &body) {
+                Ok(C::ContainerSetContent(packet)) => {
+                    let items: Vec<_> = packet.items.into_iter().flatten().collect();
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(items[0].count, 3);
+                    received = true;
+                }
+                Ok(C::RemoveMobEffect(packet)) if packet.effect == 0 => unblinded = true,
+                _ => {}
+            }
+        }
+        assert!(received && unblinded && hub.guests[0].placed);
+    }
 
     /// A held player held under the hub's own settings.
     fn held_with_a_watcher(settings: super::Settings) -> (Hub, Receiver<Out>, Receiver<Out>) {

@@ -1630,7 +1630,7 @@ impl Hub {
             g.level_entered = self.ticks;
             g.last_reported = (g.position, [g.yaw, g.pitch]);
         });
-        self.send_active_effects(i);
+        self.send_held_or_active_effects(i);
         // ServerPlayer.sendPostEffects and initInventoryMenu.
         self.send_post_effects(i);
         self.send_inventory(i);
@@ -1687,7 +1687,7 @@ impl Hub {
             slot: g.selected as i32,
         }));
         self.resend_teleport(i, None);
-        self.send_active_effects(i);
+        self.send_held_or_active_effects(i);
         self.send_inventory(i);
         // The login sent the book of this server's file; the import may have brought another
         // (`ServerRecipeBook.sendInitialRecipeBook` replaces what the client has).
@@ -1876,10 +1876,55 @@ impl Hub {
             return Err("the required profile sections have not been saved");
         }
         let announce = self.guests[i].arrival_announce;
+        let protected = self.held_profile(i);
         self.resend_teleport(i, None);
-        self.send_inventory(i);
+        if !protected {
+            self.send_inventory(i);
+        }
         self.place_arrival(i, announce);
+        if protected {
+            if let Some(effect) = self.blindness_id() {
+                let guest = &self.guests[i];
+                guest.send(&C::RemoveMobEffect(play::RemoveMobEffect {
+                    id: guest.entity_id,
+                    effect,
+                }));
+            }
+            self.send_active_effects(i);
+            self.send_inventory(i);
+        }
         Ok(announce)
+    }
+
+    fn held_profile(&self, i: usize) -> bool {
+        self.guests[i].held
+            && self
+                .transfers
+                .as_ref()
+                .is_some_and(|transfers| !transfers.settings.required_profiles.is_empty())
+    }
+
+    fn blindness_id(&self) -> Option<i32> {
+        self.sync.id("minecraft:mob_effect", "minecraft:blindness")
+    }
+
+    /// The proxy can still build its world view. The synthetic effect is only
+    /// sent to this client, so it never enters the staged or saved player data.
+    fn send_held_or_active_effects(&mut self, i: usize) {
+        if !self.held_profile(i) {
+            self.send_active_effects(i);
+            return;
+        }
+        if let Some(effect) = self.blindness_id() {
+            let guest = &self.guests[i];
+            guest.send(&C::UpdateMobEffect(play::UpdateMobEffect {
+                id: guest.entity_id,
+                effect,
+                amplifier: 0,
+                duration: -1,
+                flags: 0,
+            }));
+        }
     }
 
     /// `ServerPlayer.sendPostEffects`: the player's `/posteffect` chains.
@@ -2339,9 +2384,18 @@ impl Hub {
         );
     }
     pub fn send_inventory(&mut self, i: usize) {
-        let items: Vec<Option<ItemStack>> = (0..46).map(|s| self.guests[i].menu_slot(s)).collect();
+        let protected = self.held_profile(i);
+        let items: Vec<Option<ItemStack>> = if protected {
+            vec![None; 46]
+        } else {
+            (0..46).map(|s| self.guests[i].menu_slot(s)).collect()
+        };
         let net: Vec<_> = items.iter().map(|s| self.stack(s)).collect();
-        let carried = self.guests[i].carried.clone();
+        let carried = if protected {
+            None
+        } else {
+            self.guests[i].carried.clone()
+        };
         let carried = self.stack(&carried);
         self.guests.update(i, |g| {
             g.menu_state = (g.menu_state + 1) & 0x7FFF;
@@ -2359,7 +2413,11 @@ impl Hub {
     /// Send an inventory-menu slot even if the authoritative stack did not
     /// change. The client may have predicted a different stack for this slot.
     pub fn send_inventory_slot(&mut self, i: usize, slot: usize) {
-        let current = self.guests[i].menu_slot(slot);
+        let current = if self.held_profile(i) {
+            None
+        } else {
+            self.guests[i].menu_slot(slot)
+        };
         let item = self.stack(&current);
         self.guests.update(i, |guest| {
             guest.menu_state = (guest.menu_state + 1) & 0x7FFF;
