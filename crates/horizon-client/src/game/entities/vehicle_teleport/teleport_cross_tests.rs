@@ -330,6 +330,239 @@ fn a_conflicting_dragon_destination_still_accepts_the_root_after_rider_veto() {
     );
 }
 
+#[test]
+#[ignore = "daily"]
+fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
+    use crate::game::{
+        lan_actions::GuestCommand, native_entity_refs::tests::run_on_guest_stack,
+        native_guest_turn_tests::with_guests,
+    };
+    use horizon_core::geometry::Vec3;
+    use mod_api::{
+        EntityMountEvent, EntityTravelToDimensionEvent, Flow, Hooks, ModEntry,
+        PlayerPositionCommittedEvent, PlayerTeleportPreEvent, ServerHost,
+    };
+    use std::sync::Mutex;
+
+    const DENIED: u128 = 12;
+    const ACCEPTED: u128 = 13;
+    const ARRIVAL: [f64; 3] = [10.5, 72.0, 10.5];
+    const BOAT: u32 = 900;
+    const CAMEL: u32 = 901;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Move {
+        player: u128,
+        from: [f64; 3],
+        to: [f64; 3],
+    }
+    #[derive(Default)]
+    struct Seen {
+        dismounted: Vec<u32>,
+        proposed: Vec<Move>,
+        committed: Vec<Move>,
+    }
+    struct Protection(Arc<Mutex<Seen>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn entity_travel_to_dimension(
+            &self,
+            _: &mut dyn ServerHost,
+            _: &mut EntityTravelToDimensionEvent,
+        ) -> Flow {
+            Flow::Continue
+        }
+
+        fn entity_mount(&self, _: &mut dyn ServerHost, event: &mut EntityMountEvent<'_>) -> Flow {
+            if !event.mounting && event.kind == "minecraft:player" {
+                self.0.lock().unwrap().dismounted.push(event.entity);
+            }
+            Flow::Continue
+        }
+
+        fn player_teleport_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            if event.from_level == event.to_level {
+                return Flow::Continue;
+            }
+            assert_eq!(event.from_level, Dim::Overworld.id());
+            assert_eq!(event.to_level, Dim::Nether.id());
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.position(host), Some(event.from));
+            assert_eq!(rider.vehicle(host), None);
+            self.0.lock().unwrap().proposed.push(Move {
+                player: event.player,
+                from: event.from,
+                to: event.to,
+            });
+            if event.player == DENIED {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_position_committed(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerPositionCommittedEvent<'_>,
+        ) {
+            if event.from_level == event.to_level {
+                return;
+            }
+            assert_eq!(event.from_level, Dim::Overworld.id());
+            assert_eq!(event.to_level, Dim::Nether.id());
+            let player = host.players().acting_player().unwrap();
+            assert_eq!(player.uuid(), event.player);
+            assert_eq!(player.entity().position(host), Some(event.to));
+            self.0.lock().unwrap().committed.push(Move {
+                player: event.player,
+                from: event.from,
+                to: event.to,
+            });
+        }
+    }
+
+    run_on_guest_stack(|| {
+        for nested in [false, true] {
+            let seen = Arc::new(Mutex::new(Seen::default()));
+            mod_platform::testing::with_mods(
+                vec![ModEntry::new(
+                    "passenger_teleport_protection",
+                    Box::new(Protection(seen.clone())),
+                )]
+                .into(),
+                || {
+                    with_guests(|game| {
+                        game.options.dedicated = Some(Vec::new());
+                        game.set_allow_commands(true);
+                        game.world
+                            .chunks
+                            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                        game.block_ticks
+                            .add_empty_chunk(ChunkPos::new(0, 0))
+                            .unwrap();
+                        assert!(game.run_command("forceload add 0 0"));
+                        let stone = game
+                            .pack
+                            .assets
+                            .registry
+                            .default_state("minecraft:stone")
+                            .unwrap();
+                        game.world.set(6, 63, 7, stone).unwrap();
+                        game.world.set(5, 63, 6, stone).unwrap();
+                        let origin = Vec3::new(6.5, 64.0, 6.5);
+                        let boat = crate::game::boats::Boat::new(BOAT, "oak".into(), origin, 0.0);
+                        game.boats.push(boat);
+                        let hull = game.entity(BOAT).unwrap();
+                        let mount = if nested {
+                            let kind = game.res.mob_types().get("minecraft:camel").unwrap().clone();
+                            let mut camel =
+                                horizon_client::mobs::Mob::new(CAMEL, kind, origin, 0.0);
+                            camel.extra.set_saddled(true);
+                            game.mobs.push(camel);
+                            let camel = game.entity(CAMEL).unwrap();
+                            assert!(game.entity_start_riding(camel, hull, true));
+                            Some(camel)
+                        } else {
+                            None
+                        };
+                        for (uuid, yaw) in [(DENIED, 0.0), (ACCEPTED, 90.0)] {
+                            game.lan
+                                .as_mut()
+                                .unwrap()
+                                .hub
+                                .update_guest(uuid as u32, |guest| guest.yaw = yaw);
+                            let player = game.player(uuid).unwrap().entity();
+                            let seat = if uuid == ACCEPTED {
+                                mount.unwrap_or(hull)
+                            } else {
+                                hull
+                            };
+                            assert!(game.entity_start_riding(player, seat, true));
+                            game.guest_boarded(uuid as u32, None);
+                        }
+                        game.position_riders();
+                        let expected_move = |uuid, from: Vec3| {
+                            let to = super::passenger_destination(
+                                origin,
+                                Vec3::new(ARRIVAL[0], ARRIVAL[1], ARRIVAL[2]),
+                                from,
+                            );
+                            Move {
+                                player: uuid,
+                                from: from.components(),
+                                to: to.components(),
+                            }
+                        };
+                        let mut expected = [DENIED, ACCEPTED].map(|uuid| {
+                            let yaw = game.command_guest(uuid as u32).unwrap().yaw;
+                            let from = game.boat_player_dismount_target(0, yaw);
+                            expected_move(uuid, from)
+                        });
+                        assert_ne!(expected[0].to, expected[1].to);
+                        assert!(game.run_guest_command(GuestCommand {
+                        conn: ACCEPTED as u32,
+                        command: "execute in minecraft:the_nether run tp @e[type=minecraft:oak_boat,limit=1] 10.5 72 10.5".into(),
+                        permission: 4,
+                        integrated: true,
+                        quiet: false,
+                    }));
+                        game.run_level_teleports();
+                        if nested {
+                            let [x, y, z] = seen.lock().unwrap().proposed[1].from;
+                            expected[1] = expected_move(ACCEPTED, Vec3::new(x, y, z));
+                        }
+
+                        let denied = game.command_guest(DENIED as u32).unwrap();
+                        assert_eq!(denied.dimension, Dim::Overworld.id());
+                        assert_eq!((denied.position, denied.vehicle), (expected[0].from, None));
+                        let accepted = game.command_guest(ACCEPTED as u32).unwrap();
+                        assert_eq!(accepted.dimension, Dim::Nether.id());
+                        assert_eq!(accepted.position, expected[1].to);
+                        let new_mount = accepted.vehicle.unwrap();
+                        assert!(game.boats.is_empty());
+                        game.enter_level(Dim::Nether).unwrap();
+                        let new_hull = game.boats[0].id;
+                        assert_eq!(game.boats[0].position.components(), ARRIVAL);
+                        assert_eq!(game.seated_passengers(new_hull).len(), 1);
+                        if nested {
+                            assert_eq!(
+                                game.mob_object(new_mount).unwrap().extra.mount,
+                                Some(new_hull)
+                            );
+                            assert_eq!(
+                                game.seated_passengers(new_mount),
+                                [(0, ACCEPTED as u32, true)]
+                            );
+                        } else {
+                            assert_eq!(new_mount, new_hull);
+                        }
+                        assert!(
+                            game.run_command("execute if entity @a[name=guest13,distance=..128]")
+                        );
+                        assert!(
+                            !game.run_command("execute if entity @a[name=guest12,distance=..128]")
+                        );
+                        let seen = seen.lock().unwrap();
+                        let dismounted = if nested {
+                            [DENIED, ACCEPTED]
+                        } else {
+                            [ACCEPTED, DENIED]
+                        };
+                        assert_eq!(seen.dismounted, dismounted.map(|uuid| uuid as u32));
+                        assert_eq!(seen.proposed, expected);
+                        assert_eq!(seen.committed, [expected[1].clone()]);
+                    });
+                },
+            );
+        }
+    });
+}
+
 /// `Level.isInSpawnableBounds` on `BlockPos.containing`: the lower bounds are
 /// inside, the upper bounds outside, so `/tp` accepts the world border
 /// coordinates. Pins the bound (already true before the cross-dimension move).

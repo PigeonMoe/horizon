@@ -50,14 +50,14 @@ impl TravelCause {
 
 /// A player stays in the source until a subscribed teleport hook approves
 /// the resolved destination. Preserve that source while destination chunks load.
-#[derive(Clone, Copy)]
-struct PortalOrigin {
-    uuid: u128,
-    position: [f64; 3],
-    vehicle: Option<u32>,
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct PlayerTravelOrigin {
+    pub uuid: u128,
+    pub position: [f64; 3],
+    pub vehicle: Option<u32>,
 }
 
-impl PortalOrigin {
+impl PlayerTravelOrigin {
     fn capture(guest: &horizon_client::lan::guest::Guest) -> Self {
         Self {
             uuid: guest.uuid,
@@ -87,7 +87,7 @@ pub(super) struct Trip {
     target: Vec3,
     /// Through an End portal.
     end: bool,
-    origin: Option<PortalOrigin>,
+    origin: Option<PlayerTravelOrigin>,
     /// An actual portal traveller's source feet position for observers,
     /// independent of whether a mod subscribed to the veto hook.
     notify_from: Option<[f64; 3]>,
@@ -249,7 +249,13 @@ pub(super) struct LevelTeleport {
     /// Whether this was a teleport, so the committed-position hook is told.
     pub notify_position: bool,
     /// `TeleportTransition.asPassenger`: the vehicle already moved with its tree.
-    pub vehicle: Option<u32>,
+    pub vehicle: Option<LevelTeleportPassenger>,
+}
+
+pub(super) struct LevelTeleportPassenger {
+    pub mount: u32,
+    /// A command's rider left its old seat before its teleport was admitted.
+    pub origin: Option<(Dim, PlayerTravelOrigin)>,
 }
 
 /// A teleport a command made inside a level: told to the mods once it has
@@ -587,7 +593,14 @@ impl Game<'_> {
     /// id its handle names) may travel to the level `to`, asked before
     /// anything of it moves. Only a server asks, and only when a mod listens.
     pub(super) fn entity_may_travel(&mut self, id: u32, to: Dim, cause: TravelCause) -> bool {
-        self.entity_tree_may_travel(id, to, cause, &mut Vec::new())
+        self.entity_tree_may_travel(id, to, cause, false, &mut Vec::new())
+    }
+
+    /// A vehicle command admits its players once their precise destination and
+    /// the structural tree's viability are known. Keep them on their own
+    /// mounts through this entity-level walk.
+    pub(super) fn command_vehicle_entities_may_travel(&mut self, id: u32, to: Dim) -> bool {
+        self.entity_tree_may_travel(id, to, TravelCause::Teleport, true, &mut Vec::new())
     }
 
     pub(super) fn entity_travel_hook_epoch(&self) -> Option<mod_api::WorldEpoch> {
@@ -605,6 +618,7 @@ impl Game<'_> {
         id: u32,
         to: Dim,
         cause: TravelCause,
+        defer_players: bool,
         visited: &mut Vec<u32>,
     ) -> bool {
         let Some(epoch) = self.entity_travel_hook_epoch() else {
@@ -622,7 +636,16 @@ impl Game<'_> {
         // A callback can reparent a participant into a later subtree.
         // Keep the whole transition's visited set, not only its active path.
         visited.push(id);
-        let riders = self.entity_passengers(entity).unwrap_or_default();
+        let mut riders = self.entity_passengers(entity).unwrap_or_default();
+        if defer_players {
+            use super::commands::Target;
+            riders.retain(|&rider| {
+                !matches!(
+                    self.native_entity_target(rider),
+                    Some(Target::Player | Target::Guest(_))
+                )
+            });
+        }
         let mut cancel = false;
         self.native_entity_travel_to_dimension(
             mod_api::EntityRef::new(epoch, id),
@@ -660,7 +683,7 @@ impl Game<'_> {
             .into_iter()
             .filter(|rider| {
                 self.entity_is_passenger(*rider) == Some(false)
-                    && self.entity_tree_may_travel(rider.id(), to, cause, visited)
+                    && self.entity_tree_may_travel(rider.id(), to, cause, defer_players, visited)
             })
             .collect();
         for rider in accepted {
@@ -936,7 +959,7 @@ impl Game<'_> {
             return;
         };
         let origin = (!credits_respawn && self.subscribed_portal_teleport())
-            .then(|| PortalOrigin::capture(g));
+            .then(|| PlayerTravelOrigin::capture(g));
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);
         let notify_from =
             (!credits_respawn && self.player_position_listened()).then_some(g.position);
@@ -1086,7 +1109,7 @@ impl Game<'_> {
     fn admit_portal_destination(
         &mut self,
         conn: u32,
-        origin: PortalOrigin,
+        origin: PlayerTravelOrigin,
         source: Dim,
         position: Vec3,
         cause: TravelCause,
@@ -1261,7 +1284,7 @@ impl Game<'_> {
         let (job, destination) = self.gateway_job(gateway);
         let origin = self
             .subscribed_portal_teleport()
-            .then(|| PortalOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
+            .then(|| PlayerTravelOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
         let notify_from = self
             .player_position_listened()
             .then(|| self.lan.as_ref().unwrap().hub.guests[i].position);
@@ -1788,15 +1811,20 @@ impl Game<'_> {
             return;
         }
         for t in std::mem::take(&mut self.level_teleports) {
-            let Some(host) = self.lan.as_mut() else {
+            let Some(host) = self.lan.as_ref() else {
                 return;
             };
             let Some(i) = host.hub.guests.iter().position(|g| g.conn == t.conn) else {
                 continue;
             };
+            if let Some((source, origin)) = t.vehicle.as_ref().and_then(|rider| rider.origin)
+                && (!origin.matches(&host.hub.guests[i], source) || self.on_server_trip(t.conn))
+            {
+                continue;
+            }
             let source = self.dim;
             if t.dim != source {
-                drop_hook(host, t.conn);
+                drop_hook(self.lan.as_mut().unwrap(), t.conn);
             }
             if let Err(e) = self.enter_level(t.dim) {
                 log::error!("could not open {}: {e}", t.dim.id());
@@ -1830,7 +1858,7 @@ impl Game<'_> {
                 host.hub
                     .change_level(i, t.at, yaw, Some(pitch), false, cooldown, &ctx);
                 host.hub.guests.update(i, |g| {
-                    g.vehicle = t.vehicle;
+                    g.vehicle = t.vehicle.map(|rider| rider.mount);
                     if let Some(mut body) = passenger_body {
                         body.position = Vec3::new(t.at[0], t.at[1], t.at[2]);
                         g.motion = Some(body);

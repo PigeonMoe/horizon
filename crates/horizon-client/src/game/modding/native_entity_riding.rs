@@ -167,7 +167,7 @@ impl Game<'_> {
 
     /// Saved non-mob riders share the vehicle graph, but have no live seat-order field.
     /// Insert them before their next rider from the save order while retaining seat order.
-    fn native_passenger_ids(&self, vehicle: u32) -> Vec<u32> {
+    pub(super) fn native_passenger_ids(&self, vehicle: u32) -> Vec<u32> {
         let mut ids: Vec<_> = self
             .seated_passengers(vehicle)
             .into_iter()
