@@ -1648,10 +1648,18 @@ impl Game<'_> {
             return self.ride_guest(id, ctx, target, name);
         }
         if id == "ride.dismount" {
-            let Some(v) = self.passenger_vehicle_target(target) else {
-                return Err(err("commands.ride.not_riding", &[&name.plain()]));
-            };
-            let vehicle_name = self.target_name(v);
+            let vehicle_name = self
+                .passenger_vehicle_target(target)
+                .map(|vehicle| self.target_name(vehicle))
+                .or_else(|| {
+                    // A selected mob can leave its real mount even when that
+                    // mount is retained outside the selectable level entities.
+                    let Target::Mob(rider) = target else {
+                        return None;
+                    };
+                    self.retained_vehicle_name(self.passenger_object_vehicle(rider)?)
+                })
+                .ok_or_else(|| err("commands.ride.not_riding", &[&name.plain()]))?;
             match target {
                 Target::Player => self.stop_riding(),
                 Target::Mob(rider) => self.dismount_mob(rider),

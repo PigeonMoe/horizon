@@ -264,7 +264,13 @@ impl Game<'_> {
             .enumerate()
             .map(|(i, m)| (m.id, i))
             .collect();
+        let blocked = self.mobs_below_off_level();
         for id in riders {
+            if blocked.contains(&id) {
+                // Match the ordinary rider pass: a resident rider below an
+                // untracked vehicle waits at its last pose until it detaches.
+                continue;
+            }
             let Some(parent) = self.passenger_vehicle(id) else {
                 self.unlink_passenger(id);
                 continue;
