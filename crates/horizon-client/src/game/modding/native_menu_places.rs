@@ -925,6 +925,153 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn a_held_profile_backpack_stays_open_after_its_right_click_scope_ends() {
+        use crate::game::native_guest_turn_tests::with_guests;
+        use mod_api::{
+            Flow, Hooks, HostSide, ITEM_ITEMS, Identifier, InteractionResult, ItemResource,
+            ResourceHandler, Transaction, TransferProfileReadError,
+        };
+
+        struct ProfileBackpack;
+        #[mod_api::__subscriptions]
+        impl Hooks for ProfileBackpack {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                r.item_capability(&ITEM_ITEMS, "minecraft:player_head", |host, at| {
+                    let ItemPlace::PlayerHand { player, .. } = at else {
+                        return None;
+                    };
+                    let backpack = BackpackSlot(*player);
+                    backpack
+                        .can_read(host)
+                        .then_some(Box::new(backpack) as Box<dyn ResourceHandler<ItemResource>>)
+                });
+            }
+
+            fn right_click_item(
+                &self,
+                host: HostSide<'_>,
+                event: &mut mod_api::RightClickItemEvent<'_>,
+            ) -> Flow {
+                let HostSide::Server(host) = host else {
+                    return Flow::Continue;
+                };
+                let uuid = event.click.player;
+                let player = host.player(uuid).unwrap();
+                let window = host
+                    .open_menu(
+                        uuid,
+                        1,
+                        mod_api::Text::literal("Backpack"),
+                        Vec::new(),
+                        MenuReplace::CloseFirst,
+                    )
+                    .unwrap()
+                    .unwrap();
+                player
+                    .back_mod_menu_slots(host, window, held_places(Hand::Main, 0..1))
+                    .unwrap();
+                *event.cancellation_result = InteractionResult::Consume;
+                Flow::Cancel
+            }
+        }
+
+        struct BackpackSlot(u128);
+        impl BackpackSlot {
+            fn can_read(&self, host: &dyn ServerHost) -> bool {
+                let id = Identifier::parse_namespaced("profile_backpack:profile").unwrap();
+                host.player_transfer_profile_generation(self.0, &id).is_ok()
+            }
+
+            fn storage(&self) -> ItemPlace {
+                ItemPlace::PlayerSlot {
+                    player: self.0,
+                    slot: 9,
+                }
+            }
+        }
+        impl ResourceHandler<ItemResource> for BackpackSlot {
+            fn size(&self, host: &mut dyn ServerHost) -> usize {
+                usize::from(self.can_read(host))
+            }
+            fn resource(&self, host: &mut dyn ServerHost, _: usize) -> Option<ItemResource> {
+                self.can_read(host)
+                    .then(|| self.storage().resource(host))
+                    .flatten()
+            }
+            fn amount(&self, host: &mut dyn ServerHost, _: usize) -> u32 {
+                if self.can_read(host) {
+                    self.storage().amount(host)
+                } else {
+                    0
+                }
+            }
+            fn capacity(&self, _: &mut dyn ServerHost, _: usize, _: &ItemResource) -> u32 {
+                0
+            }
+            fn insert(
+                &self,
+                _: &mut dyn ServerHost,
+                _: &Transaction,
+                _: usize,
+                _: &ItemResource,
+                _: u32,
+            ) -> u32 {
+                0
+            }
+            fn extract(
+                &self,
+                host: &mut dyn ServerHost,
+                tx: &Transaction,
+                _: usize,
+                resource: &ItemResource,
+                amount: u32,
+            ) -> u32 {
+                if self.can_read(host) {
+                    self.storage().extract(host, tx, resource, amount)
+                } else {
+                    0
+                }
+            }
+        }
+
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+            "profile_backpack",
+            Box::new(ProfileBackpack),
+        )]
+        .into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            with_guests(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.lan.as_mut().unwrap().hub.update_guest(12, |guest| {
+                    guest.selected = 0;
+                    guest.inventory[0] = Some(ItemStack::new("minecraft:player_head", 1));
+                    guest.inventory[9] = Some(ItemStack::new("minecraft:stone", 5));
+                });
+                let index = game.guest_index(12).unwrap();
+                assert!(game.guest_use_item(12, index, Hand::Main, None).unwrap());
+                let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                let window = guest.menu.as_ref().unwrap().window;
+                game.run_native_menu_events();
+                let menu = game
+                    .menu(12, window)
+                    .expect("the deferred refresh keeps the menu open");
+                assert_eq!(menu.slot(game, 0).flatten().unwrap().count(), 5);
+                assert!(game.place_menu_click(12, window, 0, 0, 0));
+                assert_eq!(menu.cursor().amount(game), 5);
+                assert_eq!(BackpackSlot(12).storage().amount(game), 0);
+                let id = Identifier::parse_namespaced("profile_backpack:profile").unwrap();
+                let host: &dyn ServerHost = game;
+                assert_eq!(
+                    host.player_transfer_profile_generation(12, &id),
+                    Err(TransferProfileReadError::NotOwned)
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn a_stock_client_menu_mirrors_a_block_inventory_and_protects_outputs() {
         use crate::game::api_values::TryIntoApi;
         use horizon_client::chunk::Chunk;

@@ -141,7 +141,11 @@ pub(crate) fn ask_providers<O, P: ?Sized + 'static, T: ?Sized>(
         {
             return Answer::Game;
         }
-        if let Some(handler) = get(&provider).and_then(|provider| call(provider, host)) {
+        let handler = get(&provider).and_then(|provider| {
+            let _scope = crate::mark_mod(owner, "capability_provider");
+            call(provider, host)
+        });
+        if let Some(handler) = handler {
             return Answer::Mod(Capability {
                 handler,
                 owner: Some(owner),

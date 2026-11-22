@@ -512,8 +512,10 @@ impl ItemPlace {
                 }
                 Some(MenuSlotBacking::Place(place)) => {
                     let (handler, index) = place.handler(host, menu.player)?;
-                    let resource = handler.resource(host, index)?;
-                    resource.to_stack(handler.amount(host, index))
+                    handler.with_handler(|handler| {
+                        let resource = handler.resource(host, index)?;
+                        resource.to_stack(handler.amount(host, index))
+                    })
                 }
                 _ => menu.slot(host, *slot)?,
             },
@@ -698,11 +700,11 @@ impl ItemPlace {
             };
             for &anywhere in passes {
                 while left > 0 {
-                    let moved = match (insert, anywhere) {
+                    let moved = handler.with_handler(|handler| match (insert, anywhere) {
                         (true, false) => handler.insert(host, tx, slot, resource, left),
                         (true, true) => handler.insert_any(host, tx, resource, left),
                         (false, _) => handler.extract(host, tx, slot, resource, left),
-                    };
+                    });
                     match handler.checked(moved, left, self).ok_or(())? {
                         0 => break,
                         moved => left -= moved,

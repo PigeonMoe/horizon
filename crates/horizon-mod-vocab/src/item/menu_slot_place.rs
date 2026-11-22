@@ -149,6 +149,7 @@ impl MenuSlotPlace {
             }
             Self::ModSlot { provider, key } => {
                 let (provider, owner) = host.capability_providers().place_provider(provider)?;
+                let _scope = crate::mark_mod(owner, "menu_slot_exists");
                 if !provider.menu_slot_exists(host, key) {
                     return None;
                 }
@@ -185,7 +186,7 @@ impl MenuSlotPlace {
         self == Self::Decoration
             || self
                 .handler(host, player)
-                .is_some_and(|(handler, slot)| slot < handler.size(host))
+                .is_some_and(|(handler, slot)| handler.with_handler(|h| slot < h.size(host)))
     }
 }
 
