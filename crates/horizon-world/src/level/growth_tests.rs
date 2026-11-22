@@ -53,6 +53,7 @@ fn fixture() -> Option<&'static Fixture> {
 struct Level {
     blocks: HashMap<BlockPos, BlockStateId>,
     air: BlockStateId,
+    spawner: BlockStateId,
     random: LegacyRandom,
     events: Vec<LevelEvent>,
     biome: &'static str,
@@ -106,6 +107,13 @@ impl LevelAccess for Level {
     }
     fn load_block_entity(&mut self, pos: BlockPos, nbt: horizon_core::nbt::Compound) {
         self.block_entities.push((pos, self.block_state(pos), nbt));
+    }
+    fn create_feature_spawner(&mut self, pos: BlockPos, nbt: horizon_core::nbt::Compound) {
+        if self.block_state(pos) == self.spawner
+            && !self.block_entities.iter().any(|(at, ..)| *at == pos)
+        {
+            self.load_block_entity(pos, nbt);
+        }
     }
     fn block_grow_feature<'a>(
         &mut self,
@@ -162,6 +170,7 @@ impl World {
             level: Level {
                 blocks: HashMap::new(),
                 air: f.behaviours.air(),
+                spawner: f.registry.default_state("minecraft:spawner").unwrap(),
                 random: LegacyRandom::new(seed),
                 events: Vec::new(),
                 biome: "minecraft:plains",
@@ -300,6 +309,77 @@ fn a_tree_with_bees_fills_its_nest() {
     assert_eq!(denied.count("bee_nest"), 0);
     assert!(denied.level.block_entities.is_empty());
 }
+
+#[test]
+fn a_growth_feature_configures_only_the_accepted_spawner() {
+    use horizon_core::nbt::Tag;
+    let Some(f) = fixture() else { return };
+    let origin = BlockPos::new(0, 64, 0);
+    let grower = super::growth::grower("dark_oak").unwrap();
+    let grow = |denials| {
+        let mut w = World::new(f, 173);
+        let stone = w.id("stone", &[]);
+        for x in -5i32..=5 {
+            for y in -2..=4 {
+                for z in -5i32..=5 {
+                    let room = (0..=3).contains(&y) && x.abs() <= 2 && z.abs() <= 2;
+                    let doorway = (0..=1).contains(&y) && (3..=5).contains(&x) && z == 0;
+                    if !room && !doorway {
+                        w.put(origin.offset(x, y, z), stone);
+                    }
+                }
+            }
+        }
+        let sapling = w.id("dark_oak_sapling", &[("stage", "1")]);
+        w.put(origin.offset(0, -1, 0), w.id("dirt", &[]));
+        w.put(origin, sapling);
+        w.level.supplied = Some("minecraft:monster_room");
+        w.level.growth_denials = denials;
+        assert!(
+            f.behaviours
+                .sim(&mut w.level, &mut w.ticks)
+                .grow_tree(grower, origin, sapling)
+        );
+        w
+    };
+
+    let ordinary = grow(None);
+    assert_eq!(ordinary.name(origin), "minecraft:spawner");
+    let [(at, state, tag)] = &ordinary.level.block_entities[..] else {
+        panic!("the room configures exactly one spawner");
+    };
+    assert_eq!(*at, origin);
+    assert_eq!(*state, ordinary.level.spawner);
+    let nbt = Tag::Compound(tag.clone());
+    let Some(Tag::String(kind)) = nbt
+        .get("SpawnData")
+        .and_then(|data| data.get("entity"))
+        .and_then(|entity| entity.get("id"))
+    else {
+        panic!("the spawner contains its selected mob");
+    };
+    assert!(matches!(
+        kind.to_string().as_deref(),
+        Ok("minecraft:skeleton" | "minecraft:zombie" | "minecraft:spider")
+    ));
+
+    let allowed = grow(Some(HashSet::new()));
+    assert_eq!(allowed.name(origin), "minecraft:spawner");
+    assert_eq!(allowed.level.block_entities, ordinary.level.block_entities);
+
+    let denied = grow(Some(HashSet::from([origin])));
+    assert_ne!(denied.name(origin), "minecraft:spawner");
+    assert!(
+        denied
+            .level
+            .growth_candidates
+            .borrow()
+            .iter()
+            .any(|candidate| { candidate.pos == origin && candidate.structure })
+    );
+    assert!(denied.level.block_entities.is_empty());
+}
+
 #[test]
 fn single_saplings_grow() {
     grow("birch_sapling", "dirt", &[(0, 0)], "birch_log");

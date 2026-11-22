@@ -25,8 +25,13 @@ struct Write {
     state: BlockStateId,
     // None means the feature writes raw chunk section data.
     update: Option<(i32, i32)>,
-    block_entity: Option<Compound>,
+    block_entity: Option<BlockEntityWrite>,
     destroyed: Option<(BlockStateId, bool)>,
+}
+
+pub(super) enum BlockEntityWrite {
+    Load(Compound),
+    CreateSpawner(Compound),
 }
 
 impl GrowthCapture {
@@ -58,9 +63,20 @@ impl GrowthCapture {
         }
     }
 
-    pub(super) fn stage_block_entity(&mut self, pos: BlockPos, tag: Compound) {
-        if let Some(&slot) = self.index.get(&pos) {
-            self.writes[slot].block_entity = Some(tag);
+    pub(super) fn stage_block_entity(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        write: BlockEntityWrite,
+    ) {
+        if !self.index.contains_key(&pos) {
+            self.stage(pos, state, None);
+        }
+        let pending = &mut self.writes[self.index[&pos]].block_entity;
+        // The dungeon configures only a missing entity. A regular load at
+        // the same position can replace an earlier staged load or creation.
+        if pending.is_none() || matches!(write, BlockEntityWrite::Load(_)) {
+            *pending = Some(write);
         }
     }
 
@@ -139,9 +155,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 self.game_event_state(write.pos, "minecraft:block_destroy", old);
             }
             if self.state(write.pos) == write.state
-                && let Some(tag) = write.block_entity
+                && let Some(entity) = write.block_entity
             {
-                self.level.load_block_entity(write.pos, tag);
+                match entity {
+                    BlockEntityWrite::Load(tag) => self.level.load_block_entity(write.pos, tag),
+                    BlockEntityWrite::CreateSpawner(tag) => {
+                        self.level.create_feature_spawner(write.pos, tag)
+                    }
+                }
             }
         }
         result
