@@ -88,6 +88,9 @@ pub(super) struct Trip {
     /// Through an End portal.
     end: bool,
     origin: Option<PortalOrigin>,
+    /// An actual portal traveller's source feet position for observers,
+    /// independent of whether a mod subscribed to the veto hook.
+    notify_from: Option<[f64; 3]>,
     /// The Nether portal plan, whose exit is found or built on arrival.
     plan: Option<Plan>,
     /// The vehicle the player rides, which travels with it
@@ -243,6 +246,8 @@ pub(super) struct LevelTeleport {
     pub dim: Dim,
     pub at: [f64; 3],
     pub rotation: Option<[f32; 2]>,
+    /// Whether this was a teleport, so the committed-position hook is told.
+    pub notify_position: bool,
     /// `TeleportTransition.asPassenger`: the vehicle already moved with its tree.
     pub vehicle: Option<u32>,
 }
@@ -308,6 +313,7 @@ impl Game<'_> {
             target,
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -927,6 +933,8 @@ impl Game<'_> {
         let origin = (!credits_respawn && self.subscribed_portal_teleport())
             .then(|| PortalOrigin::capture(g));
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);
+        let notify_from =
+            (!credits_respawn && self.player_position_listened()).then_some(g.position);
         let yaw = g.yaw;
         // The vehicle the player rides travels with it: the player is its
         // passenger, and the vehicle is recreated in the other dimension,
@@ -995,6 +1003,7 @@ impl Game<'_> {
             target: destination,
             end,
             origin,
+            notify_from,
             plan,
             vehicle,
             gateway: None,
@@ -1124,6 +1133,7 @@ impl Game<'_> {
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1197,6 +1207,7 @@ impl Game<'_> {
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1223,6 +1234,7 @@ impl Game<'_> {
             dim: Dim::Overworld,
             at,
             rotation: None,
+            notify_position: false,
             vehicle: None,
         });
         self.run_level_teleports();
@@ -1245,6 +1257,9 @@ impl Game<'_> {
         let origin = self
             .subscribed_portal_teleport()
             .then(|| PortalOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
+        let notify_from = self
+            .player_position_listened()
+            .then(|| self.lan.as_ref().unwrap().hub.guests[i].position);
         let exact = matches!(job, GatewayJob::Known { exact: true, .. });
         if origin.is_none() || exact {
             if let Some(origin) = origin
@@ -1267,6 +1282,7 @@ impl Game<'_> {
             }
         }
         if exact {
+            self.notify_portal_arrival(conn, self.dim, notify_from, destination);
             return;
         }
         self.server_trips.push(Trip {
@@ -1276,6 +1292,7 @@ impl Game<'_> {
             target: destination,
             end: false,
             origin,
+            notify_from,
             plan: None,
             vehicle: None,
             gateway: Some(job),
@@ -1287,6 +1304,19 @@ impl Game<'_> {
             placed: false,
             hold: false,
             left: None,
+        });
+    }
+
+    fn notify_portal_arrival(&mut self, conn: u32, source: Dim, from: Option<[f64; 3]>, at: Vec3) {
+        let Some(from) = from else { return };
+        self.as_guest(conn, |game| {
+            if let Some(player) = game.native_acting_player() {
+                game.notify_player_position(
+                    player.uuid(),
+                    (source, from),
+                    (game.dim, [at.x, at.y, at.z]),
+                );
+            }
         });
     }
 
@@ -1552,6 +1582,7 @@ impl Game<'_> {
                         host.hub
                             .teleport_keeping_motion(i, [position.x, position.y, position.z]);
                     }
+                    self.notify_portal_arrival(trip.conn, trip.source, trip.notify_from, position);
                     continue;
                 }
                 let [x, y, z] = origin.position;
@@ -1633,6 +1664,7 @@ impl Game<'_> {
             } else {
                 host.hub.teleport(i, Some(at));
             }
+            self.notify_portal_arrival(trip.conn, trip.source, trip.notify_from, position);
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
         }
         self.release_held_arrivals();
@@ -1729,9 +1761,13 @@ impl Game<'_> {
             } = note;
             // In place when it is their turn already (as_guest finds them swapped in).
             if self.lan_acting == Some(conn) {
+                let level = Dim::from_id(&dimension);
+                self.notify_player_position(uuid, (level, from), (level, to));
                 self.native_player_teleported(uuid, &name, from, to, &dimension);
             } else {
                 self.as_guest(conn, |g| {
+                    let level = Dim::from_id(&dimension);
+                    g.notify_player_position(uuid, (level, from), (level, to));
                     g.native_player_teleported(uuid, &name, from, to, &dimension);
                 });
             }
@@ -1764,7 +1800,12 @@ impl Game<'_> {
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
-            let (uuid, name) = (host.hub.guests[i].uuid, host.hub.guests[i].name.clone());
+            let guest = &host.hub.guests[i];
+            let (uuid, name, player_source) = (
+                guest.uuid,
+                guest.name.clone(),
+                Dim::from_id(&guest.dimension),
+            );
             let (yaw, pitch, origin, passenger_body) = host.hub.guests.update(i, |g| {
                 let [yaw, pitch] = t.rotation.unwrap_or([g.yaw, g.pitch]);
                 let origin = g.position;
@@ -1794,6 +1835,9 @@ impl Game<'_> {
             self.bind_player_attachments(t.conn, false);
             self.as_guest(t.conn, |g| {
                 g.trigger_dimension(source, t.dim, origin);
+                if t.notify_position {
+                    g.notify_player_position(uuid, (player_source, origin), (t.dim, t.at));
+                }
                 // The mods hear the teleport into another level, with the
                 // player's state swapped in.
                 g.native_player_teleported(uuid, &name, origin, t.at, t.dim.id());
@@ -1806,6 +1850,7 @@ impl Game<'_> {
                 target: Vec3::new(t.at[0], t.at[1], t.at[2]),
                 end: false,
                 origin: None,
+                notify_from: None,
                 plan: None,
                 // A command teleports the player alone: it is not a
                 // passenger any more (`ServerPlayer.teleport`).

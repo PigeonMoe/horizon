@@ -650,6 +650,7 @@ impl Game<'_> {
                 std::panic::resume_unwind(panic);
             }
             self.mobs[i] = m;
+            self.notify_vehicle_driver_move(conn, player, old, target);
             // propagateFallToPassengers reaches the guests through `host`: it is out
             // of `self.lan` while their packet is handled.
             let falls: Vec<(u32, f64, f32)> = events
@@ -733,6 +734,19 @@ impl Game<'_> {
             g.previous_position = g.position;
             g.position = [seat.x, seat.y, seat.z];
         });
+        self.notify_vehicle_driver_move(conn, player, old, target);
+    }
+
+    fn notify_vehicle_driver_move(&mut self, conn: u32, player: u128, from: Vec3, to: Vec3) {
+        if from != to && self.player_position_listened() {
+            self.as_guest(conn, |game| {
+                game.notify_player_position(
+                    player,
+                    (game.dim, [from.x, from.y, from.z]),
+                    (game.dim, [to.x, to.y, to.z]),
+                );
+            });
+        }
     }
 
     /// `Entity.getControllingPassenger` of a vehicle a server player rides: a

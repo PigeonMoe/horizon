@@ -2,18 +2,22 @@
 //! veto decides what the hub does with it. The ordered cases run the real game tick.
 use super::native_guest_turn_tests::with_guests;
 use horizon_client::lan::hub::{Accepted, PendingMove};
-use mod_api::{Flow, Hooks, PlayerMoveEvent, ServerHost};
+use mod_api::{Flow, Hooks, PlayerMoveEvent, PlayerPositionCommittedEvent, ServerHost};
 use std::sync::{Arc, Mutex};
 
 type Heard = Arc<Mutex<Vec<(u128, [f64; 3], [f32; 2], [f64; 3], [f32; 2])>>>;
+type Committed = Arc<Mutex<Vec<(u128, [f64; 3], [f64; 3])>>>;
 
 /// Records each report and vetoes one that goes past x = 10, as a world wall does.
-struct Wall(Heard);
+struct Wall {
+    heard: Heard,
+    committed: Committed,
+}
 
 #[mod_api::__subscriptions]
 impl Hooks for Wall {
     fn player_move(&self, _: &mut dyn ServerHost, event: &mut PlayerMoveEvent) -> Flow {
-        self.0.lock().unwrap().push((
+        self.heard.lock().unwrap().push((
             event.player,
             event.from,
             event.from_rotation,
@@ -25,6 +29,22 @@ impl Hooks for Wall {
         } else {
             Flow::Continue
         }
+    }
+
+    fn player_position_committed(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut PlayerPositionCommittedEvent<'_>,
+    ) {
+        let player = host.players().acting_player().expect("committed player");
+        assert_eq!(player.uuid(), event.player);
+        assert_eq!(player.entity().position(host), Some(event.to));
+        assert_eq!(event.from_level, "minecraft:overworld");
+        assert_eq!(event.to_level, "minecraft:overworld");
+        self.committed
+            .lock()
+            .unwrap()
+            .push((event.player, event.from, event.to));
     }
 }
 
@@ -58,9 +78,13 @@ fn hold(game: &mut super::Game<'_>, conn: u32, to: [f64; 3], yaw: f32) {
 #[ignore = "daily"]
 fn a_veto_corrects_the_player_and_a_pass_commits_the_report() {
     let heard = Heard::default();
+    let committed = Committed::default();
     let mods = vec![mod_api::ModEntry::new(
         "wall",
-        Box::new(Wall(heard.clone())),
+        Box::new(Wall {
+            heard: heard.clone(),
+            committed: committed.clone(),
+        }),
     )]
     .into();
     mod_platform::testing::with_mods(mods, || {
@@ -81,6 +105,10 @@ fn a_veto_corrects_the_player_and_a_pass_commits_the_report() {
             let g = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
             assert_eq!((g.position, g.yaw), ([5.0, 64.0, 5.0], 40.0));
             assert!(g.pending_move.is_none());
+            assert_eq!(
+                std::mem::take(&mut *committed.lock().unwrap()),
+                [(13, [3.0, 64.0, 5.0], [5.0, 64.0, 5.0])]
+            );
             // A report past it: vetoed, the player stays and the client is corrected.
             hold(game, 13, [20.0, 64.0, 5.0], 90.0);
             game.lan_player_move(13);
@@ -95,6 +123,7 @@ fn a_veto_corrects_the_player_and_a_pass_commits_the_report() {
             heard.lock().unwrap().clear();
             game.lan_player_move(13);
             assert!(heard.lock().unwrap().is_empty());
+            assert!(committed.lock().unwrap().is_empty());
         });
     });
 }

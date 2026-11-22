@@ -234,24 +234,23 @@ impl Hub {
 
     /// The mods ruled on guest `conn`'s pending report: `commit` applies it, otherwise (or when the
     /// ruling is past [`MOVE_PENDING_TICKS`]) it is dropped and the client corrected. Nothing happens if the player is gone or has no pending
-    /// report any more (a disconnect, a teleport or a level change dropped it).
-    pub fn resolve_move(&mut self, conn: u32, commit: bool) {
-        let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
-            return;
-        };
-        let Some(p) = self.guests.update(i, |g| g.pending_move.take()) else {
-            return;
-        };
+    /// report any more (a disconnect, a teleport or a level change dropped it). Returns
+    /// the authoritative starting position only when the report was committed.
+    pub fn resolve_move(&mut self, conn: u32, commit: bool) -> Option<[f64; 3]> {
+        let i = self.guests.iter().position(|g| g.conn == conn)?;
+        let p = self.guests.update(i, |g| g.pending_move.take())?;
         if !self.pending_is_current(i, &p) {
-            return;
+            return None;
         }
         // A ruling that comes too late is no ruling: out of time, the report is dropped.
         if !commit || self.move_expired(&p) {
             self.correct_move(i);
-            return;
+            return None;
         }
+        let before = self.guests[i].position;
         let mut events = Vec::new();
         self.commit_move(i, p.report, &mut events);
         self.pending_kicks.extend(events);
+        Some(before)
     }
 }

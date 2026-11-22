@@ -572,6 +572,7 @@ impl Game<'_> {
                         dim: destination,
                         at,
                         rotation: Some(rotation),
+                        notify_position: false,
                         vehicle: restored_objects.by_source.get(&mount).copied(),
                     });
             }

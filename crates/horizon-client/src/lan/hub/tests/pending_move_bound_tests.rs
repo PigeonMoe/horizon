@@ -8,7 +8,8 @@ fn the_20th_tick_is_the_last_that_can_be_ruled_on() {
     drain(&mut hub);
     // Held at tick 10 as the first: tick 29 is the 20th.
     hub.ticks = 29;
-    hub.resolve_move(conn, true);
+    assert_eq!(hub.resolve_move(conn, true), Some([0.0, 64.0, 0.0]));
+    assert_eq!(hub.resolve_move(conn, true), None, "reported only once");
     assert_eq!(hub.guests[0].position, [0.5, 64.0, 0.0], "ruled on in time");
     assert!(hub.guests[0].awaiting_teleport.is_none());
 }
@@ -19,7 +20,11 @@ fn the_21st_tick_finds_a_ruling_too_late_and_drops_the_report_with_the_correctio
     let conn = hub.guests[0].conn;
     drain(&mut hub);
     hub.ticks = 30;
-    hub.resolve_move(conn, true);
+    assert_eq!(
+        hub.resolve_move(conn, true),
+        None,
+        "an expired move did not commit"
+    );
     let g = &hub.guests[0];
     assert_eq!(
         g.position,
@@ -49,7 +54,7 @@ fn a_report_nobody_rules_on_holds_its_inbox_to_the_20th_tick_and_is_dropped_at_t
     assert_eq!(g.position, [0.0, 64.0, 0.0], "never committed");
     assert!(g.awaiting_teleport.is_some(), "the client was corrected");
     assert!(g.inbox.is_empty(), "the inbox was released");
-    hub.resolve_move(conn, true);
+    assert_eq!(hub.resolve_move(conn, true), None);
     assert_eq!(
         hub.guests[0].position,
         [0.0, 64.0, 0.0],
@@ -65,7 +70,7 @@ fn a_teleport_or_a_level_change_drops_a_pending_report_without_a_correction() {
     hub.teleport_command(0, [10.5, 70.0, 10.5], [false; 3]);
     assert!(hub.guests[0].pending_move.is_none());
     let counter = hub.guests[0].teleport_counter;
-    hub.resolve_move(conn, true);
+    assert_eq!(hub.resolve_move(conn, true), None);
     assert_eq!(
         hub.guests[0].position,
         [10.5, 70.0, 10.5],
@@ -81,7 +86,7 @@ fn a_teleport_or_a_level_change_drops_a_pending_report_without_a_correction() {
     hub.guests
         .update(0, |g| g.dimension = "minecraft:the_nether".into());
     let counter = hub.guests[0].teleport_counter;
-    hub.resolve_move(conn, true);
+    assert_eq!(hub.resolve_move(conn, true), None);
     let g = &hub.guests[0];
     assert_eq!(
         g.position,
@@ -98,7 +103,7 @@ fn a_player_who_left_has_nothing_pending_and_a_late_ruling_is_ignored() {
     drain(&mut hub);
     let gone = hub.remove_guest(0, "gone");
     assert!(gone.pending_move.is_some(), "it leaves with the guest");
-    hub.resolve_move(conn, true);
-    hub.resolve_move(conn, false);
+    assert_eq!(hub.resolve_move(conn, true), None);
+    assert_eq!(hub.resolve_move(conn, false), None);
     assert!(hub.pending_move_report(conn).is_none());
 }

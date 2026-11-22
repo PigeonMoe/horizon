@@ -1473,7 +1473,13 @@ impl Game<'_> {
                 .map(|e| e.id.trim_start_matches("minecraft:"))
                 .collect();
             let bounds = m.bounds();
-            self.effects_on_death(&names, bounds, m.silent, Some(m.id), Some(&mut m.random));
+            self.effects_on_death(
+                &names,
+                bounds,
+                m.silent,
+                Some((m.id, &m.kind.id)),
+                Some(&mut m.random),
+            );
         }
         self.deliver_pending_mob_actions(level_id)?;
         self.finish_creature_entities(&mut laps, &primable)
@@ -6165,7 +6171,9 @@ impl Game<'_> {
                         self.spawn_mob_raw("minecraft:endermite", [from.x, from.y, from.z], false);
                     }
                     // ServerPlayer.teleport: removeVehicle before the placement.
+                    let origin = self.active_teleport_origin();
                     section_steps::teleport_player(self, to);
+                    self.notify_active_teleport(origin);
                     self.hurt_player_by_action(
                         "minecraft:ender_pearl",
                         damage,

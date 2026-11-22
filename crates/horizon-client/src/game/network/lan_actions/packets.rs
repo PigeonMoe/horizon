@@ -1364,6 +1364,7 @@ impl Game<'_> {
                     dim,
                     at,
                     rotation: Some([yaw, pitch]),
+                    notify_position: true,
                     vehicle: None,
                 });
             return;
@@ -1375,5 +1376,10 @@ impl Game<'_> {
             g.new_body(true);
         });
         host.hub.teleport(gi, Some(at));
+        if self.player_position_listened() {
+            self.as_guest(own, |game| {
+                game.notify_player_position(player, (from_dim, from), (dim, at));
+            });
+        }
     }
 }

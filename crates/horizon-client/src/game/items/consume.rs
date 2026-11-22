@@ -336,11 +336,13 @@ impl Game<'_> {
         {
             return false;
         }
+        let origin = self.active_teleport_origin();
         if let Some(p) = self.player.as_mut() {
             p.position = at;
         }
         // The position packet moves the old position along (absolute xyz).
         self.previous_position = at;
+        self.notify_active_teleport(origin);
         // `broadcastEntityEvent(46)` after the teleport. A server-thread window
         // is a remote client, so the packet is what draws the particles there.
         if let Some(id) = self.lan_acting_entity {
