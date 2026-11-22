@@ -20,6 +20,7 @@ pub mod flowers;
 pub mod husksync_effects_and_attributes;
 pub mod husksync_inventory;
 pub mod husksync_packed;
+pub mod husksync_records;
 pub mod husksync_vitals;
 pub mod item_abilities;
 pub mod item_data;
