@@ -135,6 +135,234 @@ fn mob(game: &super::Game<'_>, id: u32, kind: &str) -> Mob {
 
 #[test]
 #[ignore = "daily"]
+fn player_entity_reaction_waits_for_protection_and_cooldown() {
+    use crate::game::native_guest_turn_tests::with_guests;
+    use horizon_client::health::{Attack, BlockOutcome};
+    use mod_api::{EntityDamageTargetPreEvent, Flow, PlayerEntityDamagePreEvent, ServerHost};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct Observed {
+        protect: AtomicBool,
+        react: AtomicBool,
+        hits: Mutex<Vec<(String, i32, bool, f32)>>,
+    }
+    struct Observe(Arc<Observed>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Observe {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.target_kind, "minecraft:player");
+            if self.0.protect.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_entity_damage_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerEntityDamagePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player.uuid(), 12);
+            assert_eq!(event.player.selected_slot(host), Some(0));
+            self.0.hits.lock().unwrap().push((
+                event.source.damage_type.to_owned(),
+                event.source.direct,
+                event.projectile,
+                event.damage,
+            ));
+            if self.0.react.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    fn hit(
+        game: &mut super::Game<'_>,
+        kind: &str,
+        amount: f32,
+        attack: &Attack,
+    ) -> BlockOutcome {
+        let source = game.health_resources.damage.id(kind).unwrap();
+        game.hurt_player_equipment(source, amount, None, false, 13, false, attack, None)
+            .unwrap()
+    }
+
+    let seen = Arc::new(Observed::default());
+    let mods = vec![mod_api::ModEntry::new(
+        "admitted_attack",
+        Box::new(Observe(seen.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::entry::install_client_hooks();
+        with_guests(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.build_registries();
+            game.lan.as_mut().unwrap().hub.update_guest(12, |guest| {
+                guest.loaded = true;
+                guest.load_timeout = 0;
+            });
+            game.as_guest(12, |game| {
+                game.set_mode(GameMode::Survival);
+                game.selected = 0;
+                assert!(game.player.as_ref().unwrap().client_loaded);
+                let attack = game.attack_of(13);
+                let health = game.player.as_ref().unwrap().health.health();
+
+                seen.protect.store(true, Ordering::Relaxed);
+                assert!(hit(game, "minecraft:player_attack", 4.0, &attack).canceled);
+                assert!(seen.hits.lock().unwrap().is_empty());
+
+                seen.protect.store(false, Ordering::Relaxed);
+                seen.react.store(true, Ordering::Relaxed);
+                assert!(hit(game, "minecraft:player_attack", 4.0, &attack).canceled);
+                let projectile = Attack {
+                    projectile: Some(91),
+                    ..attack.clone()
+                };
+                assert!(hit(game, "minecraft:thrown", 0.0, &projectile).canceled);
+                assert_eq!(game.player.as_ref().unwrap().health.health(), health);
+
+                seen.react.store(false, Ordering::Relaxed);
+                assert!(!hit(game, "minecraft:thrown", 0.0, &projectile).hurt);
+                assert!(hit(game, "minecraft:player_attack", 4.0, &attack).hurt);
+                assert!(!hit(game, "minecraft:player_attack", 4.0, &attack).hurt);
+                assert_eq!(game.player.as_ref().unwrap().health.health(), health - 4.0);
+            })
+            .unwrap();
+        });
+    });
+    assert_eq!(
+        *seen.hits.lock().unwrap(),
+        [
+            ("minecraft:player_attack".into(), 13, false, 4.0),
+            ("minecraft:thrown".into(), 91, true, 0.0),
+            ("minecraft:thrown".into(), 91, true, 0.0),
+            ("minecraft:player_attack".into(), 13, false, 4.0),
+        ]
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn reflected_spectral_arrow_keeps_the_old_shooter_without_reinserting_the_old_arrow() {
+    use crate::game::native_guest_turn_tests::with_guests;
+    use horizon_client::{
+        arrows::Pickup,
+        chunk::Chunk,
+        items::ItemStack,
+        lan::playerdata::uuid_ints,
+        mobs::Who,
+        projectiles::{Hit, Projectile, ProjectileKind},
+    };
+    use mod_api::{Flow, PlayerEntityDamagePreEvent, ServerHost};
+
+    struct Return;
+    #[mod_api::__subscriptions]
+    impl Hooks for Return {
+        fn player_entity_damage_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerEntityDamagePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player.uuid(), 12);
+            assert!(event.projectile);
+            assert!(host.can_return_player_damage_projectile(event.player));
+            assert!(host.return_player_damage_projectile(event.player));
+            assert!(!host.return_player_damage_projectile(event.player));
+            Flow::Continue // the successful Host operation already canceled the damage
+        }
+    }
+    let mods = vec![mod_api::ModEntry::new("return-arrow", Box::new(Return))].into();
+    mod_platform::testing::with_mods(mods, || {
+        crate::entry::install_client_hooks();
+        with_guests(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.build_registries();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.next_entity = 1000;
+            game.lan.as_mut().unwrap().hub.update_guest(12, |guest| {
+                guest.loaded = true;
+                guest.load_timeout = 0;
+            });
+            game.as_guest(12, |game| {
+                game.set_mode(GameMode::Survival);
+                assert!(game.player.as_ref().unwrap().client_loaded);
+                let health = game.player.as_ref().unwrap().health.health();
+                let player = game.native_acting_player().unwrap();
+                let [x, y, z] = game.entity_eye_position(player.entity()).unwrap();
+                game.yaw = 0.0;
+                game.pitch = 0.0;
+                let mut old = Projectile::new(
+                    ProjectileKind::Arrow {
+                        base_damage: 4.5,
+                        critical: true,
+                        effect: None,
+                    },
+                    Vec3::new(x, y, z + 0.25),
+                    Some(Who::Player),
+                );
+                old.id = 96;
+                old.guest = Some(13);
+                old.owner_uuid = Some(uuid_ints(13));
+                old.velocity = Vec3::new(0.0, 0.0, -2.0);
+                old.age = 15;
+                let arrow = old.arrow.as_mut().unwrap();
+                arrow.pickup = Pickup::CreativeOnly;
+                arrow.pierce = 2;
+                arrow.pickup_item = ItemStack::new("minecraft:spectral_arrow", 1);
+                arrow.fired_from_weapon = Some(ItemStack::new("minecraft:crossbow", 1));
+
+                game.projectile_hit(
+                    &old,
+                    Hit::Entity {
+                        who: Who::Player,
+                        at: old.position,
+                    },
+                )
+                .unwrap();
+                assert_eq!(game.player.as_ref().unwrap().health.health(), health);
+                assert!(!game.can_return_player_damage_projectile(player));
+                let mut spawned = game.creatures.projectiles.iter();
+                let returned = spawned.next().unwrap();
+                assert!(spawned.next().is_none());
+                assert_ne!(returned.id, old.id);
+                assert_eq!(returned.owner_uuid, Some(uuid_ints(13)));
+                assert_eq!(returned.guest, Some(13));
+                assert_eq!(returned.entity_type(), "minecraft:spectral_arrow");
+                assert_eq!(returned.position, Vec3::new(x, y, z + 2.0));
+                assert_eq!(returned.velocity.components(), [0.0, 0.0, 2.0]);
+                assert_eq!(returned.age, 0);
+                assert_eq!(
+                    returned.kind,
+                    ProjectileKind::Arrow {
+                        base_damage: 4.5,
+                        critical: false,
+                        effect: None,
+                    }
+                );
+                let arrow = returned.arrow.as_ref().unwrap();
+                assert_eq!((arrow.pickup, arrow.pierce), (Pickup::CreativeOnly, 2));
+                assert!(arrow.fired_from_weapon.is_none());
+            })
+            .unwrap();
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn damage_admission_checks_the_player_responsible_for_the_actual_hit() {
     struct Listener(Arc<Mutex<Vec<Option<u128>>>>);
 

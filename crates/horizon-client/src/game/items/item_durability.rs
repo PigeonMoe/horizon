@@ -51,15 +51,38 @@ impl Game<'_> {
         let helmet = self.armor[0]
             .as_ref()
             .is_some_and(|s| s.count > 0 && &*s.item != "minecraft:air");
-        // Paper's FALL is environmental. A /damage command with an explicit
-        // direct entity is instead classified by that entity.
-        let ambient_fall = attack.direct.unwrap_or(causing) == 0
+        // Paper classifies these causes only when no direct entity is involved.
+        let ambient_damage = if attack.direct.unwrap_or(causing) == 0 {
+            match self
+                .health_resources
+                .damage
+                .definition(source)
+                .map(|definition| definition.name.as_str())
+            {
+                Some("minecraft:fall") => Some("minecraft:fall"),
+                Some("minecraft:lava") => Some("minecraft:lava"),
+                Some("minecraft:drown") => Some("minecraft:drown"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let ambient_fall = ambient_damage == Some("minecraft:fall");
+        let footwear_action = footwear_action.or(ambient_fall.then_some("fall_damage"));
+        let observes_entity_damage = self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::PlayerEntityDamagePre);
+        let observe_zero_damage = observes_entity_damage
+            && amount == 0.0
+            && attack.projectile.is_some()
             && self
                 .health_resources
                 .damage
                 .definition(source)
-                .is_some_and(|definition| definition.name == "minecraft:fall");
-        let footwear_action = footwear_action.or(ambient_fall.then_some("fall_damage"));
+                .is_some_and(|definition| {
+                    let source = attack.player_source(&definition.name, causing);
+                    (source.direct != 0 && attack.projectile == Some(source.direct))
+                        || self.borrowed_player_damage_projectile(attack.projectile, &source)
+                });
         let level = crate::game::entity::damage_level_of!(self, attack);
         let reaction = std::cell::Cell::new(horizon_client::landing::LandingReaction::None);
         let footwear =
@@ -89,8 +112,9 @@ impl Game<'_> {
                 helmet,
                 !self.combat.refuse_player_hit,
                 armor_weapon,
+                observe_zero_damage,
             )?;
-        if ambient_fall {
+        if let Some(damage_type) = ambient_damage {
             let observes_environment =
                 mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre);
             let resources = &self.health_resources;
@@ -102,8 +126,8 @@ impl Game<'_> {
             } else {
                 None
             };
-            let footwear_canceled =
-                admitted.is_some_and(|damage| level.fall_equipment_cancels(damage));
+            let footwear_canceled = ambient_fall
+                && admitted.is_some_and(|damage| level.fall_equipment_cancels(damage));
             if !matches!(
                 reaction.get(),
                 horizon_client::landing::LandingReaction::None
@@ -114,7 +138,7 @@ impl Game<'_> {
                 || admitted.is_some_and(|damage| {
                     observes_environment
                         && damage > 0.0
-                        && self.player_environment_damage_cancels("minecraft:fall", damage)
+                        && self.player_environment_damage_cancels(damage_type, damage)
                 })
             {
                 return Ok(horizon_client::health::BlockOutcome {
@@ -122,6 +146,34 @@ impl Game<'_> {
                     ..Default::default()
                 });
             }
+        }
+        if observes_entity_damage
+            && (hit.source(attack).direct != 0
+                || self.borrowed_player_damage_projectile(attack.projectile, &hit.source(attack)))
+            && let Some(player) = self.native_acting_player()
+            && let Some(damage) = {
+                let mut reaction_level = crate::game::entity::damage_level_of!(self, attack);
+                self.player
+                    .as_mut()
+                    .ok_or("missing damage target")?
+                    .admitted_reaction_damage(
+                        &mut reaction_level,
+                        &self.health_resources,
+                        rules,
+                        &mut hit,
+                    )?
+            }
+        {
+            let source = hit.source(attack);
+            if self.player_entity_damage_reacted(player, &source, attack.projectile, damage) {
+                return Ok(horizon_client::health::BlockOutcome {
+                    canceled: true,
+                    ..Default::default()
+                });
+            }
+        }
+        if observe_zero_damage {
+            return Ok(hit.refused_outcome());
         }
         if let Some(damage) = hit.helmet_damage() {
             let hit_source = hit.source(attack);

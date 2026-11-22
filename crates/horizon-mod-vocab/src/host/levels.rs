@@ -778,6 +778,13 @@ pub trait LevelsBackend {
     /// Does not load chunks, inspect the block's breakability, or change the world.
     #[access(WorldOnly)]
     fn level_allow_device_breaking(&self, level: LevelRef, owner: u128, pos: [i32; 3]) -> bool;
+    /// Side: server.
+    /// Ask whether an online `player` in this active level may target `pos` with a PvP
+    /// ability. Checks the PvP game rule and `player_attack_at_pre` at the loaded target
+    /// position. False for stale handles, a player outside this level, or an unloaded target.
+    /// Does not require a victim, load chunks, deal damage, or check the player's origin.
+    #[access(WorldOnly)]
+    fn level_allow_player_attack_at(&self, level: LevelRef, player: PlayerRef, pos: [i32; 3]) -> bool;
 }
 /// The handles' writes of the `levels` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

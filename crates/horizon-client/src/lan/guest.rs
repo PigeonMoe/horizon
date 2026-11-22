@@ -2605,7 +2605,7 @@ mod tests {
     use super::*;
     use horizon_core::nbt::Tag;
     use horizon_protocol::buf::{Codec, Reader, Writer};
-    use horizon_protocol::item::{Component, component};
+    use horizon_protocol::item::{Component, Slot, component};
 
     #[test]
     fn a_saved_player_head_keeps_its_texture_property_on_the_wire() {
@@ -2618,8 +2618,8 @@ mod tests {
         head.data_mut().set_other("minecraft:profile", Some(profile));
         let stack = network_stack(&|_| 1, &|_, _| None, &head);
         let mut writer = Writer::new();
-        stack.write(&mut writer);
-        let decoded = Stack::read(&mut Reader::new(&writer.data)).unwrap();
+        Slot::write(&Some(stack), &mut writer);
+        let decoded = Slot::read(&mut Reader::new(&writer.data)).unwrap().unwrap();
         let Some(Component::Profile(profile)) = decoded.component(component::PROFILE) else {
             panic!("missing profile component");
         };

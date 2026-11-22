@@ -1106,6 +1106,7 @@ impl PlayerMotion {
             false,
             true,
             None,
+            false,
         )?;
         if level.fall_equipment().is_some()
             && let Some(damage) =
@@ -1150,6 +1151,7 @@ impl PlayerMotion {
     /// `can_harm_player` is the server PvP decision, applied after the invulnerability
     /// observation. Non-PvP damage passes true. The base observation is retained across
     /// all continuations belonging to this hit.
+    /// `observe_zero_damage` lets a projectile reaction see an otherwise admitted zero hit.
     pub fn start_hurt(
         &mut self,
         level: &mut DamageLevel<'_>,
@@ -1164,6 +1166,7 @@ impl PlayerMotion {
         helmet: bool,
         can_harm_player: bool,
         armor_weapon: Option<ArmorWeapon>,
+        observe_zero_damage: bool,
     ) -> Result<PausedHurt> {
         self.start_hurt_with(
             level,
@@ -1179,6 +1182,7 @@ impl PlayerMotion {
             can_harm_player,
             armor_weapon,
             false,
+            observe_zero_damage,
         )
     }
 
@@ -1197,6 +1201,7 @@ impl PlayerMotion {
             .expect("validated starvation source");
         let mut hit = self.start_hurt_with(
             level, resources, rules, source, amount, None, false, 0, false, false, true, None, true,
+            false,
         )?;
         let admitted = self.admitted_reaction_damage(level, resources, rules, &mut hit)?;
         Ok((hit, admitted))
@@ -1217,6 +1222,7 @@ impl PlayerMotion {
         can_harm_player: bool,
         armor_weapon: Option<ArmorWeapon>,
         starvation: bool,
+        observe_zero_damage: bool,
     ) -> Result<PausedHurt> {
         let mut hit = PausedHurt {
             pending: None,
@@ -1261,7 +1267,7 @@ impl PlayerMotion {
             .name
             .clone();
         hit.pending = self.in_combat(level, resources, rules, &mut hit, |combat, state| {
-            Ok(combat.hurt_until_helmet(state, amount)?)
+            Ok(combat.hurt_until_helmet(state, amount, observe_zero_damage)?)
         })?;
         Ok(hit)
     }
@@ -1591,6 +1597,14 @@ pub struct PausedHurt {
     dealt: f32,
 }
 impl PausedHurt {
+    /// Drop a zero-damage probe without applying damage-side effects. Preserve a protection veto.
+    pub fn refused_outcome(self) -> BlockOutcome {
+        BlockOutcome {
+            canceled: self.canceled,
+            ..Default::default()
+        }
+    }
+
     /// The incoming damage after the cooldown admitted the hit, before armor.
     pub fn selected_damage(&self) -> Option<f32> {
         if self.inner != Some(false) {

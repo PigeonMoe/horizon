@@ -14,9 +14,13 @@ use horizon_client::{
     arrows::ArrowEvent,
     join_seq::JoinList,
     mobs::Who,
-    projectiles::{Hit, Projectile},
+    projectiles::{Hit, Projectile, ProjectileKind},
 };
-use horizon_core::geometry::Vec3;
+use horizon_core::{
+    geometry::Vec3,
+    nbt::{Compound, Tag},
+};
+use mod_api::{HurtSource, PlayerRef};
 use std::ops::Range;
 
 #[cfg(test)]
@@ -48,6 +52,111 @@ fn projectile_type(p: &Projectile) -> &'static str {
     p.entity_type()
 }
 
+/// The parts of an incoming projectile a replacement is allowed to carry.
+#[derive(Clone, Copy)]
+struct ReturnedProjectile {
+    id: u32,
+    kind: &'static str,
+    owner: Option<[i32; 4]>,
+    arrow: Option<(f64, i8, i8)>,
+}
+
+impl ReturnedProjectile {
+    fn from_projectile(p: &Projectile) -> Option<Self> {
+        let kind = p.entity_type();
+        if matches!(
+            kind,
+            "minecraft:trident" | "minecraft:splash_potion" | "minecraft:lingering_potion"
+        ) {
+            return None;
+        }
+        let arrow = match (&p.kind, p.arrow.as_ref()) {
+            (ProjectileKind::Arrow { base_damage, .. }, Some(arrow)) => {
+                Some((*base_damage, arrow.pickup.byte(), arrow.pierce as i8))
+            }
+            _ => None,
+        };
+        Some(Self {
+            id: p.id,
+            kind,
+            owner: p.owner_uuid,
+            arrow,
+        })
+    }
+
+    fn describes_damage(self, attack_projectile: Option<i32>, source: &HurtSource<'_>) -> bool {
+        let Ok(id) = i32::try_from(self.id) else {
+            return false;
+        };
+        source.direct == id
+            || (source.direct == 0
+                && attack_projectile == Some(id)
+                && matches!(
+                    (self.kind, source.damage_type),
+                    ("minecraft:wither_skull", "minecraft:magic")
+                        | ("minecraft:ender_pearl", "minecraft:ender_pearl")
+                ))
+    }
+
+    fn nbt(self, motion: [f64; 3], rotation: [f32; 2], owner: Option<[i32; 4]>) -> Compound {
+        let mut tag = Compound::from([(
+            "Motion".into(),
+            Tag::List(
+                motion
+                    .into_iter()
+                    .map(|axis| Tag::Double(axis.to_bits()))
+                    .collect(),
+            ),
+        )]);
+        if let Some(owner) = owner {
+            tag.insert("Owner".into(), Tag::IntArray(owner.to_vec().into()));
+        }
+        if matches!(
+            self.kind,
+            "minecraft:llama_spit" | "minecraft:shulker_bullet"
+        ) {
+            tag.insert(
+                "Rotation".into(),
+                Tag::List(
+                    rotation
+                        .into_iter()
+                        .map(|axis| Tag::Float(axis.to_bits()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some((damage, pickup, pierce)) = self.arrow {
+            tag.insert("damage".into(), Tag::Double(damage.to_bits()));
+            tag.insert("pickup".into(), Tag::Byte(pickup));
+            tag.insert("PierceLevel".into(), Tag::Byte(pierce));
+        }
+        tag
+    }
+}
+
+pub(super) struct ProjectileReturnImpact {
+    original: ReturnedProjectile,
+    returned: bool,
+}
+
+pub(super) struct AdmittedProjectileReturn {
+    player: PlayerRef,
+    original: ReturnedProjectile,
+    in_impact: bool,
+    returned: bool,
+}
+
+fn return_velocity(rotation: [f32; 2]) -> [f64; 3] {
+    // Bukkit Location.getDirection uses doubles and no projectile spread.
+    let [yaw, pitch] = rotation.map(|angle| f64::from(angle).to_radians());
+    let horizontal = 2.0 * pitch.cos();
+    [
+        -yaw.sin() * horizontal,
+        -2.0 * pitch.sin(),
+        yaw.cos() * horizontal,
+    ]
+}
+
 /// An owned flight pass restored only if its dispatch unwinds.
 struct ProjectileDispatch<'game, 'resources> {
     game: &'game mut Game<'resources>,
@@ -65,6 +174,152 @@ impl Drop for ProjectileDispatch<'_, '_> {
 }
 
 impl Game<'_> {
+    pub(super) fn with_projectile_return<R>(
+        &mut self,
+        projectile: &Projectile,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let current = mod_api::__private::listened(mod_api::HookId::PlayerEntityDamagePre)
+            .then(|| ReturnedProjectile::from_projectile(projectile))
+            .flatten()
+            .map(|original| ProjectileReturnImpact {
+                original,
+                returned: false,
+            });
+        let outer = std::mem::replace(&mut self.combat.projectile_return_impact, current);
+        let result = f(self);
+        self.combat.projectile_return_impact = outer;
+        result
+    }
+
+    pub(super) fn projectile_was_returned(&self, id: u32) -> bool {
+        self.combat
+            .projectile_return_impact
+            .as_ref()
+            .is_some_and(|impact| impact.original.id == id && impact.returned)
+    }
+
+    pub(super) fn borrowed_player_damage_projectile(
+        &self,
+        attack_projectile: Option<i32>,
+        source: &HurtSource<'_>,
+    ) -> bool {
+        self.combat
+            .projectile_return_impact
+            .as_ref()
+            .is_some_and(|impact| impact.original.describes_damage(attack_projectile, source))
+    }
+
+    pub(super) fn player_entity_damage_reacted(
+        &mut self,
+        player: PlayerRef,
+        source: &HurtSource<'_>,
+        attack_projectile: Option<i32>,
+        damage: f32,
+    ) -> bool {
+        let direct = u32::try_from(source.direct).ok().filter(|id| *id != 0);
+        let live_entity = direct.and_then(|id| self.entity(id));
+        let projectile = self.borrowed_player_damage_projectile(attack_projectile, source)
+            || attack_projectile == Some(source.direct)
+            || live_entity.is_some_and(|entity| self.projectile(entity).is_some());
+        let available = if matches!(
+            source.damage_type,
+            "minecraft:fireworks" | "minecraft:explosion" | "minecraft:player_explosion"
+        ) {
+            None
+        } else if let Some(impact) = self
+            .combat
+            .projectile_return_impact
+            .as_ref()
+            .filter(|impact| impact.original.describes_damage(attack_projectile, source))
+        {
+            (!impact.returned).then_some((impact.original, true))
+        } else {
+            live_entity.and_then(|entity| {
+                let p = self
+                    .creatures
+                    .projectiles
+                    .iter()
+                    .find(|p| p.id == entity.id())?;
+                ReturnedProjectile::from_projectile(p).map(|original| (original, false))
+            })
+        };
+        let admitted = available.map(|(original, in_impact)| AdmittedProjectileReturn {
+            player,
+            original,
+            in_impact,
+            returned: false,
+        });
+        let outer = std::mem::replace(&mut self.combat.admitted_projectile_return, admitted);
+        let mut cancel = false;
+        self.native_player_entity_damage_pre(mod_api::__private::PlayerEntityDamagePreCall {
+            player,
+            source,
+            projectile,
+            damage,
+            cancel: &mut cancel,
+        });
+        let finished = std::mem::replace(&mut self.combat.admitted_projectile_return, outer);
+        cancel || finished.is_some_and(|reflection| reflection.returned)
+    }
+
+    pub(super) fn can_return_player_damage_projectile(&self, player: PlayerRef) -> bool {
+        self.transactions.is_empty()
+            && self.native_acting_player() == Some(player)
+            && self
+                .combat
+                .admitted_projectile_return
+                .as_ref()
+                .is_some_and(|reflection| reflection.player == player && !reflection.returned)
+    }
+
+    pub(super) fn return_player_damage_projectile(&mut self, player: PlayerRef) -> bool {
+        if !self.can_return_player_damage_projectile(player) {
+            return false;
+        }
+        let entity = player.entity();
+        let (Some(eye), Some(rotation)) = (
+            self.entity_eye_position(entity),
+            self.entity_rotation(entity),
+        ) else {
+            return false;
+        };
+        let motion = return_velocity(rotation);
+        let position = std::array::from_fn(|axis| eye[axis] + motion[axis]);
+
+        // The entity join can call mods. While it runs this hit cannot be
+        // claimed again. The previous scope comes back on a refused spawn.
+        let mut reflection = self.combat.admitted_projectile_return.take().unwrap();
+        let original = reflection.original;
+        let owner = original.owner.filter(|owner| {
+            let uuid = horizon_client::lan::playerdata::ints_uuid(*owner);
+            self.target_by_uuid(uuid)
+                .is_some_and(|target| self.target_level(target) == self.dim)
+        });
+        reflection.returned = self
+            .summon(
+                self.dim.id(),
+                original.kind,
+                position,
+                original.nbt(motion, rotation, owner),
+            )
+            .is_some();
+        if reflection.returned {
+            if reflection.in_impact
+                && let Some(impact) = self.combat.projectile_return_impact.as_mut()
+                && impact.original.id == original.id
+            {
+                impact.returned = true;
+            }
+            if let Some(old) = self.entity(original.id) {
+                let _ = self.entity_discard(old);
+            }
+        }
+        let returned = reflection.returned;
+        self.combat.admitted_projectile_return = Some(reflection);
+        returned
+    }
+
     /// Snapshot the hit precondition so listener writes can invalidate its
     /// application without rerunning the collision decision.
     pub(super) fn native_impact_target(&self, hit: Hit) -> Option<ImpactTarget> {

@@ -178,6 +178,7 @@ impl Wire for crate::InsideEffects {
                 before: to_array("inside effects before writes", before)?,
                 after: to_array("inside effects after writes", after)?,
                 planned,
+                lava_damage: Default::default(),
             })
         })
     }

@@ -52,6 +52,7 @@ horizon-client game::attachment_index::tests::loaded_levels_keep_independent_ind
 horizon-client game::beehives::changed_tests::a_bee_going_in_marks_the_chunk lib daily resources
 horizon-client game::beehives::changed_tests::a_released_bee_marks_the_chunk lib daily resources
 horizon-client game::beehives::honey_overflow_tests::a_honey_bottle_that_does_not_fit_is_thrown_ahead lib daily resources
+horizon-client game::beehives::stay_tests::a_protected_hive_vetoes_honey_without_keeping_its_bee lib daily resources
 horizon-client game::beehives::stay_tests::every_ready_bee_of_a_hive_turn_gets_the_same_answer lib daily resources
 horizon-client game::block_editor::tests::a_local_jigsaw_edit_applies_and_marks_the_chunk lib daily resources
 horizon-client game::block_edits::tests::typed_bulk_late_refusals_preserve_the_world_and_emit_no_changes lib daily resources
@@ -766,6 +767,7 @@ horizon-client game::item_draw::tests::item_model_select_property_reads_the_mods
 horizon-client game::item_draw::tests::item_tint_source_reads_the_mods_colour lib daily resources
 horizon-client game::item_drop_state_tests::a_targeted_drop_is_picked_up_only_by_its_target lib daily resources
 horizon-client game::item_drop_state_tests::an_unlimited_lifetime_drop_outlives_an_ordinary_one lib daily resources
+horizon-client game::item_drop_state_tests::bonus_drops_observe_the_final_list_and_the_donkeys_original_chest lib daily resources
 horizon-client game::item_drop_state_tests::living_drops_state_reaches_the_dropped_item_entities lib daily resources
 horizon-client game::item_drop_state_tests::the_largest_age_wraps_on_its_first_tick lib daily resources
 horizon-client game::item_entities::destroyed_contents_tests::a_damaged_shulker_box_spills_its_stacks_upward lib daily resources
@@ -1164,12 +1166,14 @@ horizon-client game::native_damage_tests::a_hit_on_the_dragon_fires_pre_and_post
 horizon-client game::native_damage_tests::a_killing_blows_post_fires_once_before_the_death_hooks lib daily resources
 horizon-client game::native_damage_tests::arrow_hits_name_the_projectile_on_players_mobs_and_the_dragon lib daily resources
 horizon-client game::native_damage_tests::mob_and_dragon_post_records_fresh_hit_decision lib daily resources
+horizon-client game::native_damage_tests::player_entity_reaction_waits_for_protection_and_cooldown lib daily resources
 horizon-client game::native_damage_tests::post_fires_for_a_player_hit_a_shield_blocked_whole lib daily resources
 horizon-client game::native_damage_tests::post_fires_for_a_player_hit_that_absorption_took_whole lib daily resources
 horizon-client game::native_damage_tests::post_fires_once_for_a_killing_blow_on_a_mob lib daily resources
 horizon-client game::native_damage_tests::pre_draws_from_the_level_random_of_the_hit lib daily resources
 horizon-client game::native_damage_tests::pre_fires_for_a_hit_its_reductions_took_to_zero lib daily resources
 horizon-client game::native_damage_tests::pre_sets_the_health_lost_and_the_last_hurt_the_cooldown_compares lib daily resources
+horizon-client game::native_damage_tests::reflected_spectral_arrow_keeps_the_old_shooter_without_reinserting_the_old_arrow lib daily resources
 horizon-client game::native_damage_tests::snapshot_crosses_the_real_damage_hook_with_reductions lib daily resources
 horizon-client game::native_damage_tests::the_container_names_what_armor_took lib daily resources
 horizon-client game::native_damage_tests::the_original_damage_is_the_hit_before_the_incoming_hook lib daily resources

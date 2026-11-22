@@ -55,6 +55,10 @@ pub trait HiveHost {
     fn bees_stay_in_hive(&self, at: [i32; 3]) -> bool;
     /// A non-empty collision shape at a block.
     fn blocked(&self, at: [i32; 3]) -> bool;
+    /// Whether a nectar delivery may change the hive's block state.
+    fn allow_honey_change(&self, _at: [i32; 3], _bee: &Mob) -> bool {
+        true
+    }
     /// `BlockState.setValue(HONEY_LEVEL, level)` on the hive.
     fn set_honey_level(&mut self, at: [i32; 3], level: i32);
     /// `EntityType.loadEntityRecursive` (the tag has its `id` and a `Pos`):
@@ -357,7 +361,9 @@ fn release(
                 if level + increase > 5 {
                     increase -= 1;
                 }
-                host.set_honey_level(at, level + increase);
+                if host.allow_honey_change(at, &m) {
+                    host.set_honey_level(at, level + increase);
+                }
             }
         }
         let delta = if blocked {

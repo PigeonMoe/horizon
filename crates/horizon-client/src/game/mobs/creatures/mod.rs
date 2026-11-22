@@ -1831,7 +1831,18 @@ impl Game<'_> {
         dying: &DyingDrops<'_>,
         stacks: Vec<(ItemStack, [f64; 3], i32)>,
         pickup_delay: u32,
+        velocity: impl FnMut(&mut Self) -> Option<[f64; 3]>,
+    ) {
+        self.drop_death_items_with_mob(dying, stacks, pickup_delay, velocity, None);
+    }
+
+    fn drop_death_items_with_mob(
+        &mut self,
+        dying: &DyingDrops<'_>,
+        stacks: Vec<(ItemStack, [f64; 3], i32)>,
+        pickup_delay: u32,
         mut velocity: impl FnMut(&mut Self) -> Option<[f64; 3]>,
+        mob: Option<(&Mob, bool)>,
     ) {
         let Some(source) = &dying.source else {
             for (stack, position, age) in stacks {
@@ -1894,9 +1905,34 @@ impl Game<'_> {
         if cancel {
             return;
         }
+        let bonus = mob.map(|(mob, had_chest)| {
+            let position = [mob.position.x, mob.position.y, mob.position.z];
+            let stacks = self.collect_mob_death_bonus_drops(
+                dying.kind,
+                dying.credited_player,
+                mob,
+                had_chest,
+                drops.iter().map(|drop| drop.stack.clone()),
+            );
+            (stacks, position)
+        });
         for drop in drops {
             if drop.stack.count > 0 && &*drop.stack.item != "minecraft:air" {
                 self.add_item_drop(drop);
+            }
+        }
+        if let Some((stacks, position)) = bonus {
+            for stack in stacks {
+                if stack.count > 0 && &*stack.item != "minecraft:air" {
+                    let random = super::spill::prepare_item_random(None);
+                    self.add_item_entity_prepared(
+                        stack,
+                        position,
+                        Some(random.velocity),
+                        10,
+                        Some(random),
+                    );
+                }
             }
         }
     }
@@ -2102,13 +2138,19 @@ impl Game<'_> {
                 None => None,
             };
         }
-        let player = (p.owner == Some(Who::Player))
-            .then(|| horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid()));
-        let name = if player.is_some() {
-            self.acting_player_name().to_owned()
-        } else {
-            String::new()
-        };
+        let player = p
+            .owner_uuid
+            .filter(|_| p.owner == Some(Who::Player))
+            .map(horizon_client::lan::playerdata::ints_uuid);
+        let name = player.map_or_else(String::new, |uuid| {
+            if uuid == horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid()) {
+                self.acting_player_name().to_owned()
+            } else {
+                self.player(uuid)
+                    .and_then(|owner| self.player_name(owner))
+                    .unwrap_or_default()
+            }
+        });
         let (id, kind) = (p.id, p.entity_type());
         if let Some(a) = p.arrow.as_mut()
             && !p.stuck
@@ -5238,6 +5280,9 @@ impl Game<'_> {
     /// (`arrows::finish_entity_hit`): its sounds and drop, and back among the
     /// projectiles if it flies on.
     fn finish_arrow_hit(&mut self, mut arrow: Projectile, outcome: EntityHit) {
+        if self.projectile_was_returned(arrow.id) {
+            return;
+        }
         let keep = {
             let rain = self.arrow_rain();
             horizon_client::arrows::finish_entity_hit(&mut arrow, &self.arrow_scene(&rain), outcome)
@@ -5334,7 +5379,9 @@ impl Game<'_> {
     /// A projectile's hit, landed in the attack of its owner.
     pub(super) fn projectile_hit(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
         let attack = self.projectile_attack(p);
-        let result = self.with_attack(attack, |g| g.projectile_hit_landed(p, hit));
+        let result = self.with_projectile_return(p, |g| {
+            g.with_attack(attack, |g| g.projectile_hit_landed(p, hit))
+        });
         self.settle_dealt_absorbed(p.owner == Some(Who::Player));
         result?;
         // The hit's hurt teleports an enderman or a shulker now (`hurtServer`).

@@ -6,15 +6,16 @@ pub trait Hooks {
     /// The amount is the pending hit before armor, magic and absorption.
     /// The player's authoritative items, ender chest and effects are installed.
     /// Emitted for direct fire contact (`minecraft:in_fire`), unattributed
-    /// `minecraft:fall` after equipment protection, and `minecraft:starve`.
-    /// Cancelling any of these hits preserves the contact, landing or hunger tick.
+    /// `minecraft:fall` after equipment protection, `minecraft:starve`,
+    /// lava contact (`minecraft:lava`) and loss of air (`minecraft:drown`).
+    /// Cancelling a hit preserves the contact, landing, hunger or air tick.
     /// Burning after leaving the fire uses `minecraft:on_fire` on its usual path.
     #[hook(
         side = "server",
         contract = "cancel",
         out = "cancel",
         cancellable = true,
-        paper = "EntityDamageEvent (FIRE, FALL, STARVATION)"
+        paper = "EntityDamageEvent (FIRE, FALL, STARVATION, LAVA, DROWNING)"
     )]
     fn player_environment_damage_pre(
         player: PlayerRef,

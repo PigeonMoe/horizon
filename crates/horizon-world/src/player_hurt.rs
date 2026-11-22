@@ -30,7 +30,7 @@ pub fn player_hurt_server<W: PlayerHurtWorld>(
     w: &mut W,
     damage: f32,
 ) -> Result<bool, W::Error> {
-    let hit = player_hurt_until_helmet(s, w, damage)?;
+    let hit = player_hurt_until_helmet(s, w, damage, false)?;
     living_hurt::hurt_from_helmet(s, w, hit)
 }
 /// [`player_hurt_server`] up to `hurtHelmet`; none for a hit refused on the way.
@@ -38,6 +38,7 @@ pub fn player_hurt_until_helmet<W: PlayerHurtWorld>(
     s: &mut HurtState<W::Source>,
     w: &mut W,
     mut damage: f32,
+    observe_zero_damage: bool,
 ) -> Result<Option<PendingHurt<W::UseItem>>, W::Error> {
     if w.invulnerable(s)? {
         return Ok(None);
@@ -61,7 +62,7 @@ pub fn player_hurt_until_helmet<W: PlayerHurtWorld>(
             damage = damage * 3.0 / 2.0;
         }
     }
-    if damage == 0.0 {
+    if damage == 0.0 && !observe_zero_damage {
         return Ok(None);
     }
     living_hurt::hurt_until_helmet(s, w, damage)
@@ -95,7 +96,7 @@ pub fn server_player_hurt_server<W: ServerPlayerHurtWorld>(
     w: &mut W,
     damage: f32,
 ) -> Result<bool, W::Error> {
-    let hit = server_player_hurt_until_helmet(s, w, damage)?;
+    let hit = server_player_hurt_until_helmet(s, w, damage, false)?;
     living_hurt::hurt_from_helmet(s, w, hit)
 }
 /// [`server_player_hurt_server`] up to `hurtHelmet`; none for a hit refused on the way.
@@ -103,6 +104,7 @@ pub fn server_player_hurt_until_helmet<W: ServerPlayerHurtWorld>(
     s: &mut HurtState<W::Source>,
     w: &mut W,
     damage: f32,
+    observe_zero_damage: bool,
 ) -> Result<Option<PendingHurt<W::UseItem>>, W::Error> {
     if w.invulnerable(s)? {
         return Ok(None);
@@ -122,5 +124,5 @@ pub fn server_player_hurt_until_helmet<W: ServerPlayerHurtWorld>(
         }
         CausingEntity::Other => {}
     }
-    player_hurt_until_helmet(s, w, damage)
+    player_hurt_until_helmet(s, w, damage, observe_zero_damage)
 }

@@ -4001,6 +4001,8 @@ use crate::mobs::villager::professions::save::villager_data;
 /// `AbstractVillager` "Offers" (`MerchantOffers.CODEC`).
 fn put_offers(map: &mut Compound, m: &Mob) {
     let Some(t) = m.extra.trade.as_ref().filter(|t| !t.unset) else {
+        // The raw compound can still hold the offers adopted on load.
+        map.remove(&"Offers".into());
         return;
     };
     map.insert("Offers".into(), offers_to_nbt(&t.offers));
@@ -5071,6 +5073,44 @@ mod tests {
         ]);
         let mob = mob_from_nbt(&tag, &types, 7, None).unwrap();
         assert_eq!(villager_data(&mob), data);
+    }
+
+    #[test]
+    fn cleared_villager_offers_do_not_return_from_retained_nbt() {
+        let mut kind = crate::mobs::sensor_scan_tests::kind();
+        let def = Arc::make_mut(&mut kind);
+        def.id = "minecraft:villager".into();
+        def.species = crate::mobs::Species::Villager;
+        let types = [("minecraft:villager".into(), kind)].into();
+        let raw = horizon_core::nbt::parse_snbt(
+            r#"{id:"minecraft:villager",Pos:[1.5d,200.0d,4.5d],CustomName:"Ada",
+                VillagerData:{type:"minecraft:taiga",profession:"minecraft:librarian",level:4},
+                Xp:111,Offers:{Recipes:[{buy:{id:"minecraft:emerald",count:1},
+                                       sell:{id:"minecraft:diamond",count:1},maxUses:8,xp:7}]}}"#,
+        )
+        .unwrap()
+        .0;
+        let mut mob = mob_from_nbt(&raw, &types, 7, None).unwrap();
+        let trade = mob.extra.trade.as_mut().unwrap();
+        assert!(!trade.unset);
+        assert_eq!(trade.offers.len(), 1);
+        assert_eq!(trade.xp, 111);
+        trade.offers.clear();
+        trade.unset = true;
+        trade.xp = 0;
+        mob.extra.profession = crate::mobs::villager::ProfessionState::from_id("minecraft:none");
+        mob.extra.villager_level = 1;
+
+        let saved = mob_to_nbt(&mob, [1, 2, 3, 4], Some(&raw), None, |_| None);
+        assert_eq!(saved.get("Offers"), None);
+        assert_eq!(saved.get("CustomName"), raw.get("CustomName"));
+        let reloaded = mob_from_nbt(&saved, &types, 8, None).unwrap();
+        assert_eq!(reloaded.extra.profession.id(), "minecraft:none");
+        assert_eq!(reloaded.extra.villager_level, 1);
+        let trade = reloaded.extra.trade.as_ref().unwrap();
+        assert!(trade.unset);
+        assert!(trade.offers.is_empty());
+        assert_eq!(trade.xp, 0);
     }
 
     #[test]

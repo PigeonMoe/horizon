@@ -263,6 +263,100 @@ fn an_unlimited_lifetime_drop_outlives_an_ordinary_one() {
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn bonus_drops_observe_the_final_list_and_the_donkeys_original_chest() {
+    use horizon_client::mobs::{Damage, Mob};
+    use mod_api::MobDeathBonusDropsEvent;
+
+    struct Bonus(Arc<AtomicU8>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Bonus {
+        fn living_drops(&self, host: &mut dyn ServerHost, event: &mut LivingDropsEvent<'_>) -> Flow {
+            if self.0.fetch_add(1, Ordering::Relaxed) != 0 {
+                return Flow::Cancel;
+            }
+            let diamond = event
+                .drops
+                .iter_mut()
+                .find(|drop| drop.stack.item().id(host) == "minecraft:diamond")
+                .unwrap();
+            diamond.stack.set_count(6).unwrap();
+            Flow::Continue
+        }
+
+        fn mob_death_bonus_drops(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut MobDeathBonusDropsEvent<'_>,
+        ) {
+            assert_eq!(event.kind, "minecraft:donkey");
+            assert!(!event.can_pick_up_loot);
+            assert_eq!(self.0.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                event
+                    .protected_drops
+                    .iter()
+                    .map(|stack| (stack.item().id(host), stack.count()))
+                    .collect::<Vec<_>>(),
+                [("minecraft:chest".into(), 1), ("minecraft:diamond".into(), 4)]
+            );
+            let diamond = event
+                .drops
+                .iter()
+                .find(|stack| stack.item().id(host) == "minecraft:diamond")
+                .unwrap();
+            assert_eq!(diamond.count(), 6);
+            event.bonus_drops.push(diamond.clone());
+        }
+    }
+
+    let calls = Arc::new(AtomicU8::new(0));
+    let mods = vec![mod_api::ModEntry::new(
+        "mob-bonus-probe",
+        Box::new(Bonus(Arc::clone(&calls))),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        super::native_entity_refs::tests::with_game(|game| {
+            game.load_server_loot();
+            let kind = game.res.mob_types().get("minecraft:donkey").unwrap().clone();
+            let position = Vec3::new(2.5, 64.0, 6.5);
+            game.next_entity = 200;
+            for id in [100, 101] {
+                let mut donkey = Mob::new(id, kind.clone(), position, 0.0);
+                donkey.extra.chested = true;
+                donkey.extra.items = vec![Some(ItemStack::new("minecraft:diamond", 4))];
+                donkey.last_damage = Some((Damage::fall(), game.world.game_time));
+                donkey.health = 0.0;
+                let start = game.dropped.len();
+                game.mob_died(&donkey);
+                let drops = &game.dropped[start..];
+                if id == 100 {
+                    assert_eq!(
+                        drops
+                            .iter()
+                            .filter(|drop| &*drop.stack.item == "minecraft:diamond")
+                            .count(),
+                        2
+                    );
+                    let bonus = drops.last().unwrap();
+                    assert_eq!(
+                        (&*bonus.stack.item, bonus.stack.count),
+                        ("minecraft:diamond", 6)
+                    );
+                    assert_eq!(bonus.position, position);
+                    assert_eq!(bonus.pickup_delay, 10);
+                } else {
+                    assert!(drops.is_empty());
+                }
+            }
+        });
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
 /// A drop given `age` `i32::MAX` ticks and wraps to `i32::MIN`, as Java's int does, with no
 /// overflow panic.
 #[test]

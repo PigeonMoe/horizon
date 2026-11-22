@@ -959,6 +959,44 @@ enum BlockPass {
     ServerStuck,
 }
 
+/// A native player inside-block action, separated from the guest wire's
+/// ordinary effect/write vocabulary.
+pub enum PlayerInsideAction {
+    Apply(mod_api::PlannedInside),
+    LavaDamage,
+}
+
+/// The owned inside-block continuation. At a lava hurt callback the game can
+/// release its motion borrow and resume the remaining actions afterward.
+pub struct PlayerInsidePlan {
+    ordinary: std::vec::IntoIter<mod_api::PlannedInside>,
+    lava_damage: std::iter::Peekable<std::vec::IntoIter<usize>>,
+    applied: usize,
+}
+
+impl PlayerInsidePlan {
+    fn new(ordinary: Vec<mod_api::PlannedInside>, lava_damage: Vec<usize>) -> Self {
+        Self {
+            ordinary: ordinary.into_iter(),
+            lava_damage: lava_damage.into_iter().peekable(),
+            applied: 0,
+        }
+    }
+}
+
+impl Iterator for PlayerInsidePlan {
+    type Item = PlayerInsideAction;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.lava_damage.next_if_eq(&self.applied).is_some() {
+            return Some(PlayerInsideAction::LavaDamage);
+        }
+        let action = self.ordinary.next()?;
+        self.applied += 1;
+        Some(PlayerInsideAction::Apply(action))
+    }
+}
+
 pub struct MotionWorld<'p, 'w, 'r> {
     /// The authoritative acting player's current armor, borrowed for landing reactions.
     pub landing_equipment: Option<crate::landing::LandingEquipment<'w>>,
@@ -1514,11 +1552,22 @@ impl MotionWorld<'_, '_, '_> {
     /// snow's FREEZE, then `LivingEntity.aiStep`'s freezing and its damage.
     /// Its client moves it, so the slowing and the rest are the client's.
     pub fn server_block_damage(&mut self, from: Vec3) -> Result<()> {
+        let plan = self.plan_server_block_damage(from)?;
+        self.apply_inside_plan(plan)?;
+        self.finish_server_block_damage()
+    }
+
+    /// Prepare the server's inside-block flush while the motion state is borrowed.
+    pub fn plan_server_block_damage(&mut self, from: Vec3) -> Result<PlayerInsidePlan> {
         self.player.old_position = from;
         // Entity.baseTick
         self.player.was_in_powder_snow = self.player.in_powder_snow;
         self.player.in_powder_snow = false;
-        self.effects_from_blocks(BlockPass::ServerDamage)?;
+        self.plan_inside_effects(BlockPass::ServerDamage)
+    }
+
+    /// Freeze and thaw after the server has applied the inside-block plan.
+    pub fn finish_server_block_damage(&mut self) -> Result<()> {
         // LivingEntity.aiStep "freezing" (server).
         if !self.player.in_powder_snow || !self.player.can_freeze() {
             self.player.ticks_frozen = (self.player.ticks_frozen - 2).max(0);
@@ -1532,6 +1581,11 @@ impl MotionWorld<'_, '_, '_> {
         Ok(())
     }
     fn effects_from_blocks(&mut self, pass: BlockPass) -> Result<()> {
+        let plan = self.plan_inside_effects(pass)?;
+        self.apply_inside_plan(plan)
+    }
+
+    fn plan_inside_effects(&mut self, pass: BlockPass) -> Result<PlayerInsidePlan> {
         use horizon_world::entity_move::MovementRecord;
         let damage_only = pass != BlockPass::Client;
         let mut movements: Vec<MovementRecord> =
@@ -1557,7 +1611,7 @@ impl MotionWorld<'_, '_, '_> {
         }
         // isAffectedByBlocks: no physics for spectators.
         if self.player.spectator {
-            return Ok(());
+            return Ok(PlayerInsidePlan::new(Vec::new(), Vec::new()));
         }
         // Block.stepOn for the block under an entity on the ground:
         // MagmaBlock's hot floor hurts unless it steps carefully (sneaks).
@@ -1612,30 +1666,43 @@ impl MotionWorld<'_, '_, '_> {
             melt_step: None,
         };
         crate::block_contact::sweep_movements(&mut inside, &movements, &mut visited, &mut effects)?;
-        // `applyAndClear`: the plan applies in order, in this tick, until the
-        // player dies. The engine's own effects (the powder snow's freeze and
-        // extinguish) and the parts' typed writes flush together.
-        for planned in effects.take_planned() {
+        let (ordinary, lava_damage) = effects.take_with_lava_damage();
+        Ok(PlayerInsidePlan::new(ordinary, lava_damage))
+    }
+
+    // `applyAndClear`: the plan applies in order in this tick, until the player dies.
+    fn apply_inside_plan(&mut self, plan: PlayerInsidePlan) -> Result<()> {
+        for action in plan {
             if self.player.health.dead_or_dying() {
                 break;
             }
-            use mod_api::{InsideEffect, PlannedInside};
-            match planned {
-                PlannedInside::Effect(InsideEffect::Freeze) => {
-                    self.player.in_powder_snow = true;
-                    if self.player.can_freeze() {
-                        self.player.ticks_frozen = (self.player.ticks_frozen + 1)
-                            .min(PlayerMotion::TICKS_REQUIRED_TO_FREEZE);
-                    }
-                }
-                PlannedInside::Effect(InsideEffect::Extinguish) => {
-                    self.player.fire_ticks = self.player.fire_ticks.min(0);
-                }
-                // The player's own ignition paths (the lava cauldron's arm) run in
-                // the walk; no engine block queues the other types for it.
-                PlannedInside::Effect(_) => {}
-                PlannedInside::Write(write) => self.apply_entity_write(write)?,
+            match action {
+                PlayerInsideAction::Apply(planned) => self.apply_inside_action(planned)?,
+                PlayerInsideAction::LavaDamage => self.environment_hurt("minecraft:lava", 4.0)?,
             }
+        }
+        Ok(())
+    }
+
+    /// Apply one ordinary step of the inside-block plan, skipping nothing
+    /// around an engine callback paused by the authoritative game.
+    pub fn apply_inside_action(&mut self, planned: mod_api::PlannedInside) -> Result<()> {
+        use mod_api::{InsideEffect, PlannedInside};
+        match planned {
+            PlannedInside::Effect(InsideEffect::Freeze) => {
+                self.player.in_powder_snow = true;
+                if self.player.can_freeze() {
+                    self.player.ticks_frozen =
+                        (self.player.ticks_frozen + 1).min(PlayerMotion::TICKS_REQUIRED_TO_FREEZE);
+                }
+            }
+            PlannedInside::Effect(InsideEffect::ClearFreeze) => self.player.ticks_frozen = 0,
+            PlannedInside::Effect(InsideEffect::LavaIgnite) => self.player.ignite_for_ticks(300)?,
+            PlannedInside::Effect(InsideEffect::Extinguish) => {
+                self.player.fire_ticks = self.player.fire_ticks.min(0);
+            }
+            PlannedInside::Effect(InsideEffect::FireIgnite) => {}
+            PlannedInside::Write(write) => self.apply_entity_write(write)?,
         }
         Ok(())
     }
@@ -1817,14 +1884,6 @@ impl MotionWorld<'_, '_, '_> {
             self.player.stuck_multiplier = multiplier;
         }
         self.player.impulse.try_reset();
-    }
-    /// `LavaCauldronBlock.entityInside`: CLEAR_FREEZE, LAVA_IGNITE
-    /// (`Entity.lavaIgnite`, 15 seconds) and then `Entity.lavaHurt` (lava,
-    /// 4), as ordinary lava does to the player.
-    fn lava_cauldron_inside(&mut self) -> Result<()> {
-        self.player.ticks_frozen = 0;
-        self.player.ignite_for_ticks(300)?;
-        self.environment_hurt("minecraft:lava", 4.0)
     }
     /// `LayeredCauldronBlock.entityInside`: on a server, a burning player
     /// asks for the cauldron's `handleEntityOnFireInside` (runBefore
@@ -3005,7 +3064,15 @@ impl crate::block_contact::InsideWalk for PlayerInside<'_, '_, '_, '_> {
         // server-side effect.
         match name {
             "minecraft:cactus" => self.m.environment_hurt("minecraft:cactus", 1.0)?,
-            "minecraft:lava_cauldron" => self.m.lava_cauldron_inside()?,
+            "minecraft:lava_cauldron" => {
+                effects.apply(mod_api::InsideEffect::ClearFreeze);
+                effects.apply(mod_api::InsideEffect::LavaIgnite);
+                // Paper's lavaHurt checks ServerLevel; the client predicts the
+                // freezing/fire state and receives any health change from the server.
+                if !self.m.player.client_side {
+                    effects.run_after_lava_ignites();
+                }
+            }
             "minecraft:water_cauldron" | "minecraft:powder_snow_cauldron" => {
                 self.m.layered_cauldron_inside(p);
             }
@@ -3525,6 +3592,15 @@ mod tests {
         assert!(player.health.health() < 20.0, "the lava must hurt");
         assert!(player.fire_ticks > 0, "the lava must ignite");
         assert_eq!(player.ticks_frozen, 0);
+        // A connected client predicts the contact effects, while the server is
+        // the only body that settles the 4 damage or a plugin's protection.
+        let mut predicted = PlayerMotion::new(resources, Vec3::new(20.5, 4.25, 20.5)).unwrap();
+        predicted.client_side = true;
+        predicted.ticks_frozen = 40;
+        tick(&mut predicted);
+        assert_eq!(predicted.health.health(), 20.0);
+        assert!(predicted.fire_ticks > 0);
+        assert_eq!(predicted.ticks_frozen, 0);
         // Beside it, nothing.
         let mut away = PlayerMotion::new(resources, Vec3::new(22.5, 4.0, 20.5)).unwrap();
         tick(&mut away);
