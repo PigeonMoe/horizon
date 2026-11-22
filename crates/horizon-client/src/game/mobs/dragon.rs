@@ -1498,19 +1498,26 @@ impl Game<'_> {
     /// `EndCrystal.tick` in every dimension: the time (the spin and bob),
     /// and fire at its block where there is a dragon fight (the End).
     pub(super) fn tick_crystals(&mut self) {
-        let fire = (self.dimension_type().has_ender_dragon_fight)
-            .then(|| self.pack.assets.registry.default_state("minecraft:fire"))
-            .flatten();
+        let has_dragon_fight = self.dimension_type().has_ender_dragon_fight;
         for i in 0..self.crystals.len() {
             self.crystals[i].time += 1;
             self.crystal_block_effects(i);
             let p = self.crystals[i].position;
-            let b = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
-            if let Some(fire) = fire
-                && self.res.facts().is_air(self.world.block(b[0], b[1], b[2]))
-                && self.world.loaded(b[0], b[2])
+            let [x, y, z] = [p.x, p.y, p.z].map(|v| v.floor() as i32);
+            if has_dragon_fight
+                && self.world.loaded(x, z)
+                && self.res.facts().is_air(self.world.block(x, y, z))
             {
-                let _ = self.level_set(b, fire);
+                let pos = BlockPos::new(x, y, z);
+                // Paper checks ENDER_CRYSTAL ignition before resolving the fire's state.
+                let fire = self.with_level(|blocks, level, ticks| {
+                    level
+                        .block_ignite_allowed(pos, "ender_crystal")
+                        .then(|| blocks.fire_state_for(level, ticks, pos))
+                });
+                if let Some(fire) = fire {
+                    let _ = self.level_set([x, y, z], fire);
+                }
             }
         }
     }

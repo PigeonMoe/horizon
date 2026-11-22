@@ -111,3 +111,83 @@ impl Game<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{
+        Dim,
+        native_entity_refs::tests::{run_on_guest_stack, with_game},
+    };
+    use horizon_core::position::ChunkPos;
+    use mod_api::{BlockIgniteEvent, Flow, Hooks, LevelDimension, LevelHost, ModEntry};
+    use std::sync::{Arc, Mutex};
+
+    const PROTECTED: [i32; 3] = [4, 70, 4];
+    const OPEN: [i32; 3] = [8, 70, 4];
+
+    struct FireProtection(Arc<Mutex<Vec<[i32; 3]>>>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for FireProtection {
+        fn block_ignite(&self, _: &dyn LevelHost, event: &mut BlockIgniteEvent<'_>) -> Flow {
+            assert!(matches!(event.dimension, LevelDimension::End));
+            assert_eq!(event.cause, "ender_crystal");
+            assert_eq!(event.player, None);
+            let pos = [event.pos.x, event.pos.y, event.pos.z];
+            let mut calls = self.0.lock().unwrap();
+            let denied = pos == PROTECTED && !calls.contains(&PROTECTED);
+            calls.push(pos);
+            if denied { Flow::Cancel } else { Flow::Continue }
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn end_crystal_fire_checks_ignition_before_placing_and_retries_when_denied() {
+        run_on_guest_stack(|| {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mods = [ModEntry::new(
+                "crystal-ignition-protection",
+                Box::new(FireProtection(calls.clone())),
+            )];
+            mod_platform::testing::with_mods(mods.into(), || {
+                with_game(|game| {
+                    game.dim = Dim::End;
+                    game.reset_entity_residency();
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                    game.block_ticks
+                        .add_empty_chunk(ChunkPos::new(0, 0))
+                        .unwrap();
+                    let registry = game.pack.assets.registry;
+                    for (id, [x, y, z], floor) in [
+                        (71, PROTECTED, "minecraft:obsidian"),
+                        (72, OPEN, "minecraft:soul_soil"),
+                    ] {
+                        game.world
+                            .set(x, y - 1, z, registry.default_state(floor).unwrap())
+                            .unwrap();
+                        let position = Vec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
+                        game.crystals.push(Crystal::new(id, position, false, 0));
+                    }
+
+                    game.tick_crystals();
+                    assert_eq!(*calls.lock().unwrap(), [PROTECTED, OPEN]);
+                    assert_eq!(game.world.block(4, 70, 4), game.world.air);
+                    let soul_fire = registry.default_state("minecraft:soul_fire").unwrap();
+                    assert_eq!(game.world.block(8, 70, 4), soul_fire);
+                    assert!(game.crystals.iter().all(|crystal| crystal.time == 1));
+
+                    game.tick_crystals();
+                    assert_eq!(*calls.lock().unwrap(), [PROTECTED, OPEN, PROTECTED]);
+                    let fire = registry.default_state("minecraft:fire").unwrap();
+                    assert_eq!(game.world.block(4, 70, 4), fire);
+                    assert_eq!(game.world.block(8, 70, 4), soul_fire);
+                    assert!(game.crystals.iter().all(|crystal| crystal.time == 2));
+                });
+            });
+        });
+    }
+}
