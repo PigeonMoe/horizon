@@ -425,7 +425,7 @@ impl Drop for Server {
 /// The longest request line a connection may send. The game reads and parses a request on its
 /// own thread between two ticks, so one without bound could stall the server (a proxy's
 /// `player-import` carries a whole player, a few hundred kilobytes at most).
-const MAX_LINE: u64 = 16 << 20;
+pub const MAX_LINE: u64 = 16 << 20;
 
 fn serve(stream: Stream, sender: &mpsc::Sender<Request>) {
     let Ok(mut writer) = stream.try_clone() else {

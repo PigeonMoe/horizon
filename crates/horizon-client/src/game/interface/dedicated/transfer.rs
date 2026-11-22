@@ -7,11 +7,10 @@
 //! record and lets the held player in), and `transfer-status` (the counts a proxy reads before
 //! it sends players here). They run
 //! between two ticks, on the server thread, so the player is never caught half-way through a
-//! tick. The rules are `lan/arrivals.rs`'s. All of them are refused while `server.toml`'s
-//! `[transfer]` is off, and those that bring a player in once the server has begun to stop.
-use crate::game::{Dim, Game};
+//! tick. Legacy transfers and new source captures require `[transfer]`. The strict source's
+//! status and retirement commands can reconcile existing journal entries after a config change.
+use crate::game::Game;
 use horizon_client::lan::{arrivals, import};
-use horizon_protocol::packets::play::{self, Clientbound as C};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -124,6 +123,12 @@ impl Game<'_> {
     }
 
     fn run_player_request(&mut self, verb: &str, args: &str) -> Value {
+        if matches!(
+            verb,
+            "player-profile-export" | "player-profile-status" | "player-profile-retire"
+        ) {
+            return self.run_profile_source_request(verb, args);
+        }
         let Some(host) = self.lan.as_ref() else {
             return json!({ "error": "the server is not open to players" });
         };
@@ -529,49 +534,12 @@ impl Game<'_> {
             return arrivals::export_reply(&host.hub, i, h.record.clone());
         }
         let conn = host.hub.guests[i].conn;
-        let window = host.hub.guests[i].menu.as_ref().map(|m| m.window);
-        // The menu closes in the player's own level, as when it leaves (`game/network/lan/mod.rs`'s close of
-        // every guest): a chest's lid, a villager's trade and a dropped cursor stack belong there.
-        let back = self.dim;
-        let level = Dim::from_id(&host.hub.guests[i].dimension);
-        if let Err(e) = self.enter_level(level) {
-            return json!({ "error": format!("the player's level could not be opened: {e}") });
-        }
-        // Nothing is sent to the client by this: it is for a player who is leaving.
-        self.guest_close_all(conn);
-        // The inventory's own 2x2 grid too (`InventoryMenu.removed`): `guest_close_all` empties it
-        // only with a real `ContainerClose(0)`, and a frozen client's is dropped. Its items are
-        // not in the player compound, so they would be lost with `player-release moved`.
-        self.lan_crafting_closed(conn, Some(0));
-        if let Err(e) = self.enter_level(back) {
-            log::error!("could not reopen {}: {e}", back.id());
-        }
+        let i = match self.settle_transfer_menus(conn) {
+            Ok(i) => i,
+            Err(error) => return json!({ "error": error }),
+        };
+        let records = self.transfer_source_records(i);
         let host = self.lan.as_mut().expect("server host is present");
-        let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn) else {
-            return json!({ "error": "that player is not connected to this server" });
-        };
-        // The player may stay (a hand-over that does not finish): its client closes the menu too
-        // and shows the inventory as it now is.
-        if let Some(container) = window {
-            host.hub
-                .send_to(conn, &C::ContainerClose(play::ContainerClose { container }));
-        }
-        host.hub.send_inventory(i);
-        let advancements = if self.adv.tree.list.is_empty() {
-            Value::Null
-        } else {
-            host.hub.guests[i]
-                .advancements
-                .to_json(&self.adv.tree, horizon_world::DATA_VERSION)
-        };
-        let stats = host
-            .play
-            .get(&conn)
-            .map_or(Value::Null, |p| p.stats.to_json());
-        let records = arrivals::Records {
-            advancements,
-            stats,
-        };
         let local_receipts = host.hub.guests.update(i, receipt::Hidden::take);
         let exported = arrivals::export_record(&mut host.hub, i, freeze, records);
         host.hub

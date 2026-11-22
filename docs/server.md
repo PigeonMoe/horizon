@@ -394,6 +394,37 @@ Every step that is not taken in time is undone by itself: an expectation after `
 `max_hold_seconds`, a freeze after `max_freeze_seconds`, each with a warning in the log. A `moved` that comes after
 the freeze ran out is refused, so the proxy must confirm and release within `max_freeze_seconds` of the export.
 
+**Durable plugin profiles.** Configure a stable backend ID and the complete profile roster on both servers.
+The destination lists approved source backend IDs. For example, the `east` destination can accept records from `west`.
+
+```toml
+[transfer]
+enabled = true
+backend_id = "east"
+allowed_sources = ["west"]
+
+[transfer.required_profiles]
+"slimefun:profile" = 1
+```
+
+The proxy uses the backends' administrative control endpoints and keeps the same hand-over ID on retries.
+
+1. Reserve the arrival on `east` with `player-expect <uuid>`.
+2. Choose a nonzero 32-digit hexadecimal hand-over ID. On `west`, call `player-profile-export <uuid> <hand-over> east`.
+   The response contains the portable `record`, its `record_sha256` and the `pending` phase. The source keeps its
+   connection available for the proxy while the player's gameplay is frozen.
+3. Connect to `east`. Call `player-import <uuid> <json>` with the complete `record` and `"place": false`.
+   Save the `source`, `destination`, `record_sha256` and `request_sha256` from the staged reply.
+4. On `west`, call `player-profile-retire <uuid> <hand-over> east <record_sha256>` and wait for the `retired` phase.
+5. On `east`, call `player-confirm <uuid> <hand-over> west east <record_sha256> <request_sha256>`. The destination
+   saves the profile and its receipt before activating the player.
+
+On a lost reply, `player-profile-status <uuid> <hand-over> <destination>` recovers the source phase.
+An identical export returns the same record, and identical retirement and confirmation requests reuse their
+receipts. A destination reply with `already_committed` and `currently_placed: false` acknowledges a historical
+commit and leaves the current connection alone. The durable source fence survives restart and remains effective
+until the coordinator completes ownership recovery. The legacy freeze timer and `player-release` apply to version 1.
+
 **A server that stops.** From the `/stop` command (the console's, a player's or the control endpoint's) or a stop
 signal on, `player-expect`, `player-import` and `player-confirm` are refused `{"error": "the server is stopping"}`: a
 player must not arrive on a server that is about to close. The proxy drops the held player there and aborts on the
