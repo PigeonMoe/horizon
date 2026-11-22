@@ -2760,6 +2760,7 @@ dependencies = [
  "horizon-protocol",
  "horizon-world",
  "log",
+ "mysql",
  "serde",
  "sha2",
  "ureq",
