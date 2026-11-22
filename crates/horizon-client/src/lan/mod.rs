@@ -44,6 +44,7 @@ mod payload_bounds_tests;
 pub mod pigeon_auth;
 pub mod player_shown;
 pub mod playerdata;
+pub mod pm_sync_paper;
 pub mod prediction;
 mod profile_sections;
 mod profile_storage;
