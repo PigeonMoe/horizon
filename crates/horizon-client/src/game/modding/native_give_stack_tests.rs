@@ -87,7 +87,7 @@ fn saved_gzip_item_export_keeps_count_and_typed_paper_components() {
             .unwrap();
         let (saved, consumed) = read_named(&raw, Limits::default()).unwrap();
         assert_eq!(consumed, raw.len());
-        assert!(saved.name.is_empty());
+        assert_eq!(saved.name, horizon_core::nbt::JavaString::default());
         let Tag::Compound(mut saved) = saved.tag else {
             panic!("encoded stack must have a compound root");
         };
