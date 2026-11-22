@@ -1700,10 +1700,22 @@ impl Game<'_> {
     /// `getDismountLocationForPassenger`: in front of the player if there is
     /// floor there, else on top of the boat.
     pub(super) fn dismount(&mut self, i: usize) {
-        let id = self.boats[i].id;
-        if self.riding == Some(id) && !self.native_may_leave(id) {
-            return;
+        if let Some(target) = self.prepare_boat_dismount(i)
+            && let Some(p) = self.player.as_mut()
+        {
+            p.position = target;
+            p.velocity = Vec3::ZERO;
         }
+    }
+
+    /// Detach the rider and calculate the ordinary landing without placing
+    /// the player. A boat inside a portal uses the free-position dismount.
+    pub(super) fn prepare_boat_dismount(&mut self, i: usize) -> Option<Vec3> {
+        let id = self.boats[i].id;
+        if self.riding == Some(id) && (!self.native_may_leave(id) || self.riding != Some(id)) {
+            return None;
+        }
+        let i = self.boats.iter().position(|b| b.id == id)?;
         self.riding = None;
         // `AbstractBoat.tick`'s non-authoritative branch: the copy of a boat
         // that no player of this side drives drops its cached motion
@@ -1713,13 +1725,9 @@ impl Game<'_> {
         self.boats.update(i, |b| b.velocity = Vec3::ZERO);
         self.boats.update(i, |b| b.delta_rotation = 0.0);
         if self.dismount_in_portal(self.boats[i].position) {
-            return;
+            return None;
         }
-        let target = self.boat_player_dismount_target(i, self.yaw);
-        if let Some(p) = self.player.as_mut() {
-            p.position = target;
-            p.velocity = Vec3::ZERO;
-        }
+        Some(self.boat_player_dismount_target(i, self.yaw))
     }
     /// Where the boat at `i` lets a player facing `yaw` off.
     pub(super) fn boat_player_dismount_target(&self, i: usize, yaw: f32) -> Vec3 {

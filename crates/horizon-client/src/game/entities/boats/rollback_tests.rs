@@ -145,6 +145,156 @@ fn received_packets(packets: &mpsc::Receiver<Out>) -> Vec<Clientbound> {
 
 #[test]
 #[ignore = "daily"]
+fn a_boat_dismount_teleport_can_be_denied_without_keeping_the_seat() {
+    use horizon_client::lan::guest::InboxItem;
+    use horizon_protocol::packets::play::{PlayerInput, Serverbound, relative};
+    use mod_api::PlayerPositionCommittedEvent;
+
+    #[derive(Debug, PartialEq)]
+    enum Notice {
+        Proposed(u128, [f64; 3], [f64; 3]),
+        Committed(u128, [f64; 3], [f64; 3]),
+    }
+
+    struct Landing(Arc<Mutex<Vec<Notice>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Landing {
+        fn player_teleport_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.cause, "dismount");
+            assert_eq!(
+                (event.from_level, event.to_level),
+                ("minecraft:overworld", "minecraft:overworld")
+            );
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.vehicle(host), None);
+            assert_eq!(rider.position(host), Some(event.from));
+            self.0
+                .lock()
+                .unwrap()
+                .push(Notice::Proposed(event.player, event.from, event.to));
+            if event.player == FIRST {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_position_committed(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerPositionCommittedEvent<'_>,
+        ) {
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.vehicle(host), None);
+            assert_eq!(rider.position(host), Some(event.to));
+            self.0
+                .lock()
+                .unwrap()
+                .push(Notice::Committed(event.player, event.from, event.to));
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new(
+                "dismount_region",
+                Box::new(Landing(seen.clone())),
+            )]
+            .into(),
+            || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    launch(game);
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world.set(7, 199, 9, stone).unwrap();
+                    let hull = game.entity(BOAT).unwrap();
+                    let velocity = Vec3::new(0.25, 0.0, 0.0);
+                    for uuid in [FIRST, SECOND] {
+                        let conn = uuid as u32;
+                        let rider = game.player(uuid).unwrap().entity();
+                        assert!(game.entity_start_riding(rider, hull, true));
+                        game.guest_boarded(conn, None);
+                        let (sender, packets) = mpsc::channel();
+                        game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                            guest.sender = PlayerSender::new(sender, Arc::default());
+                            guest.loaded = true;
+                            guest.load_timeout = 0;
+                            guest.awaiting_teleport = None;
+                            guest.motion.as_mut().unwrap().velocity = velocity;
+                            guest.inbox.push_back(InboxItem::Packet(
+                                Serverbound::PlayerInput(PlayerInput { flags: 32 }),
+                                None,
+                            ));
+                        });
+                        game.level_pass.packets_drained = false;
+                        game.tick_lan_packets();
+                        let guest = game.command_guest(conn).unwrap();
+                        assert!(guest.sneaking, "player {uuid} did not receive sneak input");
+                        let from = guest.position;
+                        let target = game.boat_player_dismount_target(0, guest.yaw).components();
+                        assert_ne!(from.map(f64::floor), target.map(f64::floor));
+                        game.guest_vehicle_tick(conn);
+
+                        let expected = if uuid == FIRST { from } else { target };
+                        let guest = game.command_guest(conn).unwrap();
+                        assert_eq!(guest.vehicle, None);
+                        assert_eq!(guest.position, expected);
+                        assert_eq!(guest.awaiting_teleport.unwrap().1, expected);
+                        let (momentum, relatives) = if uuid == FIRST {
+                            (Vec3::ZERO, 0)
+                        } else {
+                            (
+                                velocity,
+                                relative::DELTA_X
+                                    | relative::DELTA_Y
+                                    | relative::DELTA_Z
+                                    | relative::ROTATE_DELTA
+                                    | relative::X_ROT
+                                    | relative::Y_ROT,
+                            )
+                        };
+                        assert_eq!(guest.motion.as_ref().unwrap().velocity, momentum);
+                        let messages = received_packets(&packets);
+                        let updates: Vec<_> = messages
+                            .iter()
+                            .filter(|packet| {
+                                matches!(
+                                    packet,
+                                    Clientbound::SetPassengers(_) | Clientbound::PlayerPosition(_)
+                                )
+                            })
+                            .collect();
+                        assert!(matches!(
+                            updates.as_slice(),
+                            [Clientbound::SetPassengers(seats), Clientbound::PlayerPosition(at)]
+                            if seats.vehicle == BOAT as i32 && seats.passengers.is_empty()
+                                && at.position == expected && at.relatives == relatives
+                        ));
+                        let events = std::mem::take(&mut *seen.lock().unwrap());
+                        let mut expected_notices = vec![Notice::Proposed(uuid, from, target)];
+                        if uuid == SECOND {
+                            expected_notices.push(Notice::Committed(uuid, from, target));
+                        }
+                        assert_eq!(events, expected_notices);
+                    }
+                });
+            },
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_rider() {
     run_on_guest_stack(|| {
         for policy in [

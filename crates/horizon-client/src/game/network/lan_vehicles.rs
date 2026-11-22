@@ -52,6 +52,14 @@ pub(super) struct WatchedVehicle {
     still: u32,
 }
 
+struct BoatDismount {
+    player: u128,
+    entity: i32,
+    level: Dim,
+    from: Vec3,
+    landing: Option<Vec3>,
+}
+
 impl Game<'_> {
     /// Where the boat or minecart `id` of this level is.
     fn watched_vehicle_position(&self, id: u32) -> Option<[f64; 3]> {
@@ -271,8 +279,9 @@ impl Game<'_> {
                     .update(gi, |guest| guest.vehicle_good = value);
             }
         }
-        // Getting out goes through leave_guest, which tells the client and
-        // teleports it (ServerPlayer.dismountTo).
+        // The guest turn publishes the seat change. A boat's landing is
+        // committed separately after the teleport hook has run.
+        let mut boat_dismount = None;
         let seat = self.as_guest(conn, |game| {
             // A cushion does not move: the rider sits on it until it sneaks
             // (`Cushion.removePassenger` plays the get-up sound).
@@ -293,7 +302,7 @@ impl Game<'_> {
             }
             if let Some(i) = game.boats.iter().position(|b| Some(b.id) == game.riding) {
                 if keys.shift || ejected {
-                    game.dismount(i);
+                    boat_dismount = game.admit_guest_boat_dismount(i);
                     return None;
                 }
                 let p = game.player_boat_seat(i);
@@ -310,12 +319,95 @@ impl Game<'_> {
             let p = game.player.as_ref()?.position;
             Some([p.x, p.y, p.z])
         });
+        if let Some(dismount) = boat_dismount {
+            self.finish_guest_boat_dismount(conn, dismount);
+        }
         if let Some(Some(at)) = seat
             && let Some(host) = self.lan.as_mut()
         {
             host.hub.guests.update(gi, |g| {
                 g.previous_position = g.position;
                 g.position = at;
+            });
+        }
+    }
+
+    fn admit_guest_boat_dismount(&mut self, boat: usize) -> Option<BoatDismount> {
+        let landing = self.prepare_boat_dismount(boat)?;
+        let rider = self.player.as_ref()?;
+        let (entity, from, level) = (rider.entity_id, rider.position, self.dim);
+        let player = horizon_client::lan::playerdata::ints_uuid(self.acting_uuid());
+        let allowed = from == landing || self.current_player_teleport_allowed(landing, "dismount");
+        // The writable callback can move, remove or remount the rider.
+        (self.dim == level
+            && self.riding.is_none()
+            && horizon_client::lan::playerdata::ints_uuid(self.acting_uuid()) == player
+            && self.player.as_ref().is_some_and(|rider| {
+                rider.entity_id == entity && rider.position == from && !rider.health.dead_or_dying()
+            }))
+        .then_some(BoatDismount {
+            player,
+            entity,
+            level,
+            from,
+            landing: allowed.then_some(landing),
+        })
+    }
+
+    /// The guest turn has detached the seat. Send its separately cancellable
+    /// `ServerPlayer.dismountTo` position packet after the passenger update.
+    fn finish_guest_boat_dismount(&mut self, conn: u32, dismount: BoatDismount) {
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        let Some(index) = host.hub.guests.connection_index(conn) else {
+            return;
+        };
+        let rider = &host.hub.guests[index];
+        if self.dim != dismount.level
+            || rider.dimension != dismount.level.id()
+            || rider.uuid != dismount.player
+            || rider.entity_id != dismount.entity
+            || rider.position != dismount.from.components()
+            || rider.vehicle.is_some()
+            || rider.dead
+        {
+            return;
+        }
+        let at = dismount.landing.unwrap_or(dismount.from);
+        host.hub.guests.update(index, |rider| {
+            if let Some(body) = rider.motion.as_mut() {
+                body.position = at;
+                if dismount.landing.is_none() {
+                    body.velocity = Vec3::ZERO;
+                }
+            }
+        });
+        if dismount.landing.is_some() {
+            host.hub.teleport_keeping_motion(index, at.components());
+        } else {
+            host.hub.teleport(index, Some(at.components()));
+        }
+        if at == dismount.from {
+            return;
+        }
+        if let Ok(id) = u32::try_from(dismount.entity) {
+            self.entity_section_step(id, dismount.from.components(), at.components());
+        }
+        if self.player_position_listened() {
+            self.as_guest(conn, |game| {
+                if game.dim == dismount.level
+                    && game.riding.is_none()
+                    && game.player.as_ref().is_some_and(|rider| {
+                        rider.entity_id == dismount.entity && rider.position == at
+                    })
+                {
+                    game.notify_player_position(
+                        dismount.player,
+                        (dismount.level, dismount.from.components()),
+                        (dismount.level, at.components()),
+                    );
+                }
             });
         }
     }
