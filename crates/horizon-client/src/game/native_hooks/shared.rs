@@ -1091,7 +1091,8 @@ impl Game<'_> {
     /// box's edit: what the listeners leave of `field` goes back to the box
     /// before the character does. Whether they cancelled the character.
     fn screen_char_canceled(&mut self, c: char) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre)
+        if self.dialog_password_input()
+            || !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre)
             || !self.screen_hooks_open()
         {
             return false;

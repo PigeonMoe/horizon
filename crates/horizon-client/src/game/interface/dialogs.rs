@@ -1219,6 +1219,16 @@ impl Game<'_> {
             .is_some_and(|open| open.fields.iter().any(Option::is_some))
     }
 
+    pub(super) fn dialog_password_input(&self) -> bool {
+        self.dialogs.open.as_ref().is_some_and(|open| {
+            let field = match open.focus {
+                Some(focused) => open.fields.get(focused).and_then(Option::as_ref),
+                None => open.fields.iter().find_map(Option::as_ref),
+            };
+            matches!(field, Some(Field::Line(edit)) if edit.obscured)
+        })
+    }
+
     /// `type TEXT` with a dialog open: into the focused text input, or the
     /// first one.
     pub(super) fn dialog_type(&mut self, text: &str) -> bool {
