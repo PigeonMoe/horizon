@@ -1440,7 +1440,12 @@ impl Game<'_> {
     /// into the level (`/data`) and both its files (`playerdata::save_owner`),
     /// anyone else into their own file.
     pub(super) fn save_guest(&mut self, guest: &mut horizon_client::lan::guest::Guest) {
-        if !guest.participates_in_player_simulation() {
+        if !guest.participates_in_player_simulation()
+            || self
+                .lan
+                .as_ref()
+                .is_some_and(|host| host.hub.source_frozen_handover(guest.uuid).is_some())
+        {
             return;
         }
         // A proxy released this record to another server, which now owns saving it.
@@ -1607,7 +1612,10 @@ impl Game<'_> {
     /// live record, independently of the dirty entries sent to their client.
     pub(super) fn save_connected_guest_statistics(&self, host: &LanHost) {
         for guest in &host.hub.guests {
-            if !guest.placed || guest.released {
+            if !guest.placed
+                || guest.released
+                || host.hub.source_frozen_handover(guest.uuid).is_some()
+            {
                 continue;
             }
             let Some(uuid) = self.records_uuid(host, guest.uuid) else {

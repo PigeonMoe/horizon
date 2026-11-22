@@ -452,6 +452,9 @@ pub fn check_freeze(hub: &Hub, i: usize, now: Instant) -> Result<(), &'static st
 /// Why the connected player `uuid` cannot be exported now, or the index of its
 /// guest. A held player is not exportable: it has no state of its own yet.
 pub fn check_exportable(hub: &Hub, uuid: u128) -> Result<usize, &'static str> {
+    if hub.source_frozen_handover(uuid).is_some() {
+        return Err("the player is fenced by a source hand-over");
+    }
     let Some(i) = hub.guests.iter().position(|g| g.uuid == uuid) else {
         return Err("that player is not connected to this server");
     };

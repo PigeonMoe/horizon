@@ -1180,6 +1180,18 @@ fn serve_login(
             None => (offline_uuid(&hello.name), Vec::new()),
         },
     };
+    if shared.source_frozen_handover(uuid).is_some() {
+        let text = refuse(
+            &mut c,
+            shared,
+            "Server thread",
+            &user,
+            &super::source_handover::refusal(),
+        );
+        lost(shared, &user, &text);
+        return Ok(());
+    }
+
     // An unprepared login on a profile receiver must not reserve a place or
     // evict an existing copy of the same UUID through the duplicate gate.
     let required_expectation = match shared.config.arrivals.as_ref().map_or(Ok(None), |table| {
@@ -2901,6 +2913,52 @@ mod tests {
             again.contains("multiplayer.disconnect.transfers_disabled"),
             "{again}"
         );
+    }
+
+    #[test]
+    fn a_reopened_source_handover_fences_logins_without_transfer_settings() {
+        use crate::lan::source_handover::{Handover, Journal};
+        let world = tempfile::tempdir().unwrap();
+        let name = "Alex";
+        let owner = offline_uuid(name);
+        let handover = Handover {
+            owner,
+            id: 7,
+            destination: "receiver".into(),
+            record: b"portable snapshot".to_vec(),
+            local_checkpoint: b"local snapshot".to_vec(),
+        };
+        let journal = Journal::open(world.path()).unwrap();
+        journal.prepare(&handover).unwrap();
+        journal
+            .retire(
+                owner,
+                handover.id,
+                &handover.destination,
+                handover.record_digest(),
+            )
+            .unwrap();
+        drop(journal);
+
+        let config = crate::lan::NetConfig {
+            listen: false,
+            accepts_transfers: true,
+            source_handovers: Some(Arc::new(Journal::open(world.path()).unwrap())),
+            ..crate::lan::NetConfig::loopback(0, "Source fence".into(), 8)
+        };
+        let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
+        let refused =
+            transfer_login(Connection::local(lan.connect_local().unwrap()), name).unwrap_err();
+        assert!(
+            refused.contains("horizon.transfer.source_fenced"),
+            "{refused}"
+        );
+        assert!(!lan.poll().into_iter().any(|event| matches!(
+            event.into_parts().0,
+            NetEvent::Joined(_) | NetEvent::Duplicate(_)
+        )));
+        transfer_login(Connection::local(lan.connect_local().unwrap()), "Steve")
+            .expect("the fence belongs to one owner");
     }
 
     #[test]

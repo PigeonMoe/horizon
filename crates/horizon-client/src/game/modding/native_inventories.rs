@@ -186,6 +186,9 @@ impl Game<'_> {
         let Some(host) = self.lan.as_ref() else {
             return Err("no server".into());
         };
+        if host.hub.source_frozen_handover(uuid).is_some() {
+            return Err("the player is fenced by a source hand-over".into());
+        }
         if let Some(i) = host.hub.guests.iter().position(|g| g.uuid == uuid) {
             let g = &host.hub.guests[i];
             return if !g.placed {

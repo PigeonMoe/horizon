@@ -41,7 +41,13 @@ impl Game<'_> {
         if !saved.is_empty() {
             let directory = horizon_client::lan::playerdata::directory(&self.world_root);
             for player in saved {
-                self.native_player_save_to_file(player.uuid, &player.name, &directory);
+                if !self
+                    .lan
+                    .as_ref()
+                    .is_some_and(|host| host.hub.source_frozen_handover(player.uuid).is_some())
+                {
+                    self.native_player_save_to_file(player.uuid, &player.name, &directory);
+                }
             }
         }
         self.player_autosaves.writes_finished()
@@ -90,8 +96,9 @@ impl Game<'_> {
         {
             // The vehicle tree goes into a player's file when they leave
             // (`take_parent_vehicle`); here it stays in the chunk saves.
+            let shared = &host.hub.lan.shared;
             host.hub.guests.update_all(|g| {
-                if g.placed {
+                if g.placed && shared.source_frozen_handover(g.uuid).is_none() {
                     // Read-only fixture input, correlated with the real save receipt.
                     // Keep this identical on the untouched/fixed selector builds.
                     if std::env::var_os("HORIZON_DEV_ADVANCEMENT_SELECTOR_AUDIT").is_some() {

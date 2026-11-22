@@ -1229,6 +1229,9 @@ impl Game<'_> {
             .transfers
             .clone()
             .map(horizon_client::lan::arrivals::Transfers::new);
+        let source_handovers =
+            horizon_client::lan::source_handover::Journal::open(&self.world_root)
+                .map_err(|error| format!("could not open source hand-over journal: {error}"))?;
         if transfers.is_some() && forwarding_secret.is_none() {
             return Err("server.toml's [transfer] is on, but players can join this server without the proxy: \
                  turn on Velocity forwarding (forwarding.secret, docs/velocity-forwarding.md) or turn [transfer] off"
@@ -1264,6 +1267,7 @@ impl Game<'_> {
             pigeon_auth,
             forwarding_secret,
             arrivals: transfers.as_ref().map(|t| t.expected.clone()),
+            source_handovers: Some(Arc::new(source_handovers)),
             log: Some(NetLog {
                 write: Arc::new(log_from),
                 lang: Arc::new(horizon_client::net::load_language(&self.options.resources)),

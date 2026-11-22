@@ -69,6 +69,13 @@ impl Game<'_> {
         if keys.iter().any(|key| key.namespace() != owner) {
             return Err(Error::NotOwned);
         }
+        if self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.source_frozen_handover(uuid).is_some())
+        {
+            return Err(Error::Unavailable);
+        }
 
         if let Some(player) = self.player(uuid) {
             let saved = match self.player_handle_read(player).ok_or(Error::Unavailable)? {
@@ -135,6 +142,13 @@ impl Game<'_> {
         }
         if mod_api::content::crash::current_native_mod() != Some(id.namespace()) {
             return Err(Error::NotOwned);
+        }
+        if self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.source_frozen_handover(owner).is_some())
+        {
+            return Err(Error::Transferring);
         }
         let live_guest = self.lan.as_ref().and_then(|host| {
             host.hub

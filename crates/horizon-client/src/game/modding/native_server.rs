@@ -787,6 +787,9 @@ impl Game<'_> {
 
     pub(super) fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
         let hub = &self.lan.as_ref()?.hub;
+        if let Some(id) = hub.source_frozen_handover(owner) {
+            return Some(id);
+        }
         hub.transfers.as_ref()?;
         let guest = hub.guests.iter().find(|guest| {
             guest.uuid == owner && guest.placed && !guest.held && guest.participates_online()

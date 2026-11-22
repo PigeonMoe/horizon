@@ -1769,6 +1769,10 @@ impl Hub {
         });
     }
 
+    pub fn source_frozen_handover(&self, owner: u128) -> Option<u128> {
+        self.lan.shared.source_frozen_handover(owner)
+    }
+
     /// The guest index of the player `uuid` placed from the hand-over `id` (its import or
     /// confirmation committed): a retry of either, whose reply was lost, is answered the same.
     pub fn placed_arrival(&self, uuid: u128, id: u128) -> Option<usize> {
@@ -1780,6 +1784,9 @@ impl Hub {
     /// The guest index of the held player `uuid` whose record of the hand-over `id` was
     /// imported, and that has not been dropped or kicked meanwhile.
     pub fn imported_arrival(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        if self.source_frozen_handover(uuid).is_some() {
+            return Err("the player is fenced by a source hand-over");
+        }
         let Some(i) = self
             .guests
             .iter()
@@ -2341,6 +2348,11 @@ impl Hub {
                 }
                 NetEvent::Joined(j) => {
                     credits.push(credit);
+                    // Login can race publication while it is in configuration.
+                    if self.source_frozen_handover(j.uuid).is_some() {
+                        j.sender.disconnect(super::source_handover::refusal());
+                        continue;
+                    }
                     while let Some(i) = self
                         .guests
                         .iter()
@@ -2368,6 +2380,9 @@ impl Hub {
                 }
                 NetEvent::Duplicate(uuid) => {
                     credits.push(credit);
+                    if self.source_frozen_handover(uuid).is_some() {
+                        continue;
+                    }
                     let conns: Vec<u32> = self
                         .guests
                         .iter()
