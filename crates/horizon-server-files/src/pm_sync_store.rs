@@ -74,6 +74,19 @@ pub struct Checkpoint<'a> {
     pub snapshot: &'a [u8],
 }
 
+/// Exact, externally authorized Paper departure. The SQL row can verify the
+/// released bytes and revision. The coordinator supplies the source identity
+/// from the current Paper connection's authenticated departure notice.
+pub struct ReleasedClaim<'a> {
+    pub player: u128,
+    pub request: u128,
+    pub source: &'a str,
+    pub backend: &'a str,
+    pub token: u128,
+    pub revision: i64,
+    pub snapshot_sha256: [u8; 32],
+}
+
 /// Only a current receipt can authorize placement. An exact historical receipt
 /// reconciles a lost acknowledgement after ownership has moved on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,31 +161,133 @@ impl Store {
             format!("INSERT INTO `{}` (player_uuid) VALUES (?) ON DUPLICATE KEY UPDATE player_uuid=player_uuid", self.state),
             (&player,),
         )?;
-        let row: Option<(i64, Option<String>, Option<String>, Option<u64>, Option<Vec<u8>>)> = transaction.exec_first(
-            format!("SELECT revision,owner_token,owner_server,OCTET_LENGTH(snapshot),CASE WHEN OCTET_LENGTH(snapshot)<=? THEN snapshot END FROM `{}` WHERE player_uuid=? FOR UPDATE", self.state),
-            (self.max_snapshot_bytes, &player),
+        let (current, snapshot) = lock_snapshot(
+            &mut transaction,
+            &self.state,
+            &player,
+            self.max_snapshot_bytes,
         )?;
-        let (revision, owner, server, length, snapshot) = row.ok_or(StoreError::Fenced)?;
-        let unowned = owner.is_none() && server.is_none();
-        if !unowned && (owner.as_deref() != Some(&token) || server.as_deref() != Some(backend)) {
+        let unowned = current.is_unowned();
+        if !unowned && !current.matches(&token, backend, current.revision) {
             return Err(StoreError::Fenced);
         }
-        if revision < 0 || length.is_some_and(|length| length > self.max_snapshot_bytes as u64) {
-            return Err(StoreError::Invalid(
-                "invalid stored PM-Sync revision or snapshot size",
-            ));
+        if current.revision < 0 {
+            return Err(StoreError::Invalid("invalid stored PM-Sync revision"));
         }
         if let Some(bytes) = &snapshot {
             validate_snapshot(bytes, self.max_snapshot_bytes)?;
         }
         if unowned {
-            transaction.exec_drop(
-                format!("UPDATE `{}` SET owner_token=?,owner_server=?,updated_at=CURRENT_TIMESTAMP WHERE player_uuid=?", self.state),
-                (&token, backend, &player),
+            set_owner(&mut transaction, &self.state, &player, &token, backend)?;
+        }
+        transaction.commit()?;
+        Ok(Lease {
+            revision: current.revision,
+            snapshot,
+        })
+    }
+
+    /// Claim one exact released Paper snapshot. This operation cannot create an
+    /// empty profile or take a profile from a different backend or revision.
+    /// Lost responses can be retried using the same request and target token.
+    pub fn claim_released_snapshot(
+        &mut self,
+        claim: &ReleasedClaim<'_>,
+    ) -> Result<Lease, StoreError> {
+        if claim.player == 0
+            || claim.request == 0
+            || claim.token == 0
+            || claim.revision < 1
+            || claim.source == claim.backend
+            || !valid_sql_backend(claim.source)
+            || !valid_sql_backend(claim.backend)
+        {
+            return Err(StoreError::Invalid(
+                "invalid PM-Sync released snapshot claim",
+            ));
+        }
+        let digest = claim_digest(claim);
+        let (player, request, token) = (
+            uuid_string(claim.player),
+            uuid_string(claim.request),
+            uuid_string(claim.token),
+        );
+        let mut transaction = self.connection.start_transaction(TxOpts::default())?;
+        let (current, snapshot) = lock_snapshot(
+            &mut transaction,
+            &self.state,
+            &player,
+            self.max_snapshot_bytes,
+        )?;
+        let retried = matches_receipt(
+            &mut transaction,
+            &self.receipts,
+            &player,
+            &request,
+            &digest,
+            claim.revision,
+        )?;
+        if current.revision != claim.revision
+            || (retried && !current.matches(&token, claim.backend, claim.revision))
+            || (!retried && !current.is_unowned())
+        {
+            return Err(StoreError::Fenced);
+        }
+        let snapshot = snapshot.ok_or(StoreError::Fenced)?;
+        let sha256: [u8; 32] = Sha256::digest(&snapshot).into();
+        if sha256 != claim.snapshot_sha256 {
+            return Err(StoreError::Fenced);
+        }
+        validate_snapshot(&snapshot, self.max_snapshot_bytes)?;
+        if !retried {
+            set_owner(
+                &mut transaction,
+                &self.state,
+                &player,
+                &token,
+                claim.backend,
+            )?;
+            write_receipt(
+                &mut transaction,
+                &self.receipts,
+                &player,
+                &request,
+                &digest,
+                claim.revision,
             )?;
         }
         transaction.commit()?;
-        Ok(Lease { revision, snapshot })
+        Ok(Lease {
+            revision: claim.revision,
+            snapshot: Some(snapshot),
+        })
+    }
+
+    /// Read the revision of an exact live lease without acquiring one. This
+    /// also works after that same owner has committed more checkpoints.
+    pub fn current_owner_revision(
+        &mut self,
+        player: u128,
+        token: u128,
+        backend: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        if player == 0 || token == 0 || !valid_sql_backend(backend) {
+            return Err(StoreError::Invalid("invalid PM-Sync lease identity"));
+        }
+        let row: Option<(i64, Option<String>, Option<String>)> = self.connection.exec_first(
+            format!(
+                "SELECT revision,owner_token,owner_server FROM `{}` WHERE player_uuid=?",
+                self.state
+            ),
+            (uuid_string(player),),
+        )?;
+        let token = uuid_string(token);
+        Ok(row.and_then(|(revision, owned, server)| {
+            (revision >= 0
+                && owned.as_deref() == Some(&token)
+                && server.as_deref() == Some(backend))
+            .then_some(revision)
+        }))
     }
 
     /// Publish both the PM-Sync snapshot and the next owner in one SQL commit.
@@ -362,11 +477,56 @@ struct Head {
 }
 
 impl Head {
+    fn is_unowned(&self) -> bool {
+        self.token.is_none() && self.backend.is_none()
+    }
+
     fn matches(&self, token: &str, backend: &str, revision: i64) -> bool {
         self.revision == revision
             && self.token.as_deref() == Some(token)
             && self.backend.as_deref() == Some(backend)
     }
+}
+
+fn lock_snapshot(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    player: &str,
+    max_bytes: usize,
+) -> Result<(Head, Option<Vec<u8>>), StoreError> {
+    let row: Option<(i64, Option<String>, Option<String>, Option<u64>, Option<Vec<u8>>)> =
+        transaction.exec_first(
+            format!("SELECT revision,owner_token,owner_server,OCTET_LENGTH(snapshot),CASE WHEN OCTET_LENGTH(snapshot)<=? THEN snapshot END FROM `{table}` WHERE player_uuid=? FOR UPDATE"),
+            (max_bytes, player),
+        )?;
+    let (revision, token, backend, length, snapshot) = row.ok_or(StoreError::Fenced)?;
+    if length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(StoreError::Invalid(
+            "stored PM-Sync snapshot exceeds its size limit",
+        ));
+    }
+    Ok((
+        Head {
+            revision,
+            token,
+            backend,
+        },
+        snapshot,
+    ))
+}
+
+fn set_owner(
+    transaction: &mut Transaction<'_>,
+    table: &str,
+    player: &str,
+    token: &str,
+    backend: &str,
+) -> Result<(), StoreError> {
+    transaction.exec_drop(
+        format!("UPDATE `{table}` SET owner_token=?,owner_server=?,updated_at=CURRENT_TIMESTAMP WHERE player_uuid=?"),
+        (token, backend, player),
+    )?;
+    Ok(())
 }
 
 fn lock_head(
@@ -469,5 +629,20 @@ fn operation_digest(change: &Handover<'_>) -> String {
         digest.update(id.as_bytes());
     }
     digest.update(Sha256::digest(change.snapshot));
+    format!("{:x}", digest.finalize())
+}
+
+fn claim_digest(claim: &ReleasedClaim<'_>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"horizon/pm-sync/released-claim/v1\0");
+    for uuid in [claim.player, claim.request, claim.token] {
+        digest.update(uuid.to_be_bytes());
+    }
+    digest.update(claim.revision.to_be_bytes());
+    for id in [claim.source, claim.backend] {
+        digest.update([id.len() as u8]);
+        digest.update(id.as_bytes());
+    }
+    digest.update(claim.snapshot_sha256);
     format!("{:x}", digest.finalize())
 }

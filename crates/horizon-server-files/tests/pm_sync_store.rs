@@ -2,9 +2,10 @@
 
 use horizon_protocol::crypto::uuid_string;
 use horizon_server_files::pm_sync_store::{
-    Checkpoint, CheckpointDisposition, Handover, HandoverOutcome, Store, StoreError,
+    Checkpoint, CheckpointDisposition, Handover, HandoverOutcome, ReleasedClaim, Store, StoreError,
 };
 use mysql::{Conn, Opts, prelude::Queryable};
+use sha2::{Digest, Sha256};
 use std::sync::Barrier;
 
 const PLAYER: u128 = 0xa1;
@@ -25,6 +26,17 @@ fn connect() -> Conn {
 
 fn setup() -> Store {
     Store::open(connect(), PREFIX, MAX_BYTES).unwrap()
+}
+
+fn java_snapshot() -> Vec<u8> {
+    let raw = include_str!("fixtures/pm-sync/java-v2.hex")
+        .lines()
+        .find_map(|line| line.strip_prefix("canonical "))
+        .unwrap();
+    (0..raw.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&raw[at..at + 2], 16).unwrap())
+        .collect()
 }
 
 #[test]
@@ -146,14 +158,7 @@ fn native_checkpoint_and_release_leave_the_exact_snapshot_for_paper() {
     const CHECKPOINT_PLAYER: u128 = 0xa6;
     let open = || Store::open(connect(), SCHEMA, MAX_BYTES).unwrap();
     let mut store = open();
-    let raw = include_str!("fixtures/pm-sync/java-v2.hex")
-        .lines()
-        .find_map(|line| line.strip_prefix("canonical "))
-        .unwrap();
-    let snapshot: Vec<u8> = (0..raw.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&raw[at..at + 2], 16).unwrap())
-        .collect();
+    let snapshot = java_snapshot();
     assert_eq!(
         store
             .acquire(CHECKPOINT_PLAYER, EAST, "east")
@@ -235,4 +240,145 @@ fn native_checkpoint_and_release_leave_the_exact_snapshot_for_paper() {
         )
         .unwrap();
     assert_eq!(row, Some((2, None, None, snapshot)));
+}
+
+#[test]
+#[ignore = "requires a released snapshot seeded by the original Java SqlSnapshotStore"]
+fn paper_release_can_only_be_claimed_by_one_exact_route() {
+    const CLAIM_SCHEMA: &str = "pigeon_claim_";
+    const PLAYER: u128 = 0xa7;
+    let open = || Store::open(connect(), CLAIM_SCHEMA, MAX_BYTES).unwrap();
+    let mut store = open();
+    let snapshot = java_snapshot();
+    let east = ReleasedClaim {
+        player: PLAYER,
+        request: 0xb7,
+        source: "paper",
+        backend: "east",
+        token: EAST,
+        revision: 1,
+        snapshot_sha256: Sha256::digest(&snapshot).into(),
+    };
+    for wrong in [
+        ReleasedClaim {
+            player: PLAYER + 1,
+            ..east
+        },
+        ReleasedClaim {
+            revision: 2,
+            ..east
+        },
+        ReleasedClaim {
+            snapshot_sha256: [0; 32],
+            ..east
+        },
+    ] {
+        assert!(matches!(
+            store.claim_released_snapshot(&wrong),
+            Err(StoreError::Fenced)
+        ));
+    }
+    assert_eq!(
+        store.current_owner_revision(PLAYER, EAST, "east").unwrap(),
+        None
+    );
+    let mut sql = connect();
+    sql.query_drop(format!(
+        "CREATE TRIGGER `{CLAIM_SCHEMA}fail_receipt` BEFORE INSERT ON `{CLAIM_SCHEMA}checkpoint_receipts` \
+         FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='claim receipt fault'"
+    )).unwrap();
+    assert!(matches!(
+        store.claim_released_snapshot(&east),
+        Err(StoreError::Sql(_))
+    ));
+    assert_eq!(
+        store.current_owner_revision(PLAYER, EAST, "east").unwrap(),
+        None
+    );
+    sql.query_drop(format!("DROP TRIGGER `{CLAIM_SCHEMA}fail_receipt`"))
+        .unwrap();
+    let west = ReleasedClaim {
+        request: 0xb8,
+        backend: "west",
+        token: WEST,
+        ..east
+    };
+    let simultaneous = Barrier::new(2);
+    let (a, b) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            let mut store = open();
+            simultaneous.wait();
+            store.claim_released_snapshot(&east)
+        });
+        let b = scope.spawn(|| {
+            let mut store = open();
+            simultaneous.wait();
+            store.claim_released_snapshot(&west)
+        });
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let (winner, lease) = match (a, b) {
+        (Ok(lease), Err(StoreError::Fenced)) => (&east, lease),
+        (Err(StoreError::Fenced), Ok(lease)) => (&west, lease),
+        _ => panic!("exactly one replica must claim the original Paper release"),
+    };
+    assert_eq!(lease.revision, 1);
+    assert_eq!(lease.snapshot.as_deref(), Some(snapshot.as_slice()));
+    assert_eq!(open().claim_released_snapshot(winner).unwrap().revision, 1);
+    assert!(matches!(
+        open().claim_released_snapshot(&ReleasedClaim {
+            source: "other-paper",
+            ..*winner
+        }),
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(
+        open()
+            .current_owner_revision(PLAYER, winner.token, winner.backend)
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        open()
+            .current_owner_revision(PLAYER, winner.token, &winner.backend.to_ascii_uppercase())
+            .unwrap(),
+        None
+    );
+    let history: Option<i32> = sql
+        .exec_first(
+            format!("SELECT COUNT(*) FROM `{CLAIM_SCHEMA}history` WHERE player_uuid=?"),
+            (uuid_string(PLAYER),),
+        )
+        .unwrap();
+    assert_eq!(history, Some(1));
+    assert_eq!(
+        store
+            .checkpoint(&Checkpoint {
+                player: PLAYER,
+                request: 0xb9,
+                token: winner.token,
+                backend: winner.backend,
+                revision: 1,
+                disposition: CheckpointDisposition::KeepLease,
+                snapshot: &snapshot,
+            })
+            .unwrap(),
+        2
+    );
+    assert!(matches!(
+        open().claim_released_snapshot(winner),
+        Err(StoreError::Fenced)
+    ));
+    assert_eq!(
+        open()
+            .current_owner_revision(PLAYER, winner.token, winner.backend)
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        open()
+            .current_owner_revision(PLAYER, PAPER, "paper")
+            .unwrap(),
+        None
+    );
 }
