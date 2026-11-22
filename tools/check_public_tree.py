@@ -14,6 +14,8 @@ ORIGINAL_JDK_TOOLS = {
     "tools/fixtures/paper-trace-plugin/PaperTrace.java",
     # Original synthetic fixture driver. The PM-Sync implementation stays in its own repository.
     "tools/fixtures/pm-sync/SnapshotEnvelopeOracle.java",
+    # Original inventory oracle. Paper, HuskSync and all compiled files stay local.
+    "tools/fixtures/pm-sync/SnapshotInventoryOracle.java",
     "tools/JfrSummary.java",
     # Original generator of the Java character tables: calls only the public Character API and prints ranges; no JDK implementation source.
     "tools/JavaCharacterTables.java",
