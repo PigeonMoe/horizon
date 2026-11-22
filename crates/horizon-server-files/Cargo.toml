@@ -10,6 +10,8 @@ description = "The dedicated server's vanilla files: server.properties, eula.txt
 pm-sync-mysql = ["dep:mysql"]
 
 [dependencies]
+cap-fs-ext = "3.4.6"
+cap-std = "3.4.6"
 horizon-core = { path = "../horizon-core" }
 # server.properties and eula.txt are Java-properties files; the parser is shared with horizon-mod-wasm.
 horizon-java-properties = { path = "../horizon-java-properties" }
