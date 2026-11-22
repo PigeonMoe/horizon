@@ -669,6 +669,10 @@ impl crate::prelude::PlayersBackend for FakeHost {
         let level = self.player_level(player)?;
         crate::Identifier::parse(level.dimension_id()).ok()
     }
+    fn player_persistent_data(&self, player: PlayerRef) -> Option<crate::Compound> {
+        (self.players.handle(player.uuid())? == player).then_some(())?;
+        Some(self.players.get(player.uuid())?.persistent_data.clone())
+    }
     fn player_has_infinite_materials(&self, player: PlayerRef) -> Option<bool> {
         Some(self.players.get(player.uuid())?.infinite_materials)
     }
@@ -910,6 +914,22 @@ impl crate::prelude::EntitiesBackendMut for FakeHost {
     }
 }
 impl crate::prelude::PlayersBackendMut for FakeHost {
+    fn player_set_persistent_data(
+        &mut self,
+        player: PlayerRef,
+        data: crate::Compound,
+    ) -> Result<(), crate::PlayerDataRefusal> {
+        let owner = player.uuid();
+        if self.players.handle(owner) != Some(player) {
+            return Err(crate::PlayerDataRefusal::Stale);
+        }
+        if self.frozen_player_handovers.contains_key(&owner) {
+            return Err(crate::PlayerDataRefusal::Transferring);
+        }
+        self.players.get_mut(owner).ok_or(crate::PlayerDataRefusal::Stale)?.persistent_data = data;
+        Ok(())
+    }
+
     fn player_action_bar(
         &mut self,
         player: PlayerRef,
