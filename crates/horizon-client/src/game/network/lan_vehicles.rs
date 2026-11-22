@@ -11,7 +11,10 @@
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
 use super::{Dim, Game, Keys, commands::Target, lan::LanHost, minecarts::SEAT};
 use horizon_client::collisions::SceneCollisions;
-use horizon_client::lan::hub::no_blocks_in;
+use horizon_client::lan::{
+    guest::Guest,
+    hub::{Hub, no_blocks_in},
+};
 use horizon_client::mobs::equine;
 use horizon_core::geometry::{Aabb, Axis, Vec3};
 use horizon_protocol::{
@@ -58,6 +61,46 @@ pub(super) struct GuestDismount {
     level: Dim,
     from: Vec3,
     landing: Option<Vec3>,
+}
+
+pub(super) enum RemovedVehicleDismount {
+    /// A new seat during the admission callback clears the in-flight landing.
+    Checking,
+    Ready(GuestDismount),
+}
+
+impl GuestDismount {
+    pub(super) fn matches_guest(&self, level: Dim, rider: &Guest, position: [f64; 3]) -> bool {
+        level == self.level
+            && rider.dimension == self.level.id()
+            && rider.uuid == self.player
+            && rider.entity_id == self.entity
+            && position == self.from.components()
+            && rider.vehicle.is_none()
+            && !rider.dead
+            && rider.health > 0.0
+    }
+
+    fn destination(&self) -> Vec3 {
+        self.landing.unwrap_or(self.from)
+    }
+
+    pub(super) fn send_position(&self, hub: &mut Hub, index: usize) {
+        let at = self.destination();
+        hub.guests.update(index, |rider| {
+            if let Some(body) = rider.motion.as_mut() {
+                body.position = at;
+                if self.landing.is_none() {
+                    body.velocity = Vec3::ZERO;
+                }
+            }
+        });
+        if self.landing.is_some() {
+            hub.teleport_keeping_motion(index, at.components());
+        } else {
+            hub.teleport(index, Some(at.components()));
+        }
+    }
 }
 
 impl Game<'_> {
@@ -366,6 +409,19 @@ impl Game<'_> {
         })
     }
 
+    /// A removed root can be destroyed during the rider's own turn. Wait for
+    /// that turn to publish the unmount before sending the landing.
+    pub(super) fn defer_removed_vehicle_dismount(&mut self, landing: Vec3) {
+        self.guest_removed_dismount = Some(RemovedVehicleDismount::Checking);
+        let admitted = self.admit_guest_dismount(landing);
+        if matches!(
+            self.guest_removed_dismount,
+            Some(RemovedVehicleDismount::Checking)
+        ) {
+            self.guest_removed_dismount = admitted.map(RemovedVehicleDismount::Ready);
+        }
+    }
+
     /// The guest turn has detached the seat. Send its separately cancellable
     /// `ServerPlayer.dismountTo` position packet after the passenger update.
     fn finish_guest_dismount(&mut self, conn: u32, dismount: GuestDismount) {
@@ -376,30 +432,15 @@ impl Game<'_> {
             return;
         };
         let rider = &host.hub.guests[index];
-        if self.dim != dismount.level
-            || rider.dimension != dismount.level.id()
-            || rider.uuid != dismount.player
-            || rider.entity_id != dismount.entity
-            || rider.position != dismount.from.components()
-            || rider.vehicle.is_some()
-            || rider.dead
-        {
+        if !dismount.matches_guest(self.dim, rider, rider.position) {
             return;
         }
-        let at = dismount.landing.unwrap_or(dismount.from);
-        host.hub.guests.update(index, |rider| {
-            if let Some(body) = rider.motion.as_mut() {
-                body.position = at;
-                if dismount.landing.is_none() {
-                    body.velocity = Vec3::ZERO;
-                }
-            }
-        });
-        if dismount.landing.is_some() {
-            host.hub.teleport_keeping_motion(index, at.components());
-        } else {
-            host.hub.teleport(index, Some(at.components()));
-        }
+        dismount.send_position(&mut host.hub, index);
+        self.report_guest_dismount(conn, dismount);
+    }
+
+    pub(super) fn report_guest_dismount(&mut self, conn: u32, dismount: GuestDismount) {
+        let at = dismount.destination();
         if at == dismount.from {
             return;
         }

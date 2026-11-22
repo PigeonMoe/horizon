@@ -318,6 +318,222 @@ fn check_boat_dismount(portal: bool) {
 
 #[test]
 #[ignore = "daily"]
+fn destroyed_boat_detaches_the_acting_rider_even_if_the_landing_is_denied() {
+    check_removed_vehicle_dismount(RemovedDismountCase::DeniedBoat);
+}
+
+#[test]
+#[ignore = "daily"]
+fn destroyed_cart_retries_a_denied_edge_before_teleporting_its_rider() {
+    check_removed_vehicle_dismount(RemovedDismountCase::RetriedCart);
+}
+
+#[test]
+#[ignore = "daily"]
+fn discarded_boat_does_not_override_a_later_teleport_in_the_guest_turn() {
+    check_removed_vehicle_dismount(RemovedDismountCase::SupersededBoat);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RemovedDismountCase {
+    DeniedBoat,
+    RetriedCart,
+    SupersededBoat,
+}
+
+fn check_removed_vehicle_dismount(case: RemovedDismountCase) {
+    use crate::game::{
+        commands::Target,
+        minecarts::{CartHit, CartKind, Minecart},
+    };
+    use horizon_protocol::packets::play::relative;
+    use mod_api::{EntityMountEvent, PlayerPositionCommittedEvent};
+
+    #[derive(Debug, PartialEq)]
+    enum Notice {
+        LeftSeat,
+        Proposed([f64; 3], [f64; 3]),
+        Committed([f64; 3], [f64; 3]),
+    }
+
+    struct Protection(RemovedDismountCase, Arc<Mutex<Vec<Notice>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn entity_mount(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut EntityMountEvent<'_>,
+        ) -> Flow {
+            if event.mounting {
+                return Flow::Continue;
+            }
+            assert_eq!(event.vehicle, BOAT);
+            assert!(host.entity(BOAT).is_none());
+            let rider = host.player(FIRST).unwrap().entity();
+            assert_eq!(event.entity, rider.id());
+            assert_eq!(rider.is_passenger(host), Some(true));
+            let mut seen = self.1.lock().unwrap();
+            let retry = self.0 == RemovedDismountCase::RetriedCart && seen.is_empty();
+            seen.push(Notice::LeftSeat);
+            if retry { Flow::Cancel } else { Flow::Continue }
+        }
+
+        fn player_teleport_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.cause, "dismount");
+            assert_eq!(event.player, FIRST);
+            let rider = host.player(FIRST).unwrap().entity();
+            assert_eq!(rider.is_passenger(host), Some(false));
+            assert_eq!(rider.position(host), Some(event.from));
+            self.1
+                .lock()
+                .unwrap()
+                .push(Notice::Proposed(event.from, event.to));
+            if self.0 == RemovedDismountCase::DeniedBoat {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_position_committed(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerPositionCommittedEvent<'_>,
+        ) {
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.is_passenger(host), Some(false));
+            assert_eq!(rider.position(host), Some(event.to));
+            self.1
+                .lock()
+                .unwrap()
+                .push(Notice::Committed(event.from, event.to));
+        }
+    }
+
+    run_on_guest_stack(move || {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new(
+                "removed_vehicle_region",
+                Box::new(Protection(case, seen.clone())),
+            )]
+            .into(),
+            || {
+                with_guests(|game| {
+                    let conn = FIRST as u32;
+                    game.options.dedicated = Some(Vec::new());
+                    launch(game);
+                    if case == RemovedDismountCase::RetriedCart {
+                        game.boats.clear();
+                        game.carts
+                            .push(Minecart::new(BOAT, CartKind::Rideable, START));
+                    }
+                    let vehicle = game.entity(BOAT).unwrap();
+                    let rider = game.player(FIRST).unwrap().entity();
+                    assert!(game.entity_start_riding(rider, vehicle, true));
+                    game.guest_boarded(conn, None);
+                    let (sender, packets) = mpsc::channel();
+                    game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                        guest.sender = PlayerSender::new(sender, Arc::default());
+                        guest.loaded = true;
+                        guest.load_timeout = 0;
+                        guest.awaiting_teleport = None;
+                    });
+                    let from = game.command_guest(conn).unwrap().position;
+                    let landing = [from[0], START.y, from[2]];
+                    let replacement = [3.0, 201.0, 5.0];
+                    assert!(from[1] < START.y);
+                    match case {
+                        RemovedDismountCase::DeniedBoat => {
+                            game.as_guest(conn, |game| assert!(game.hurt_boat(0, 5.0, false)));
+                        }
+                        RemovedDismountCase::RetriedCart => {
+                            game.hurt_cart(0, 5.0, false, false, CartHit::default());
+                            assert!(game.persist.removed_vehicles.contains_key(&BOAT));
+                            assert_eq!(game.command_guest(conn).unwrap().vehicle, Some(BOAT));
+                            assert_eq!(&*seen.lock().unwrap(), &[Notice::LeftSeat]);
+                            assert!(!received_packets(&packets).iter().any(|packet| matches!(
+                                packet,
+                                Clientbound::SetPassengers(_) | Clientbound::PlayerPosition(_)
+                            )));
+                            game.guest_vehicle_tick(conn);
+                        }
+                        RemovedDismountCase::SupersededBoat => {
+                            game.as_guest(conn, |game| {
+                                assert!(vehicle.discard(game));
+                                game.teleport_to_in_level(
+                                    Target::Player,
+                                    replacement,
+                                    None,
+                                    [false; 3],
+                                    false,
+                                );
+                            });
+                            game.native_removals_flush();
+                        }
+                    }
+                    assert!(game.entity(BOAT).is_none());
+                    assert!(!game.persist.removed_vehicles.contains_key(&BOAT));
+                    let (at, flags, mut expected) = match case {
+                        RemovedDismountCase::DeniedBoat => (from, 0, vec![Notice::LeftSeat]),
+                        RemovedDismountCase::RetriedCart => (
+                            landing,
+                            relative::DELTA_X
+                                | relative::DELTA_Y
+                                | relative::DELTA_Z
+                                | relative::ROTATE_DELTA
+                                | relative::X_ROT
+                                | relative::Y_ROT,
+                            vec![Notice::LeftSeat, Notice::LeftSeat],
+                        ),
+                        RemovedDismountCase::SupersededBoat => {
+                            (replacement, 0, vec![Notice::LeftSeat])
+                        }
+                    };
+                    expected.push(Notice::Proposed(from, landing));
+                    if at != from {
+                        expected.push(Notice::Committed(from, at));
+                    }
+                    assert_eq!(*seen.lock().unwrap(), expected);
+                    let guest = game.command_guest(conn).unwrap();
+                    assert_eq!(guest.vehicle, None);
+                    assert_eq!(guest.vehicle_good, None);
+                    assert_eq!(guest.position, at);
+                    assert_eq!(guest.motion.as_ref().unwrap().position.components(), at);
+                    let id = guest.awaiting_teleport.unwrap().0;
+                    let updates: Vec<_> = received_packets(&packets)
+                        .into_iter()
+                        .filter(|packet| {
+                            matches!(
+                                packet,
+                                Clientbound::SetPassengers(_) | Clientbound::PlayerPosition(_)
+                            )
+                        })
+                        .collect();
+                    assert!(matches!(
+                        updates.as_slice(),
+                        [Clientbound::SetPassengers(seats), Clientbound::PlayerPosition(position)]
+                        if seats.vehicle == BOAT as i32 && seats.passengers.is_empty()
+                            && position.teleport == id && position.position == at && position.relatives == flags
+                    ));
+                    game.guest_vehicle_tick(conn);
+                    assert_eq!(
+                        game.command_guest(conn).unwrap().awaiting_teleport,
+                        Some((id, at))
+                    );
+                    assert_eq!(*seen.lock().unwrap(), expected);
+                });
+            },
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_server_driven_boat_checks_the_hull_return_and_recovers_only_the_denied_rider() {
     run_on_guest_stack(|| {
         for policy in [

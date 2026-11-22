@@ -2015,6 +2015,8 @@ struct Game<'a> {
     chat_capture: Option<Vec<horizon_client::text::Text>>,
     /// Packets for the guest acting now, sent once its action returns.
     guest_packets: Vec<horizon_protocol::packets::play::Clientbound>,
+    /// A removed boat or cart's dismount for the guest acting now.
+    guest_removed_dismount: Option<lan_vehicles::RemovedVehicleDismount>,
     /// The acting guest's cooldowns, as (item, ticks): their packet needs the
     /// hub's item registry, which the guest's turn does not hold.
     guest_cooldowns: Vec<(Arc<str>, i32)>,
@@ -11282,6 +11284,7 @@ impl<'a> Game<'a> {
             lan_break_pos: None,
             break_collect: None,
             guest_packets: Vec::new(),
+            guest_removed_dismount: None,
             guest_cooldowns: Vec::new(),
             guest_entity_events: Vec::new(),
             guest_equipment_breaks: Vec::new(),

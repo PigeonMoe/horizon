@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::lan_vehicles::{GuestDismount, RemovedVehicleDismount};
 
 impl Game<'_> {
     /// Run `f` as the guest `conn`: the host's player state is swapped for theirs.
@@ -393,6 +394,7 @@ impl Game<'_> {
         self.hook.finish_loan();
         self.bind_current_hook_residency();
         let packets = std::mem::take(&mut self.guest_packets);
+        let removed_dismount = self.guest_removed_dismount.take();
         let entity_events = std::mem::take(&mut self.guest_entity_events);
         let cooldown_events = std::mem::take(&mut self.guest_cooldowns);
         let player_sounds = std::mem::take(&mut self.guest_player_sounds);
@@ -489,6 +491,7 @@ impl Game<'_> {
             acting_fake,
             known_movement,
             packets,
+            removed_dismount,
             entity_events,
             equipment_breaks,
             swings,
@@ -631,6 +634,7 @@ impl Game<'_> {
             acting_fake,
             known_movement,
             packets,
+            removed_dismount,
             entity_events,
             equipment_breaks,
             swings,
@@ -706,6 +710,11 @@ impl Game<'_> {
             self.send_level_sound(sound, Some(conn));
         }
         let outgoing = std::mem::replace(&mut self.guest_packets, packets);
+        let removed_dismount =
+            match std::mem::replace(&mut self.guest_removed_dismount, removed_dismount) {
+                Some(RemovedVehicleDismount::Ready(dismount)) => Some(dismount),
+                _ => None,
+            };
         let Some(host) = self.lan.as_mut() else {
             unreachable!("LanHost dropped inside a guest turn; closes are deferred");
         };
@@ -823,6 +832,7 @@ impl Game<'_> {
             Command([f64; 3], [bool; 3]),
             Position([f64; 3]),
             Rider([f64; 3]),
+            Dismount(GuestDismount),
         }
         let released_vehicle = host.hub.guests[i]
             .vehicle
@@ -943,6 +953,11 @@ impl Game<'_> {
                         requested_motion.filter(|velocity| *velocity == m.velocity);
                 }
                 let moved: f64 = (0..3).map(|k| (at[k] - g.position[k]).powi(2)).sum();
+                let dismount = removed_dismount.filter(|dismount| {
+                    !teleported
+                        && !m.health.dead_or_dying()
+                        && dismount.matches_guest(self.dim, g, at)
+                });
                 g.motion = Some(Box::new(m));
                 // The pearl and the bed took the rider out of its vehicle at their
                 // source (`stop_riding`), so `left_vehicle` already says so.
@@ -955,7 +970,9 @@ impl Game<'_> {
                         passengers: Vec::new(),
                     }));
                 }
-                if g.vehicle.is_none() && (moved > 0.0001 || turned || teleported) {
+                if let Some(dismount) = dismount {
+                    teleport = Some(TurnTeleport::Dismount(dismount));
+                } else if g.vehicle.is_none() && (moved > 0.0001 || turned || teleported) {
                     // A command's teleport carries its relative axes as the
                     // packet's DELTA flags; any other move is absolute.
                     if teleported {
@@ -971,10 +988,15 @@ impl Game<'_> {
             }
             (stat_events, name, teleport, motion_after_teleport)
         });
+        let mut committed_dismount = None;
         match teleport {
             Some(TurnTeleport::Command(at, delta)) => host.hub.teleport_command(i, at, delta),
             Some(TurnTeleport::Position(at)) => host.hub.teleport(i, Some(at)),
             Some(TurnTeleport::Rider(at)) => host.hub.teleport_rider(i, at),
+            Some(TurnTeleport::Dismount(dismount)) => {
+                dismount.send_position(&mut host.hub, i);
+                committed_dismount = Some(dismount);
+            }
             None => {}
         }
         let g = &host.hub.guests[i];
@@ -1029,6 +1051,9 @@ impl Game<'_> {
             self.release_removed_vehicle(vehicle);
         }
         self.bind_current_hook_residency();
+        if let Some(dismount) = committed_dismount {
+            self.report_guest_dismount(conn, dismount);
+        }
         for event in turn_events {
             match event {
                 MotionEvent::Health(horizon_client::health::HealthEvent::DamageBroadcast {

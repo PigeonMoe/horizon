@@ -595,7 +595,7 @@ impl Game<'_> {
         }
     }
 
-    fn player_free_dismount_point(&self, vehicle_y: f64) -> Option<Vec3> {
+    pub(super) fn player_free_dismount_point(&self, vehicle_y: f64) -> Option<Vec3> {
         let rider = self.player.as_ref()?;
         Some(self.removed_vehicle_dismount_point(
             rider.position,

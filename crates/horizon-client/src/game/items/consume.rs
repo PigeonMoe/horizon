@@ -460,7 +460,14 @@ impl Game<'_> {
             });
         if let Some(y) = removed_y {
             if self.native_may_leave(id) && self.riding == Some(id) {
-                self.dismount_removed_vehicle(y);
+                if self.lan_acting.is_some() {
+                    self.riding = None;
+                    if let Some(landing) = self.player_free_dismount_point(y) {
+                        self.defer_removed_vehicle_dismount(landing);
+                    }
+                } else {
+                    self.dismount_removed_vehicle(y);
+                }
                 self.release_removed_vehicle(id);
             }
             return;

@@ -218,6 +218,8 @@ pub(super) struct GuestSwap {
     known_movement: Vec3,
     /// The packets queued for that guest.
     packets: Vec<play::Clientbound>,
+    /// The pending removal dismount for the outer actor.
+    removed_dismount: Option<super::lan_vehicles::RemovedVehicleDismount>,
     /// The entity events queued for that guest.
     entity_events: Vec<i8>,
     /// The equipment breaks queued for that guest.
