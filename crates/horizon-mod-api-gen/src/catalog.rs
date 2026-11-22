@@ -120,6 +120,8 @@ pub struct Hook {
     pub isolate: bool,
     pub scope: Option<PartScope>,
     pub host: Option<HostAccess>,
+    /// The event type name when listeners borrow the envelope immutably.
+    pub shared_event: Option<String>,
     pub context: Option<PhaseContext>,
     pub counterparts: Counterparts,
     /// The contract version an injection's `hook_version` names.
@@ -254,6 +256,7 @@ struct HookEntry {
     version: Option<u64>,
     cancellable: Option<bool>,
     host: Option<HostAccess>,
+    shared_event: Option<String>,
     context: Option<PhaseContext>,
     #[serde(default)]
     call: Vec<(String, String)>,
@@ -326,6 +329,17 @@ impl Hook {
         ) {
             return Err(CatalogError::InvalidContract(name));
         }
+        if let Some(event) = &entry.shared_event
+            && (api.contract != Contract::Listen
+                || scope.is_some()
+                || entry.host != Some(HostAccess::Read)
+                || syn::parse_str::<syn::Ident>(event).is_err())
+        {
+            return Err(CatalogError::InvalidHook {
+                hook: name,
+                error: "shared_event names the event type of a global read-host listener".into(),
+            });
+        }
         if entry.stack_count.is_some() {
             if api.contract != Contract::Collect || api.out.is_none() || api.answered_by.is_some() {
                 return Err(CatalogError::InvalidHook {
@@ -389,6 +403,7 @@ impl Hook {
             isolate,
             scope,
             host: entry.host,
+            shared_event: entry.shared_event,
             context: entry.context,
             counterparts,
             version: entry.version.unwrap_or(1),
@@ -828,6 +843,7 @@ impl Hook {
             isolate: false,
             scope: None,
             host: None,
+            shared_event: None,
             context: None,
             counterparts: Counterparts::default(),
             version: 1,

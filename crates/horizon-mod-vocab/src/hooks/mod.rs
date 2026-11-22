@@ -27,6 +27,7 @@
 //! | `answered_by` | `"mod"`: a global replace hook whose output also names the mod that answered, or a global collect hook whose output is `Vec<Answered<T>>`: each mod pushes `T`s into its own empty batch and dispatch names that mod on each entry |
 //! | `isolate` | `true` on a global cancel hook: its dispatch runs every listener inside `catch_unwind` — one that unwinds keeps the **requested** outputs (its writes roll back), is skipped by this hook for the session, and no later listener runs on that invocation (arismoko/horizon#2414 ruling) |
 //! | `host`, `context` | `"read"` or `"level"`; `"registration"`, `"data_load"`, `"loop"` or `"worldgen"` |
+//! | `shared_event` | the name of a global read-host listener's event type, passed by shared reference to each listener |
 //! | `neoforge`, `fabric`, `paper` | the counterpart's name, or a list of them, for the rustdoc and the gap lists |
 //! | `cancellable` | whether the NeoForge counterpart event is cancellable (documentation, not the contract) |
 //! | `version` | the contract version an injection's `hook_version` names; left out when it is 1 |

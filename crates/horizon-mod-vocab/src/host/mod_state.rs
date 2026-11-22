@@ -67,4 +67,13 @@ pub trait ModStateServerHost {
     /// Withdraws a task the calling mod scheduled: true if it was still waiting.
     #[access(WorldOnly)]
     fn cancel_task(&mut self, id: TaskId) -> bool;
+    /// Side: server.
+    /// Queues a notification for `Hooks::mod_event` on this ready server. The topic is a
+    /// resource identifier in the calling mod's namespace, at most 128 UTF-8 bytes. The
+    /// payload must be valid JSON and at most 64 KiB. Returns false if the call is outside the
+    /// owning mod's scope, the server is closing, or the arguments or queue capacity are exceeded.
+    /// The queue holds 128 notifications and delivers at most 32 per server tick in FIFO order.
+    /// Closing the world drops undelivered notifications.
+    #[access(WorldOnly)]
+    fn publish_mod_event(&mut self, topic: &str, payload_json: &str) -> bool;
 }

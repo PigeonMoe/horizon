@@ -350,8 +350,12 @@ pub(super) fn emit<'a>(
             }
         };
         let event = fresh_name("event", &mut used);
-        let event_type = format!("{}Event", hook_id(name));
-        let hook_id = event_type.strip_suffix("Event").unwrap();
+        let hook_id = hook_id(name);
+        let hook_id = hook_id.as_str();
+        let event_type = hook
+            .shared_event
+            .clone()
+            .unwrap_or_else(|| format!("{hook_id}Event"));
         if !is_render {
             hook_ids.push_str(&format!("{hook_id},\n"));
             hook_constants.push_str(&format!(
@@ -476,6 +480,13 @@ pub(super) fn emit<'a>(
                 ty.clone()
             };
             let (field, scalar) = lifetimes.field(&field_ty);
+            if hook.shared_event.is_some()
+                && (scalar
+                    || mutable_entity
+                    || matches!(&field_ty, Type::Reference(reference) if reference.mutability.is_some()))
+            {
+                return Err(format!("{}: shared_event cannot write {name}", hook.name));
+            }
             if scalar {
                 rollback.push((name.clone(), false));
             } else if matches!(&field_ty, Type::Reference(reference) if reference.mutability.is_some())
@@ -555,8 +566,13 @@ pub(super) fn emit<'a>(
             ));
             continue;
         }
-        trait_params.push(format!("{event}: &mut {event_type}{elided}"));
-        call_args.push(format!("&mut {event}"));
+        let event_mut = if hook.shared_event.is_some() {
+            ""
+        } else {
+            "mut "
+        };
+        trait_params.push(format!("{event}: &{event_mut}{event_type}{elided}"));
+        call_args.push(format!("&{event_mut}{event}"));
         let unused = trait_params[1..]
             .iter()
             .map(|param| format!("let _ = {};", param.split(':').next().unwrap()))
@@ -827,7 +843,7 @@ pub(super) fn emit<'a>(
             } else {
                 String::new()
             },
-            if matches!(name, "blocks" | "items") {
+            if matches!(name, "blocks" | "items") || hook.shared_event.is_some() {
                 ""
             } else {
                 "mut "

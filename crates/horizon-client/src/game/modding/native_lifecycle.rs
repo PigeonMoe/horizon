@@ -2,14 +2,19 @@
 //! A paused pass
 //! observes nothing; a frozen world reports `world_running: false` except during a step.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use super::{
     Game,
     execution_role::ExecutionRole,
     scheduled_tasks::{ScheduledTasks, run_all},
 };
+use horizon_core::identifier::Identifier;
 use mod_api::{ScheduleError, TaskId};
+use serde_json::value::RawValue;
 // Their old home, for mixin code that names them here.
 pub(super) use mod_api::{
     Authority, LifecycleContext, ServerTickPhase, TickId, WorldEpoch, WorldPhase,
@@ -18,6 +23,10 @@ pub(super) use mod_api::{
 /// Epoch allocation spans server and client `Game` instances and client level
 /// replacements, so the counter is process-wide.
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+const MOD_EVENT_QUEUE_CAPACITY: usize = 128;
+const MOD_EVENT_TICK_BUDGET: usize = 32;
+const MOD_EVENT_MAX_TOPIC_BYTES: usize = 128;
+const MOD_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// A process-wide epoch no handle has carried yet: a server open's, or a
 /// client level's (`native_entity_refs.rs`), so a handle never crosses sides.
@@ -67,6 +76,8 @@ pub(super) struct NativeLifecycle {
     read_scope: bool,
     /// The mods' delayed tasks (`schedule_task`): dropped whenever a world opens or closes.
     tasks: ScheduledTasks,
+    /// Notifications awaiting the next server tick end in this epoch.
+    mod_events: VecDeque<(String, String)>,
     /// The section `entity_entering_section` files each entity under, for this epoch's world.
     pub(super) entity_sections: super::entity_sections::EntitySections,
     pub(super) section_observer: super::entity_sections::observer_cache::ObserverCache,
@@ -99,6 +110,7 @@ impl NativeLifecycle {
     pub(super) fn begin_open(&mut self, authority: Authority) {
         let epoch = fresh_epoch().get();
         self.tasks.clear();
+        self.mod_events.clear();
         self.attempt = Some(OpenAttempt {
             authority,
             epoch,
@@ -134,6 +146,7 @@ impl NativeLifecycle {
         if let Some(attempt) = self.attempt.as_mut() {
             attempt.session = OpenState::Closing;
         }
+        self.mod_events.clear();
     }
 
     /// A failure after readiness retires the epoch, including during shutdown.
@@ -145,6 +158,7 @@ impl NativeLifecycle {
         let context = attempt.server_context();
         self.attempt = None;
         self.tasks.clear();
+        self.mod_events.clear();
         context
     }
 
@@ -321,12 +335,45 @@ impl Game<'_> {
         self.native_lifecycle.tasks.cancel(owner, id)
     }
 
+    pub(in crate::game) fn publish_mod_event(&mut self, topic: &str, payload_json: &str) -> bool {
+        let lifecycle = &mut self.native_lifecycle;
+        if !lifecycle.attempt.is_some_and(|a| {
+            a.session == OpenState::Ready && a.authority != Authority::RemoteClient
+        }) || lifecycle.mod_events.len() >= MOD_EVENT_QUEUE_CAPACITY
+            || topic.len() > MOD_EVENT_MAX_TOPIC_BYTES
+            || payload_json.len() > MOD_EVENT_MAX_PAYLOAD_BYTES
+        {
+            return false;
+        }
+        let Some(owner) = mod_api::content::crash::current_native_mod() else {
+            return false;
+        };
+        if !Identifier::parse_namespaced(topic).is_some_and(|id| id.namespace() == owner)
+            || serde_json::from_str::<&RawValue>(payload_json).is_err()
+        {
+            return false;
+        }
+        lifecycle
+            .mod_events
+            .push_back((topic.to_owned(), payload_json.to_owned()));
+        true
+    }
+
     /// An errored tick returned at `result?` before this site.
     pub(super) fn native_lifecycle_server_tick_end(&mut self, paused: bool) {
         if let Some((context, phase)) = self.native_lifecycle.server_tick_end(paused) {
             self.native_lifecycle.read_scope = true;
             self.native_server_tick(&context, phase);
             self.native_lifecycle.read_scope = false;
+            let ready = self
+                .native_lifecycle
+                .mod_events
+                .len()
+                .min(MOD_EVENT_TICK_BUDGET);
+            for _ in 0..ready {
+                let (topic, payload_json) = self.native_lifecycle.mod_events.pop_front().unwrap();
+                self.native_mod_event(&topic, &payload_json);
+            }
         }
     }
 }
@@ -504,5 +551,99 @@ mod tests {
         assert!(lifecycle.world_close_failed().is_some());
         assert!(lifecycle.world_close_failed().is_none());
         assert!(lifecycle.world_close_final().is_none());
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn mod_events_are_delivered_after_the_publisher_in_fifo_order() {
+        use crate::game::native_entity_refs::tests::with_game;
+        use mod_api::{Hooks, Host, ModEntry, ServerHost, ServerModEvent, ServerTickEvent};
+        use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+        #[derive(Default)]
+        struct Trace {
+            published: AtomicBool,
+            publishing: AtomicBool,
+            received: Mutex<Vec<String>>,
+        }
+
+        struct Publisher(Arc<Trace>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Publisher {
+            fn server_tick(&self, host: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
+                if !matches!(event.phase, ServerTickPhase::ServerTickEnd { .. })
+                    || self.0.published.swap(true, Ordering::Relaxed)
+                {
+                    return;
+                }
+                self.0.publishing.store(true, Ordering::Relaxed);
+                assert!(!host.publish_mod_event("listener:update", "null"));
+                assert!(!host.publish_mod_event("publisher:UPDATE", "null"));
+                assert!(!host.publish_mod_event("publisher:update", "true false"));
+                assert!(!host.publish_mod_event(
+                    "publisher:update",
+                    &format!("\"{}\"", "x".repeat(MOD_EVENT_MAX_PAYLOAD_BYTES))
+                ));
+                for i in 0..MOD_EVENT_QUEUE_CAPACITY {
+                    assert!(host.publish_mod_event("publisher:update", &format!(" [ {i} ] ")));
+                }
+                assert!(!host.publish_mod_event("publisher:update", "null"));
+                self.0.publishing.store(false, Ordering::Relaxed);
+            }
+        }
+
+        struct Listener(Arc<Trace>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Listener {
+            fn mod_event(&self, _: &dyn Host, event: &ServerModEvent<'_>) {
+                assert!(!self.0.publishing.load(Ordering::Relaxed));
+                assert_eq!(event.topic, "publisher:update");
+                self.0
+                    .received
+                    .lock()
+                    .unwrap()
+                    .push(event.payload_json.to_owned());
+            }
+        }
+
+        let trace = Arc::new(Trace::default());
+        let mods = vec![
+            ModEntry::new("publisher", Box::new(Publisher(trace.clone()))),
+            ModEntry::new("listener", Box::new(Listener(trace.clone()))),
+        ]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                let _phase =
+                    mod_api::__private::PhaseOwner::scope(mod_api::__private::ModPhase::World);
+                game.native_lifecycle.world_open_ready().unwrap();
+                assert!(!game.publish_mod_event("publisher:update", "null"));
+                for tick in 1..=2 {
+                    game.native_lifecycle_server_tick_start(true);
+                    game.native_lifecycle_server_tick_end(false);
+                    assert_eq!(
+                        trace.received.lock().unwrap().len(),
+                        tick * MOD_EVENT_TICK_BUDGET
+                    );
+                }
+                assert_eq!(
+                    *trace.received.lock().unwrap(),
+                    (0..2 * MOD_EVENT_TICK_BUDGET)
+                        .map(|i| format!(" [ {i} ] "))
+                        .collect::<Vec<_>>()
+                );
+                game.native_lifecycle.begin_close();
+                game.native_lifecycle.world_close_final().unwrap();
+                game.native_lifecycle
+                    .begin_open(Authority::IntegratedServer);
+                game.native_lifecycle.world_open_ready().unwrap();
+                game.native_lifecycle_server_tick_start(true);
+                game.native_lifecycle_server_tick_end(false);
+                assert_eq!(
+                    trace.received.lock().unwrap().len(),
+                    2 * MOD_EVENT_TICK_BUDGET
+                );
+            });
+        });
     }
 }
