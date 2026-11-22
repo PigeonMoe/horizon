@@ -22,9 +22,12 @@
 //! which is about the transfer packet a server sends a client.
 use super::hub::Hub;
 use horizon_core::identifier::Identifier;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Aggregate opaque profile budget for a portable hand-over record.
+pub const MAX_REQUIRED_PROFILE_BYTES: usize = super::profile_sections::MAX_PROFILE_BYTES;
 
 /// `server.toml`'s `[transfer]`, as horizon-server passes it: `--transfers
 /// expect_seconds=10,max_expect_seconds=60,max_expected=64,max_freeze_seconds=30,max_hold_seconds=60,stop_wait_seconds=10`.
@@ -47,6 +50,10 @@ pub struct Settings {
     pub stop_wait: Duration,
     /// Destination-only package sections every arrival must validate before placement.
     pub required_profiles: BTreeMap<Identifier, u32>,
+    /// The local backend's stable, coordinator-configured identity.
+    pub backend_id: Option<String>,
+    /// The configured peers allowed to originate a strict transfer here.
+    pub allowed_sources: BTreeSet<String>,
 }
 
 impl Default for Settings {
@@ -59,31 +66,57 @@ impl Default for Settings {
             max_hold_ticks: 20 * 60,
             stop_wait: Duration::from_secs(10),
             required_profiles: BTreeMap::new(),
+            backend_id: None,
+            allowed_sources: BTreeSet::new(),
         }
     }
 }
 
 impl Settings {
-    /// Reads `--transfers`' value: `key=value` pairs separated by commas, each a
-    /// whole number above zero, but `stop_wait_seconds`, which is zero to [`MAX_STOP_WAIT`].
+    /// Read `--transfers` options as comma-separated `key=value` fields.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut s = Self::default();
         let mut roster_seen = false;
+        let mut sources_seen = false;
         for pair in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("{pair:?} is not key=value"))?;
             let key = key.trim();
-            if key == "required_profiles" {
-                if roster_seen {
-                    return Err("required_profiles is specified more than once".into());
+            let value = value.trim();
+            match key {
+                "required_profiles" => {
+                    if roster_seen {
+                        return Err("required_profiles is specified more than once".into());
+                    }
+                    roster_seen = true;
+                    s.required_profiles = super::profile_sections::parse_roster(value)?;
+                    continue;
                 }
-                roster_seen = true;
-                s.required_profiles = super::profile_sections::parse_roster(value.trim())?;
-                continue;
+                "backend_id" => {
+                    if s.backend_id.is_some() {
+                        return Err("backend_id is specified more than once".into());
+                    }
+                    s.backend_id = Some(value.to_owned());
+                    continue;
+                }
+                "allowed_sources" => {
+                    if sources_seen {
+                        return Err("allowed_sources is specified more than once".into());
+                    }
+                    sources_seen = true;
+                    if !value.is_empty() {
+                        for source in value.split(';') {
+                            if !s.allowed_sources.insert(source.to_owned()) {
+                                return Err(format!("allowed source {source:?} is listed twice"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
             }
             let n: u64 = value
-                .trim()
                 .parse()
                 .ok()
                 .filter(|n| *n > 0 || key == "stop_wait_seconds")
@@ -111,6 +144,10 @@ impl Settings {
                 other => return Err(format!("unknown setting {other:?}")),
             }
         }
+        horizon_server_files::transfer_routes::validate(
+            s.backend_id.as_deref(),
+            &s.allowed_sources,
+        )?;
         if s.expect > s.max_expect {
             return Err("expect_seconds is above max_expect_seconds".into());
         }

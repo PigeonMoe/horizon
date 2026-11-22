@@ -13,5 +13,6 @@ pub mod json;
 pub mod private_file;
 pub mod profiles;
 pub mod properties;
+pub mod transfer_routes;
 pub mod user_cache;
 pub mod user_lists;

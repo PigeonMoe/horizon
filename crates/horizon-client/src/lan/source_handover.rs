@@ -1,7 +1,10 @@
 //! Durable source ownership for strict hand-overs. A published record fences
 //! its owner even after the connection or process has gone away.
 
-use horizon_server_files::durable;
+use horizon_server_files::{
+    durable,
+    transfer_routes::{BACKEND_ID_MAX_BYTES, valid_backend_id},
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -14,10 +17,9 @@ use std::{
 const DIRECTORY: &str = "horizon-source-handovers";
 const EXTENSION: &str = "handover";
 const MAGIC: &[u8; 4] = b"HSH1";
-const MAX_DESTINATION: usize = 96;
 const MAX_PAYLOAD: usize = 32 << 20;
 const HEADER: usize = 4 + 1 + 16 + 16 + 1 + 4 + 4;
-const MAX_FILE: usize = HEADER + MAX_DESTINATION + 2 * MAX_PAYLOAD + 32;
+const MAX_FILE: usize = HEADER + BACKEND_ID_MAX_BYTES + 2 * MAX_PAYLOAD + 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
@@ -242,11 +244,7 @@ fn validate_fields(
 ) -> io::Result<()> {
     if owner == 0
         || id == 0
-        || destination.is_empty()
-        || destination.len() > MAX_DESTINATION
-        || !destination
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        || !valid_backend_id(destination)
         || !(1..=MAX_PAYLOAD).contains(&record_len)
         || !(1..=MAX_PAYLOAD).contains(&checkpoint_len)
     {

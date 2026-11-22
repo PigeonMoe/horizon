@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn configured_transfer_backend_routes_are_checked() {
+    let settings = Settings::parse("backend_id=local,allowed_sources=east_2;west-1").unwrap();
+    assert_eq!(settings.backend_id.as_deref(), Some("local"));
+    assert_eq!(
+        settings.allowed_sources.into_iter().collect::<Vec<_>>(),
+        ["east_2", "west-1"]
+    );
+    assert!(
+        Settings::parse("backend_id=local")
+            .unwrap()
+            .allowed_sources
+            .is_empty()
+    );
+    for bad in [
+        "allowed_sources=peer",
+        "backend_id=local,allowed_sources=local",
+        "backend_id=local,allowed_sources=peer;peer",
+        "backend_id=local,backend_id=other",
+        "backend_id=local,allowed_sources=peer;,allowed_sources=other",
+        "backend_id=local,allowed_sources=../peer",
+    ] {
+        assert!(Settings::parse(bad).is_err(), "{bad}");
+    }
+}
+
 const A: u128 = 0xA;
 const B: u128 = 0xB;
 
