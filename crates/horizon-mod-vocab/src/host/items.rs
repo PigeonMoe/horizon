@@ -95,6 +95,14 @@ pub trait ItemsServerHost {
         components: Vec<(String, String)>,
     ) -> Option<ItemStack>;
 
+    /// Decode the versioned gzip NBT produced by Paper's `ItemStack.serializeAsBytes`.
+    /// The item compound must contain `DataVersion`. Apply the same vanilla item
+    /// datafixes used by `item_from_saved_components`, preserving component types.
+    /// Refuses malformed, trailing or oversized data (1 MiB compressed, 16 MiB
+    /// decompressed), future versions, unknown items, air and invalid counts.
+    #[access(WorldOnly)]
+    fn item_from_saved_gzip_nbt(&self, bytes: Vec<u8>) -> Option<ItemStack>;
+
     /// Side: server.
     /// Drop one item as DefaultDispenseItemBehavior does. For a dispenser hook:
     /// return this remainder in its answer with `CLICK`; the caller plays the
