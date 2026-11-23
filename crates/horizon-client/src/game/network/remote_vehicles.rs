@@ -13,7 +13,7 @@
 //! also move on their rider's client when saddled and steered with the right stick.
 //! A minecart
 //! moves on the server with the rider's input, and the rider sits in it.
-use super::{Game, Keys, ray_box};
+use super::{Game, Keys, boat_passengers::PLAYER_RIDING_OFFSET, ray_box};
 use crate::Result;
 use horizon_client::mobs::{Mob, equine, happy_ghast};
 use horizon_client::{keybinds, text::Text};
@@ -372,8 +372,27 @@ impl Game<'_> {
             self.yaw += clamped;
             self.rope_rot_old.0 += clamped;
             self.store_boat_back(i, b);
-            // In front of a mob that shares the boat.
-            Some(self.player_boat_seat(i))
+            // The server's passenger packet orders all riders, including
+            // other players that are not in the local boat's mob list.
+            let position = if let Some(remote) = self.remote.as_ref().filter(|remote| {
+                remote.passenger_vehicles.get(&(remote.entity_id as u32)) == Some(&id)
+            }) {
+                let count = remote
+                    .passenger_vehicles
+                    .values()
+                    .filter(|&&vehicle| vehicle == id)
+                    .count();
+                self.boats[i].seat(
+                    remote.passenger_index,
+                    count,
+                    false,
+                    PLAYER_RIDING_OFFSET,
+                    false,
+                )
+            } else {
+                self.player_boat_seat(i)
+            };
+            Some(position)
         } else if self.carts.iter().any(|c| c.id == id) {
             // Minecart.positionRider runs on the client after the cart tick.
             // The offset belongs to the cart, so switching vehicles cannot
@@ -727,6 +746,43 @@ mod tests {
 
     use super::*;
     use horizon_client::mobs::MobTypes;
+
+    #[test]
+    #[ignore = "daily"]
+    fn remote_boat_rider_follows_the_server_passenger_order() {
+        use crate::game::boats::Boat;
+        use crate::game::native_entity_refs::tests::with_client_game;
+        use horizon_client::motion::PlayerMotion;
+        use horizon_protocol::connection::Pipe;
+
+        with_client_game(|game| {
+            let (client, _server) = Pipe::pair();
+            game.connect_local(client, "BoatRearSeat").unwrap();
+            game.remote.as_mut().unwrap().entity_id = 1;
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.boats
+                .push(Boat::new(3, "oak".into(), Vec3::new(4.0, 100.0, 8.0), 0.0));
+
+            let seat = |game: &mut Game<'_>, order: &[i32], z: f32, driver: bool| {
+                game.remote_set_passengers(3, order);
+                assert!(game.remote_ride(Keys::default(), 0).unwrap());
+                let player = game.player.as_ref().unwrap();
+                let hull = &game.boats[0];
+                assert_eq!(player.position.x, hull.position.x);
+                assert_eq!(player.position.z, hull.position.z + f64::from(z));
+                assert_eq!(game.controls_boat(3), driver);
+                assert_eq!(
+                    game.remote_vehicle_packets()
+                        .iter()
+                        .any(|packet| matches!(packet, S::MoveVehicle(_))),
+                    driver
+                );
+            };
+            seat(game, &[2, 1], -0.6, false);
+            seat(game, &[1, 2], 0.2, true);
+            seat(game, &[1], 0.0, true);
+        });
+    }
 
     #[test]
     #[ignore = "requires prepared resources and the vanilla mount-control reference"]
