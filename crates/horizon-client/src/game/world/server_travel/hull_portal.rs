@@ -129,8 +129,7 @@ impl HullArrival {
 
 impl Game<'_> {
     /// The boat or cart owns its wait independently of the network players.
-    /// End entry also carries direct resident mobs whose trees can use the
-    /// existing parked mob transfer, alongside the directly seated players.
+    /// Direct resident mobs can transfer alongside the directly seated players.
     pub(super) fn schedule_portal_hull(&mut self, hull: u32, plan: Plan, conns: &[u32]) -> bool {
         let source = self.dim;
         if self
@@ -147,7 +146,6 @@ impl Game<'_> {
         let mob_count = self.mob_passenger_ids(hull).len();
         if ids.len() != conns.len() + mob_count
             || self.ordered_passenger_slots(hull).len() != mob_count
-            || (mob_count > 0 && !(plan.end && plan.dim == Dim::End))
         {
             return false;
         }
@@ -287,14 +285,7 @@ impl Game<'_> {
             let rider = match passenger {
                 PortalPassenger::Player(rider) => rider,
                 PortalPassenger::Mob(rider) => {
-                    if self.arrive_portal_mob(
-                        rider,
-                        trip.source,
-                        destination,
-                        hull_from,
-                        hull_yaw,
-                        &arrival,
-                    ) {
+                    if self.arrive_portal_mob(rider, &trip, hull_from, hull_yaw, &arrival) {
                         landed.push(passenger);
                     }
                     continue;
@@ -365,8 +356,7 @@ impl Game<'_> {
     fn arrive_portal_mob(
         &mut self,
         rider: PortalMob,
-        source: Dim,
-        destination: Dim,
+        trip: &PortalHullTrip,
         hull_from: Vec3,
         hull_yaw: f32,
         arrival: &HullArrival,
@@ -375,10 +365,11 @@ impl Game<'_> {
             return false;
         };
         let from = mob.position;
+        let destination = trip.plan.dim;
         if !self.portal_mob_is_current(rider)
             || self.passenger_object_vehicle(rider.entity).is_some()
-            || !self.entity_may_travel(rider.entity, destination, TravelCause::EndPortal)
-            || self.dim != source
+            || !self.entity_may_travel(rider.entity, destination, TravelCause::of_plan(&trip.plan))
+            || self.dim != trip.source
             || !self.portal_mob_is_current(rider)
         {
             return false;
@@ -390,18 +381,25 @@ impl Game<'_> {
             return false;
         }
         let to = passenger_destination(hull_from, arrival.at, from);
-        let [yaw, _] = arrival.rider_rotation(hull_yaw, [mob.yaw, mob.head_pitch]);
-        let velocity = mob.velocity;
+        let [yaw, pitch] = arrival.rider_rotation(hull_yaw, [mob.yaw, mob.head_pitch]);
+        // PositionMoveRotation.calculateAbsolute rotates the relative delta by the
+        // rider's own pitch and yaw changes, including when its reboarding is refused.
+        let velocity = mob
+            .velocity
+            .rotate_x(f64::from(mob.head_pitch - pitch).to_radians() as f32)
+            .rotate_y(f64::from(mob.yaw - yaw).to_radians() as f32);
         if !self.open_portal_hull_level(destination)
-            || self.parked_vehicle_root(source, rider.entity) != Some(rider.entity)
+            || self.parked_vehicle_root(trip.source, rider.entity) != Some(rider.entity)
         {
             return false;
         }
-        self.arrive_vehicle(source, rider.entity, to, yaw);
+        self.arrive_vehicle(trip.source, rider.entity, to, yaw);
         if let Some(mob) = self.mob_object_mut(rider.entity) {
-            // The End uses Relative.DELTA. Keep the source motion for the
-            // separately transferred passenger even if reboarding is refused.
             mob.velocity = velocity;
+            mob.body_yaw = yaw;
+            mob.head_yaw = yaw;
+            mob.head_pitch = pitch;
+            mob.previous_head_pitch = pitch;
         }
         self.portal_mob_is_current(rider)
     }
