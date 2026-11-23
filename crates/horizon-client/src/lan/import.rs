@@ -396,7 +396,7 @@ const MAX_Y: f64 = 2.0e7;
 /// Refuses a compound whose values no player can have. `Entity.load` throws on a position or
 /// rotation that is not finite; a record comes from another machine, so it is checked rather
 /// than clamped, and a health of zero or less (a dead player) is refused too.
-fn check_values(level: &Level, attributes: &Catalog) -> Result<(), String> {
+fn check_values(level: &Level, attributes: &Catalog, projected_paper: bool) -> Result<(), String> {
     let finite = |what: &str, values: &[f64]| {
         if values.iter().all(|v| v.is_finite()) {
             Ok(())
@@ -443,7 +443,11 @@ fn check_values(level: &Level, attributes: &Catalog) -> Result<(), String> {
     {
         return Err("the record's health is past what a player can have".into());
     }
-    if !(0.0..=40.0).contains(&level.food_exhaustion) {
+    // Paper's FoodData setter accepts finite signed floats. Only a compound
+    // built by the Paper adapter may use that representation on the wire.
+    if !level.food_exhaustion.is_finite()
+        || (!projected_paper && !(0.0..=40.0).contains(&level.food_exhaustion))
+    {
         return Err("the record's food exhaustion is past what a player can have".into());
     }
     if level.active_effects.iter().any(|e| {
@@ -635,7 +639,7 @@ pub fn import_player(
     uuid: u128,
     request: &Value,
 ) -> Result<Imported, String> {
-    import_player_inner(hub, attributes, uuid, request, None)
+    import_player_inner(hub, attributes, uuid, request, None, false)
 }
 
 /// Apply the incoming native state while keeping validated profile sections sealed until
@@ -648,7 +652,19 @@ pub fn import_player_with_profiles(
     request: &Value,
     profiles: StagedProfileImport,
 ) -> Result<Imported, String> {
-    import_player_inner(hub, attributes, uuid, request, Some(profiles.0))
+    import_player_inner(hub, attributes, uuid, request, Some(profiles.0), false)
+}
+
+/// Apply a strict record built on this backend from a verified Paper snapshot.
+/// The control command never accepts a caller-supplied native compound here.
+pub fn import_projected_paper_player(
+    hub: &mut Hub,
+    attributes: &Catalog,
+    uuid: u128,
+    request: &Value,
+    profiles: StagedProfileImport,
+) -> Result<Imported, String> {
+    import_player_inner(hub, attributes, uuid, request, Some(profiles.0), true)
 }
 
 fn held_index(hub: &Hub, uuid: u128, handover: u128) -> Result<usize, String> {
@@ -677,6 +693,7 @@ fn import_player_inner(
     uuid: u128,
     input: &Value,
     profiles: Option<PreparedProfiles>,
+    projected_paper: bool,
 ) -> Result<Imported, String> {
     if hub.transfers.as_ref().is_some_and(|t| t.stopping) {
         return Err(super::arrivals::STOPPING.into());
@@ -713,7 +730,7 @@ fn import_player_inner(
     profile_storage::clear_markers(&mut tag);
     let mut level = Level::default();
     level.read_player(&tag);
-    check_values(&level, attributes)?;
+    check_values(&level, attributes, projected_paper)?;
     // A record with a vehicle still to restore (`RootVehicle`) puts the player back on it, at
     // the vehicle's own saved place: a position named by the request would be undone as soon
     // as the vehicle is restored, so the two cannot be taken together.

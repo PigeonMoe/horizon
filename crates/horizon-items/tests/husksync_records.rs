@@ -4,6 +4,7 @@ use horizon_items::{
     husksync_records::RecordsError,
 };
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 const FIXTURE: &str = include_str!("fixtures/husksync/husk-records-26.2.json");
 const LIMITS: PackedLimits = PackedLimits {
@@ -124,4 +125,52 @@ fn global_roster_requires_shared_state_and_keeps_world_state_local() {
             Err(RecordsError::LocalField(field)) if field == key)
         );
     }
+}
+
+#[test]
+fn projects_bukkit_statistic_names_and_keeps_unmentioned_counters() {
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["data"]["husksync:statistics"] = json!(
+        r#"{
+        "generic":{"play_one_minute":110,"chest_opened":6,"jump":-1,"unknown":7},
+        "blocks":{"mine_block":{"stone":11}},
+        "items":{"break_item":{"iron_pickaxe":2},"craft_item":{"torch":23},
+                 "drop":{"torch":3},"pickup":{"torch":4},"use_item":{"iron_pickaxe":8}},
+        "entities":{"kill_entity":{"zombie":12},"entity_killed_by":{"skeleton":1}}
+    }"#
+    );
+    let records = packed(&input.to_string())
+        .player_records(LIMITS.max_json_bytes)
+        .unwrap();
+    let mut native = BTreeMap::from([(
+        "minecraft:custom".to_owned(),
+        BTreeMap::from([
+            ("minecraft:play_time".to_owned(), 9),
+            ("minecraft:time_since_rest".to_owned(), 44),
+            ("minecraft:jump".to_owned(), 10),
+        ]),
+    )]);
+    let expected = [
+        ("minecraft:custom", "minecraft:play_time", 110),
+        ("minecraft:custom", "minecraft:open_chest", 6),
+        ("minecraft:mined", "minecraft:stone", 11),
+        ("minecraft:broken", "minecraft:iron_pickaxe", 2),
+        ("minecraft:crafted", "minecraft:torch", 23),
+        ("minecraft:dropped", "minecraft:torch", 3),
+        ("minecraft:picked_up", "minecraft:torch", 4),
+        ("minecraft:used", "minecraft:iron_pickaxe", 8),
+        ("minecraft:killed", "minecraft:zombie", 12),
+        ("minecraft:killed_by", "minecraft:skeleton", 1),
+    ];
+    records.statistics.overlay_native(&mut native, |kind, key| {
+        expected
+            .iter()
+            .any(|(known_kind, known_key, _)| (*known_kind, *known_key) == (kind, key))
+    });
+    for (kind, key, count) in expected {
+        assert_eq!(native[kind][key], count);
+    }
+    assert_eq!(native["minecraft:custom"]["minecraft:time_since_rest"], 44);
+    assert_eq!(native["minecraft:custom"]["minecraft:jump"], 10);
+    assert!(!native["minecraft:custom"].contains_key("minecraft:unknown"));
 }

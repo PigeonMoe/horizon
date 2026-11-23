@@ -192,7 +192,7 @@ pub(in crate::game::dedicated) fn digest_hex(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn parse_digest(input: &str) -> Option<[u8; 32]> {
+pub(in crate::game::dedicated) fn parse_digest(input: &str) -> Option<[u8; 32]> {
     if input.len() != 64
         || !input
             .bytes()
@@ -214,6 +214,8 @@ pub(super) struct Receipt {
     pub binding: Binding,
     announced: bool,
     recentered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper_snapshot_sha256: Option<[u8; 32]>,
 }
 
 impl Receipt {
@@ -227,6 +229,7 @@ impl Receipt {
             binding,
             announced,
             recentered,
+            paper_snapshot_sha256: None,
         }
     }
 
@@ -236,6 +239,9 @@ impl Receipt {
             "retried": retried, "already_committed": retried, "currently_placed": currently_placed,
         });
         self.binding.add_to_reply(&mut reply);
+        if let Some(digest) = self.paper_snapshot_sha256 {
+            reply["paper_snapshot_sha256"] = json!(digest_hex(digest));
+        }
         reply
     }
 }

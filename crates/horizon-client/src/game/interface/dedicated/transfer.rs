@@ -17,6 +17,9 @@ use horizon_client::lan::{
 use serde_json::{Value, json};
 use std::time::Instant;
 
+#[path = "transfer_paper.rs"]
+mod paper;
+
 #[path = "transfer_receipt.rs"]
 pub(super) mod receipt;
 
@@ -152,6 +155,8 @@ impl Game<'_> {
                 None => json!({ "error": "the server is not open to players" }),
             },
             "player-profile-resume" => self.resume_profile_owner(args),
+            "player-profile-prepare-paper" => self.prepare_paper_profile(args),
+            "player-profile-import-paper" => self.stage_paper_profile(args),
             "player-drop" => match self.lan.as_mut() {
                 Some(host) => arrivals::drop_request(&mut host.hub, args),
                 None => json!({ "error": "the server is not open to players" }),
@@ -201,6 +206,26 @@ impl Game<'_> {
         let request: Value = match serde_json::from_str(request.trim()) {
             Ok(v) => v,
             Err(e) => return json!({ "error": format!("the request is not JSON: {e}") }),
+        };
+        self.apply_player_import(uuid, request, false)
+    }
+
+    pub(super) fn apply_player_import(
+        &mut self,
+        uuid: u128,
+        request: Value,
+        projected_paper: bool,
+    ) -> Value {
+        let paper_digest = if projected_paper {
+            let Some(digest) = request["record"]["paper_snapshot_sha256"]
+                .as_str()
+                .and_then(receipt::parse_digest)
+            else {
+                return json!({ "error": "the Paper projection has no snapshot digest" });
+            };
+            Some(digest)
+        } else {
+            None
         };
         let Some(host) = self.lan.as_ref() else {
             return json!({ "error": "the server is not open to players" });
@@ -293,6 +318,13 @@ impl Game<'_> {
         };
         let hub = &mut self.lan.as_mut().expect("the server is open").hub;
         let result = match stage {
+            Some(stage) if projected_paper => import::import_projected_paper_player(
+                hub,
+                &self.motion.attributes,
+                uuid,
+                &request,
+                stage,
+            ),
             Some(stage) => import::import_player_with_profiles(
                 hub,
                 &self.motion.attributes,
@@ -313,14 +345,13 @@ impl Game<'_> {
                     strict
                         .as_ref()
                         .map(|binding| {
-                            receipt::set_staged(
-                                guest,
-                                &receipt::Receipt::new(
-                                    binding.clone(),
-                                    done.announce,
-                                    done.recentered,
-                                ),
-                            )
+                            let mut received = receipt::Receipt::new(
+                                binding.clone(),
+                                done.announce,
+                                done.recentered,
+                            );
+                            received.paper_snapshot_sha256 = paper_digest;
+                            receipt::set_staged(guest, &received)
                         })
                         .transpose()
                 });
@@ -347,6 +378,9 @@ impl Game<'_> {
                         });
                         if let Some(binding) = strict {
                             binding.add_to_reply(&mut reply);
+                        }
+                        if let Some(digest) = paper_digest {
+                            reply["paper_snapshot_sha256"] = json!(receipt::digest_hex(digest));
                         }
                         reply
                     }

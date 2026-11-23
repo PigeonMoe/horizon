@@ -50,6 +50,80 @@ pub struct HuskStatistics {
     pub entities: BTreeMap<String, BTreeMap<String, i32>>,
 }
 
+impl HuskStatistics {
+    /// Apply the counters Paper would recognize to a copy of the destination's stats.
+    /// The caller resolves the vanilla type and value against its actual registries.
+    pub fn overlay_native(
+        &self,
+        destination: &mut BTreeMap<String, BTreeMap<String, i32>>,
+        mut supported: impl FnMut(&str, &str) -> bool,
+    ) {
+        let mut set = |kind: &str, key: &str, value: i32| {
+            if value < 0 {
+                return;
+            }
+            let key = format!("minecraft:{key}");
+            if supported(kind, &key) {
+                destination
+                    .entry(kind.to_owned())
+                    .or_default()
+                    .insert(key, value);
+            }
+        };
+        for (id, &value) in &self.generic {
+            set("minecraft:custom", vanilla_custom_stat(id), value);
+        }
+        for (paper, vanilla, values) in [
+            ("mine_block", "minecraft:mined", &self.blocks),
+            ("break_item", "minecraft:broken", &self.items),
+            ("craft_item", "minecraft:crafted", &self.items),
+            ("drop", "minecraft:dropped", &self.items),
+            ("pickup", "minecraft:picked_up", &self.items),
+            ("use_item", "minecraft:used", &self.items),
+            ("kill_entity", "minecraft:killed", &self.entities),
+            ("entity_killed_by", "minecraft:killed_by", &self.entities),
+        ] {
+            if let Some(counters) = values.get(paper) {
+                for (key, &value) in counters {
+                    set(vanilla, key, value);
+                }
+            }
+        }
+    }
+}
+
+// Bukkit's enum keys use legacy names for these untyped statistics.
+// Source: Paper 26.2 CraftStatistic, revision 19ebc4a.
+fn vanilla_custom_stat(id: &str) -> &str {
+    match id {
+        "armor_cleaned" => "clean_armor",
+        "banner_cleaned" => "clean_banner",
+        "drop_count" => "drop",
+        "cake_slices_eaten" => "eat_cake_slice",
+        "item_enchanted" => "enchant_item",
+        "cauldron_filled" => "fill_cauldron",
+        "dispenser_inspected" => "inspect_dispenser",
+        "dropper_inspected" => "inspect_dropper",
+        "hopper_inspected" => "inspect_hopper",
+        "beacon_interaction" => "interact_with_beacon",
+        "brewingstand_interaction" => "interact_with_brewingstand",
+        "crafting_table_interaction" => "interact_with_crafting_table",
+        "furnace_interaction" => "interact_with_furnace",
+        "chest_opened" => "open_chest",
+        "enderchest_opened" => "open_enderchest",
+        "shulker_box_opened" => "open_shulker_box",
+        "noteblock_played" => "play_noteblock",
+        "record_played" => "play_record",
+        "play_one_minute" => "play_time",
+        "flower_potted" => "pot_flower",
+        "sneak_time" => "crouch_time",
+        "trapped_chest_triggered" => "trigger_trapped_chest",
+        "noteblock_tuned" => "tune_noteblock",
+        "cauldron_used" => "use_cauldron",
+        id => id,
+    }
+}
+
 #[derive(Debug)]
 pub enum RecordsError {
     Missing(&'static str),
