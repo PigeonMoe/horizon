@@ -585,7 +585,7 @@ impl Game<'_> {
             return;
         }
         let g = &host.hub.guests[gi];
-        if g.awaiting_teleport.is_some() || !g.client_loaded() {
+        if g.landing || g.awaiting_teleport.is_some() || !g.client_loaded() {
             return;
         }
         let Some(vehicle) = g.vehicle else {

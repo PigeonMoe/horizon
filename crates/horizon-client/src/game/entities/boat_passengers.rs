@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 pub(super) const BOARDING_COOLDOWN: i32 = 60;
 /// `Player.DEFAULT_VEHICLE_ATTACHMENT`: how far below the seat a player's
 /// feet are.
-const PLAYER_RIDING_OFFSET: f64 = 0.6;
+pub(super) const PLAYER_RIDING_OFFSET: f64 = 0.6;
 
 /// How many box queries the walk over every mob answers, once a write to the mob list has
 /// made the grid stale, before a new grid is built: about what building one costs (with
