@@ -97,8 +97,9 @@ pub trait BlockEntitiesBackend {
     #[access(WorldOnly)]
     fn block_entity_furnace_cooking(&self, entity: BlockEntityRef) -> Option<(i32, i32)>;
     /// Side: both.
-    /// Read a configured mod holder's declared internal item slot or a vanilla brewing
-    /// stand's ingredient slot (3), without automation policy.
+    /// Read an internal item slot of a configured mod holder, a vanilla furnace
+    /// (including blast furnaces and smokers), or a brewing stand's ingredient slot (3).
+    /// ITEMS has its own automation policy.
     /// Removed, replaced or reloaded holders return BlockEntityItemError::Stale.
     #[access(WorldOnly)]
     fn block_entity_item_slot(
@@ -213,10 +214,10 @@ pub trait BlockEntitiesBackendMut {
     ) -> Result<bool, BlockEntityDataError>;
     /// Side: server.
     /// Replace a configured mod holder's internal storage silently under the existing
-    /// transaction, or write a vanilla brewing stand's ingredient slot (3), with a
-    /// normal container change notice at commit. This does not apply ITEMS automation
-    /// filters or authorise a transfer. Removed, replaced or reloaded holders return
-    /// BlockEntityItemError::Stale.
+    /// transaction. Vanilla furnace slots and a brewing stand's ingredient slot (3)
+    /// produce the normal container change notice at commit.
+    /// The caller authorises any transfer separately. ITEMS retains its automation filters.
+    /// Removed, replaced or reloaded holders return BlockEntityItemError::Stale.
     #[access(WorldOnly)]
     fn block_entity_set_item_slot(
         &mut self,
