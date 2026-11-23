@@ -52,23 +52,39 @@ impl PortalRider {
     }
 }
 
-#[derive(Clone, Copy)]
 struct PortalMob {
     entity: u32,
     uuid: [i32; 4],
+    passengers: Vec<PortalPassenger>,
 }
 
-#[derive(Clone, Copy)]
 enum PortalPassenger {
     Player(PortalRider),
     Mob(PortalMob),
 }
 
 impl PortalPassenger {
-    fn entity_id(self) -> u32 {
+    fn entity_id(&self) -> u32 {
         match self {
             Self::Player(rider) => rider.entity,
             Self::Mob(rider) => rider.entity,
+        }
+    }
+
+    fn player_count(&self) -> usize {
+        match self {
+            Self::Player(_) => 1,
+            Self::Mob(rider) => rider.passengers.iter().map(Self::player_count).sum(),
+        }
+    }
+
+    fn holds(&self, guest: &Guest, source: Dim) -> bool {
+        match self {
+            Self::Player(rider) => rider.still_seated(guest, source),
+            Self::Mob(rider) => rider
+                .passengers
+                .iter()
+                .any(|child| child.holds(guest, source)),
         }
     }
 }
@@ -84,9 +100,9 @@ pub(in crate::game) struct PortalHullTrip {
 
 impl PortalHullTrip {
     pub(in crate::game) fn holds(&self, guest: &Guest) -> bool {
-        self.passengers.iter().any(|passenger| {
-            matches!(passenger, PortalPassenger::Player(rider) if rider.still_seated(guest, self.source))
-        })
+        self.passengers
+            .iter()
+            .any(|passenger| passenger.holds(guest, self.source))
     }
 
     pub(super) fn pending_chunk(&self, dim: Dim) -> Option<(i32, i32)> {
@@ -106,6 +122,23 @@ struct HullArrival {
 }
 
 impl HullArrival {
+    fn for_passenger(
+        &self,
+        (at, yaw): (Vec3, f32),
+        (passenger_at, passenger_yaw): (Vec3, f32),
+    ) -> Self {
+        Self {
+            at: passenger_destination(at, self.at, passenger_at),
+            yaw: if self.relative_yaw {
+                self.yaw
+            } else {
+                self.yaw + (passenger_yaw - yaw)
+            },
+            relative_yaw: self.relative_yaw,
+            pitch_delta: self.pitch_delta,
+        }
+    }
+
     fn rider_rotation(&self, hull_yaw: f32, [yaw, pitch]: [f32; 2]) -> [f32; 2] {
         let passenger_yaw = if self.relative_yaw {
             yaw
@@ -142,20 +175,17 @@ impl Game<'_> {
         let Some((at, _)) = self.portal_hull_pose(hull) else {
             return false;
         };
-        let ids = self.native_passenger_ids(hull);
-        let mob_count = self.mob_passenger_ids(hull).len();
-        if ids.len() != conns.len() + mob_count
-            || self.ordered_passenger_slots(hull).len() != mob_count
+        let Some(passengers) = self.capture_portal_passengers(hull, conns) else {
+            return false;
+        };
+        if passengers
+            .iter()
+            .map(PortalPassenger::player_count)
+            .sum::<usize>()
+            != conns.len()
         {
             return false;
         }
-        let passengers: Option<Vec<_>> = ids
-            .into_iter()
-            .map(|id| self.capture_portal_passenger(id, hull, conns))
-            .collect();
-        let Some(passengers) = passengers else {
-            return false;
-        };
         if !self.open_portal_hull_level(plan.dim) {
             return true;
         }
@@ -190,6 +220,22 @@ impl Game<'_> {
         true
     }
 
+    /// Capture all visible, ordered riders. Opaque save records and retained
+    /// off-level riders stay on the existing stored-tree route.
+    fn capture_portal_passengers(
+        &mut self,
+        vehicle: u32,
+        conns: &[u32],
+    ) -> Option<Vec<PortalPassenger>> {
+        if self.ordered_passenger_slots(vehicle).len() != self.mob_passenger_ids(vehicle).len() {
+            return None;
+        }
+        self.native_passenger_ids(vehicle)
+            .into_iter()
+            .map(|id| self.capture_portal_passenger(id, vehicle, conns))
+            .collect()
+    }
+
     fn capture_portal_passenger(
         &mut self,
         id: u32,
@@ -208,30 +254,23 @@ impl Game<'_> {
                 .is_empty()
                 .then(|| PortalPassenger::Player(PortalRider::capture(guest)));
         }
-        self.portal_mob_tree_is_resident(id).then(|| {
-            PortalPassenger::Mob(PortalMob {
-                entity: id,
-                uuid: self.uuid_for(id),
-            })
-        })
+        if self.entity(id).is_none() || !self.mobs.iter().any(|mob| mob.id == id && mob.alive()) {
+            return None;
+        }
+        Some(PortalPassenger::Mob(PortalMob {
+            entity: id,
+            uuid: self.uuid_for(id),
+            passengers: self.capture_portal_passengers(id, conns)?,
+        }))
     }
 
-    /// `arrive_vehicle` moves mob objects and their attachments, including
-    /// known descendants. An opaque saved slot or an indirect network player
-    /// needs the original routing until that rider can be admitted separately.
-    fn portal_mob_tree_is_resident(&self, root: u32) -> bool {
-        std::iter::once(root)
-            .chain(self.native_indirect_passenger_ids(root))
-            .all(|id| {
-                self.entity(id).is_some()
-                    && self.mobs.iter().any(|mob| mob.id == id && mob.alive())
-                    && self.ordered_passenger_slots(id).len() == self.mob_passenger_ids(id).len()
-            })
-    }
-
-    fn portal_mob_is_current(&self, rider: PortalMob) -> bool {
-        self.persist.uuids.get(&rider.entity) == Some(&rider.uuid)
-            && self.portal_mob_tree_is_resident(rider.entity)
+    fn portal_mob_is_current(&self, rider: &PortalMob) -> bool {
+        self.entity(rider.entity).is_some()
+            && self.persist.uuids.get(&rider.entity) == Some(&rider.uuid)
+            && self
+                .mobs
+                .iter()
+                .any(|mob| mob.id == rider.entity && mob.alive())
     }
 
     pub(super) fn arrive_portal_hulls(&mut self) {
@@ -251,9 +290,8 @@ impl Game<'_> {
         }
     }
 
-    fn arrive_portal_hull(&mut self, trip: PortalHullTrip) {
+    fn arrive_portal_hull(&mut self, mut trip: PortalHullTrip) {
         let destination = trip.plan.dim;
-        let cause = TravelCause::of_plan(&trip.plan);
         self.resolve_arrivals();
         if self.dim != destination
             || self.parked_vehicle_root(trip.source, trip.hull) != Some(trip.hull)
@@ -269,14 +307,71 @@ impl Game<'_> {
         if !self.open_portal_hull_level(trip.source) {
             return;
         }
-        let Some((hull_from, hull_yaw, passengers)) = self.detach_portal_hull_riders(&trip) else {
+        let Some(hull_pose) = self.portal_hull_pose(trip.hull) else {
             self.open_portal_hull_level(destination);
             return;
         };
+        if !self.admit_portal_vehicle(trip.hull, &trip) {
+            self.open_portal_hull_level(destination);
+            return;
+        }
+        let passengers = std::mem::take(&mut trip.passengers);
+        let Some(passengers) =
+            self.detach_portal_passengers(trip.hull, hull_pose, trip.source, passengers)
+        else {
+            self.open_portal_hull_level(destination);
+            return;
+        };
+        let landed = self.arrive_portal_passengers(passengers, &trip, hull_pose, &arrival);
 
-        // Paper ejects the original passenger list back to front, then teleports
-        // each of those now-unmounted passengers in forward order. A subsequent
-        // listener can observe an earlier accepted rider already in the destination.
+        if !self.open_portal_hull_level(trip.source) {
+            self.open_portal_hull_level(destination);
+            return;
+        }
+        let hull_ready = self.portal_vehicle_is_empty(trip.hull, hull_pose, trip.source);
+        if hull_ready {
+            self.release_vehicle_container(trip.hull);
+        }
+        if !self.open_portal_hull_level(destination) || !hull_ready {
+            return;
+        }
+        self.arrive_vehicle(
+            trip.source,
+            trip.hull,
+            arrival.at,
+            arrival.hull_yaw(hull_pose.1),
+        );
+        self.portals.carried_at.remove(&trip.hull);
+        self.reattach_portal_passengers(landed, destination, trip.hull);
+    }
+
+    fn admit_portal_vehicle(&mut self, vehicle: u32, trip: &PortalHullTrip) -> bool {
+        let Some(entity) = self.entity(vehicle) else {
+            return false;
+        };
+        let mut cancelled = false;
+        if self.entity_travel_hook_epoch().is_some() {
+            self.native_entity_travel_to_dimension(
+                entity,
+                trip.plan.dim.id(),
+                TravelCause::of_plan(&trip.plan).id(),
+                &mut cancelled,
+            );
+        }
+        !cancelled && self.dim == trip.source && self.entity(vehicle).is_some()
+    }
+
+    /// Entity.teleportCrossDimension: direct riders cross in order. A mob
+    /// with riders runs the same sequence before it can rejoin its parent.
+    fn arrive_portal_passengers(
+        &mut self,
+        passengers: Vec<PortalPassenger>,
+        trip: &PortalHullTrip,
+        parent: (Vec3, f32),
+        arrival: &HullArrival,
+    ) -> Vec<PortalPassenger> {
+        let destination = trip.plan.dim;
+        let cause = TravelCause::of_plan(&trip.plan);
         let mut landed = Vec::new();
         for passenger in passengers {
             if !self.open_portal_hull_level(trip.source) {
@@ -284,15 +379,15 @@ impl Game<'_> {
             }
             let rider = match passenger {
                 PortalPassenger::Player(rider) => rider,
-                PortalPassenger::Mob(rider) => {
-                    if self.arrive_portal_mob(rider, &trip, hull_from, hull_yaw, &arrival) {
-                        landed.push(passenger);
+                PortalPassenger::Mob(mut rider) => {
+                    if self.arrive_portal_mob(&mut rider, trip, parent, arrival) {
+                        landed.push(PortalPassenger::Mob(rider));
                     }
                     continue;
                 }
             };
             let [x, y, z] = rider.origin.position;
-            let destination_at = passenger_destination(hull_from, arrival.at, Vec3::new(x, y, z));
+            let destination_at = passenger_destination(parent.0, arrival.at, Vec3::new(x, y, z));
             let Some(rotation) =
                 self.admit_portal_rider(rider, trip.source, destination, destination_at, cause)
             else {
@@ -308,80 +403,52 @@ impl Game<'_> {
                 rider,
                 trip.source,
                 destination_at,
-                arrival.rider_rotation(hull_yaw, rotation),
+                arrival.rider_rotation(parent.1, rotation),
             ) {
                 landed.push(PortalPassenger::Player(rider));
             }
         }
-
-        if !self.open_portal_hull_level(trip.source) {
-            self.open_portal_hull_level(destination);
-            return;
-        }
-        let hull_ready = self.portal_hull_pose(trip.hull) == Some((hull_from, hull_yaw))
-            && self.native_passenger_ids(trip.hull).is_empty()
-            && self.ordered_passenger_slots(trip.hull).is_empty();
-        if hull_ready {
-            self.release_vehicle_container(trip.hull);
-        }
-        if !self.open_portal_hull_level(destination) || !hull_ready {
-            return;
-        }
-        self.arrive_vehicle(
-            trip.source,
-            trip.hull,
-            arrival.at,
-            arrival.hull_yaw(hull_yaw),
-        );
-        self.portals.carried_at.remove(&trip.hull);
-        for passenger in landed {
-            match passenger {
-                PortalPassenger::Player(rider) => {
-                    self.reattach_portal_rider(rider, destination, trip.hull);
-                }
-                PortalPassenger::Mob(rider) => {
-                    if self.dim == destination
-                        && self.portal_mob_is_current(rider)
-                        && self.passenger_object_vehicle(rider.entity).is_none()
-                        && let (Some(entity), Some(hull)) =
-                            (self.entity(rider.entity), self.entity(trip.hull))
-                    {
-                        self.entity_start_riding(entity, hull, true);
-                    }
-                }
-            }
-        }
+        landed
     }
 
     fn arrive_portal_mob(
         &mut self,
-        rider: PortalMob,
+        rider: &mut PortalMob,
         trip: &PortalHullTrip,
-        hull_from: Vec3,
-        hull_yaw: f32,
+        parent: (Vec3, f32),
         arrival: &HullArrival,
     ) -> bool {
         let Some(mob) = self.mob_object(rider.entity) else {
             return false;
         };
-        let from = mob.position;
+        let pose = (mob.position, mob.yaw);
         let destination = trip.plan.dim;
         if !self.portal_mob_is_current(rider)
             || self.passenger_object_vehicle(rider.entity).is_some()
-            || !self.entity_may_travel(rider.entity, destination, TravelCause::of_plan(&trip.plan))
-            || self.dim != trip.source
+            || !self.admit_portal_vehicle(rider.entity, trip)
             || !self.portal_mob_is_current(rider)
+        {
+            return false;
+        }
+        let passengers = std::mem::take(&mut rider.passengers);
+        let Some(passengers) =
+            self.detach_portal_passengers(rider.entity, pose, trip.source, passengers)
+        else {
+            return false;
+        };
+        let arrival = arrival.for_passenger(parent, pose);
+        let landed = self.arrive_portal_passengers(passengers, trip, pose, &arrival);
+        if !self.open_portal_hull_level(trip.source)
+            || !self.portal_mob_is_current(rider)
+            || self.passenger_object_vehicle(rider.entity).is_some()
+            || !self.portal_vehicle_is_empty(rider.entity, pose, trip.source)
         {
             return false;
         }
         let Some(mob) = self.mob_object(rider.entity) else {
             return false;
         };
-        if mob.extra.mount.is_some() || mob.position != from {
-            return false;
-        }
-        let to = passenger_destination(hull_from, arrival.at, from);
-        let [yaw, pitch] = arrival.rider_rotation(hull_yaw, [mob.yaw, mob.head_pitch]);
+        let [yaw, pitch] = arrival.rider_rotation(pose.1, [mob.yaw, mob.head_pitch]);
         // PositionMoveRotation.calculateAbsolute rotates the relative delta by the
         // rider's own pitch and yaw changes, including when its reboarding is refused.
         let velocity = mob
@@ -393,7 +460,10 @@ impl Game<'_> {
         {
             return false;
         }
-        self.arrive_vehicle(trip.source, rider.entity, to, yaw);
+        self.arrive_vehicle(trip.source, rider.entity, arrival.at, yaw);
+        if !self.portal_mob_is_current(rider) {
+            return false;
+        }
         if let Some(mob) = self.mob_object_mut(rider.entity) {
             mob.velocity = velocity;
             mob.body_yaw = yaw;
@@ -401,7 +471,8 @@ impl Game<'_> {
             mob.head_pitch = pitch;
             mob.previous_head_pitch = pitch;
         }
-        self.portal_mob_is_current(rider)
+        self.reattach_portal_passengers(landed, destination, rider.entity);
+        self.dim == destination && self.portal_mob_is_current(rider)
     }
 
     fn resolve_portal_hull_exit(&mut self, plan: &Plan) -> Option<HullArrival> {
@@ -436,26 +507,61 @@ impl Game<'_> {
         })
     }
 
-    fn reattach_portal_rider(&mut self, rider: PortalRider, destination: Dim, hull: u32) {
+    fn reattach_portal_passengers(
+        &mut self,
+        landed: Vec<PortalPassenger>,
+        destination: Dim,
+        vehicle: u32,
+    ) {
+        for passenger in landed {
+            if self.dim != destination {
+                break;
+            }
+            match passenger {
+                PortalPassenger::Player(rider) => {
+                    self.reattach_portal_rider(rider, destination, vehicle);
+                }
+                PortalPassenger::Mob(rider) => {
+                    if self.portal_mob_is_current(&rider)
+                        && self.passenger_object_vehicle(rider.entity).is_none()
+                        && let (Some(entity), Some(vehicle)) =
+                            (self.entity(rider.entity), self.entity(vehicle))
+                    {
+                        self.entity_start_riding(entity, vehicle, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn reattach_portal_rider(&mut self, rider: PortalRider, destination: Dim, vehicle: u32) {
         if !self.portal_rider_is_current(rider, destination) {
             return;
         }
-        let (Some(entity), Some(vehicle)) = (self.entity(rider.entity), self.entity(hull)) else {
+        let (Some(entity), Some(mount)) = (self.entity(rider.entity), self.entity(vehicle)) else {
             return;
         };
-        if !self.entity_start_riding(entity, vehicle, true) || self.dim != destination {
+        if !self.entity_start_riding(entity, mount, true) || self.dim != destination {
             return;
         }
-        let (at, seat_at) = if let Some(i) = self.boats.iter().position(|boat| boat.id == hull) {
+        let (at, seat_at) = if let Some(i) = self.boats.iter().position(|boat| boat.id == vehicle) {
             let Some(seat_at) = self.guest_boat_seat(i, rider.entity) else {
                 return;
             };
             (self.boats[i].position, seat_at)
-        } else if let Some(cart) = self.carts.iter().find(|cart| cart.id == hull) {
+        } else if let Some(cart) = self.carts.iter().find(|cart| cart.id == vehicle) {
             (
                 cart.position,
                 cart.position.add_vector(Vec3::new(0.0, SEAT, 0.0)),
             )
+        } else if let Some(at) = self.mob_object(vehicle).map(|mob| mob.position) {
+            let Some(Some(seat_at)) = self.as_guest(rider.conn, |game| {
+                game.position_rider();
+                game.player.as_ref().map(|player| player.position)
+            }) else {
+                return;
+            };
+            (at, seat_at)
         } else {
             return;
         };
@@ -468,12 +574,12 @@ impl Game<'_> {
         let guest = &host.hub.guests[i];
         if !rider.same_player(guest)
             || guest.dimension != destination.id()
-            || guest.vehicle != Some(hull)
+            || guest.vehicle != Some(vehicle)
         {
             return;
         }
         // ServerPlayer.startRiding positions the rider before setting the
-        // connection's teleport baseline. The hull tracker publishes its seats.
+        // connection's teleport baseline. The entity tracker publishes its seats.
         host.hub.guests.update(i, |guest| {
             guest.vehicle_good = Some(at.components());
             guest.on_ground = false;
@@ -481,51 +587,51 @@ impl Game<'_> {
         host.hub.teleport(i, Some(seat_at.components()));
     }
 
-    fn detach_portal_hull_riders(
+    fn portal_vehicle_pose(&self, vehicle: u32) -> Option<(Vec3, f32)> {
+        self.portal_hull_pose(vehicle)
+            .or_else(|| self.mob_object(vehicle).map(|mob| (mob.position, mob.yaw)))
+    }
+
+    fn portal_vehicle_is_empty(&self, vehicle: u32, pose: (Vec3, f32), source: Dim) -> bool {
+        self.dim == source
+            && self.portal_vehicle_pose(vehicle) == Some(pose)
+            && self.native_passenger_ids(vehicle).is_empty()
+            && self.ordered_passenger_slots(vehicle).is_empty()
+    }
+
+    fn detach_portal_passengers(
         &mut self,
-        trip: &PortalHullTrip,
-    ) -> Option<(Vec3, f32, Vec<PortalPassenger>)> {
-        let root = self.entity(trip.hull)?;
-        let hull_pose = self.portal_hull_pose(trip.hull)?;
-        if self.entity_travel_hook_epoch().is_some() {
-            let mut cancel = false;
-            self.native_entity_travel_to_dimension(
-                root,
-                trip.plan.dim.id(),
-                TravelCause::of_plan(&trip.plan).id(),
-                &mut cancel,
-            );
-            if cancel
-                || self.dim != trip.source
-                || self.portal_hull_pose(trip.hull) != Some(hull_pose)
-            {
-                return None;
-            }
+        vehicle: u32,
+        pose: (Vec3, f32),
+        source: Dim,
+        passengers: Vec<PortalPassenger>,
+    ) -> Option<Vec<PortalPassenger>> {
+        let root = self.entity(vehicle)?;
+        if self.dim != source || self.portal_vehicle_pose(vehicle) != Some(pose) {
+            return None;
         }
-        let passengers: Vec<_> = trip
-            .passengers
-            .iter()
-            .copied()
-            .filter(|passenger| match *passenger {
+        let passengers: Vec<_> = passengers
+            .into_iter()
+            .filter(|passenger| match passenger {
                 PortalPassenger::Player(rider) => {
                     !self.on_server_trip(rider.conn)
                         && self
                             .lan
                             .as_ref()
                             .and_then(|host| host.hub.guest(rider.conn))
-                            .is_some_and(|guest| rider.still_seated(guest, trip.source))
+                            .is_some_and(|guest| rider.still_seated(guest, source))
                 }
                 PortalPassenger::Mob(rider) => {
                     self.portal_mob_is_current(rider)
-                        && self.passenger_object_vehicle(rider.entity) == Some(trip.hull)
+                        && self.passenger_object_vehicle(rider.entity) == Some(vehicle)
                 }
             })
             .collect();
         if self
-            .native_passenger_ids(trip.hull)
+            .native_passenger_ids(vehicle)
             .into_iter()
-            .ne(passengers.iter().copied().map(PortalPassenger::entity_id))
-            || self.ordered_passenger_slots(trip.hull).len()
+            .ne(passengers.iter().map(PortalPassenger::entity_id))
+            || self.ordered_passenger_slots(vehicle).len()
                 != passengers
                     .iter()
                     .filter(|passenger| matches!(passenger, PortalPassenger::Mob(_)))
@@ -533,8 +639,9 @@ impl Game<'_> {
         {
             return None;
         }
+        // Entity.ejectPassengers iterates its saved direct riders in reverse.
         for passenger in passengers.iter().rev() {
-            if self.dim != trip.source || self.portal_hull_pose(trip.hull) != Some(hull_pose) {
+            if self.dim != source || self.portal_vehicle_pose(vehicle) != Some(pose) {
                 return None;
             }
             if let Some(entity) = self.entity(passenger.entity_id())
@@ -543,30 +650,27 @@ impl Game<'_> {
                 self.entity_stop_riding(entity);
             }
         }
-        if self.dim != trip.source
-            || self.portal_hull_pose(trip.hull) != Some(hull_pose)
-            || !self.native_passenger_ids(trip.hull).is_empty()
-            || !self.ordered_passenger_slots(trip.hull).is_empty()
-        {
+        if !self.portal_vehicle_is_empty(vehicle, pose, source) {
             return None;
         }
         let host = self.lan.as_ref()?;
-        let detached = passengers
-            .into_iter()
-            .filter_map(|passenger| match passenger {
-                PortalPassenger::Player(rider) => {
-                    let guest = host.hub.guest(rider.conn)?;
-                    (rider.same_player(guest)
-                        && guest.dimension == trip.source.id()
-                        && guest.vehicle.is_none())
-                    .then(|| PortalPassenger::Player(PortalRider::capture(guest)))
-                }
-                PortalPassenger::Mob(rider) => (self.portal_mob_is_current(rider)
-                    && self.passenger_object_vehicle(rider.entity).is_none())
-                .then_some(passenger),
-            })
-            .collect();
-        Some((hull_pose.0, hull_pose.1, detached))
+        Some(
+            passengers
+                .into_iter()
+                .filter_map(|passenger| match passenger {
+                    PortalPassenger::Player(rider) => {
+                        let guest = host.hub.guest(rider.conn)?;
+                        (rider.same_player(guest)
+                            && guest.dimension == source.id()
+                            && guest.vehicle.is_none())
+                        .then(|| PortalPassenger::Player(PortalRider::capture(guest)))
+                    }
+                    PortalPassenger::Mob(ref rider) => (self.portal_mob_is_current(rider)
+                        && self.passenger_object_vehicle(rider.entity).is_none())
+                    .then_some(passenger),
+                })
+                .collect(),
+        )
     }
 
     fn portal_rider_is_current(&self, rider: PortalRider, source: Dim) -> bool {

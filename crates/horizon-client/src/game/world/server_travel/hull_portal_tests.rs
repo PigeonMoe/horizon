@@ -52,6 +52,7 @@ enum Step {
 struct DestinationPolicy {
     refuse_guest: bool,
     refuse_mob: bool,
+    nested_guest: bool,
     source: Dim,
     destination: Dim,
     cause: TravelCause,
@@ -104,15 +105,24 @@ impl Hooks for DestinationPolicy {
         assert_eq!(rider.position(host), Some(event.from));
         assert_eq!(rider.vehicle(host), None);
         let [x, y, z] = event.from;
-        assert_eq!(
-            event.to,
-            passenger_destination(
-                ENTRY,
-                self.hull_arrival.lock().unwrap().unwrap(),
-                Vec3::new(x, y, z)
-            )
-            .components()
-        );
+        let expected = passenger_destination(
+            ENTRY,
+            self.hull_arrival.lock().unwrap().unwrap(),
+            Vec3::new(x, y, z),
+        )
+        .components();
+        if self.nested_guest {
+            // Each link in the passenger tree adds its own world-space offset.
+            assert!(
+                event
+                    .to
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-9)
+            );
+        } else {
+            assert_eq!(event.to, expected);
+        }
         self.steps.lock().unwrap().push(Step::OfferGuest);
         if self.refuse_guest {
             Flow::Cancel
@@ -143,16 +153,20 @@ impl Hooks for DestinationPolicy {
 fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() {
     run_on_guest_stack(|| {
         use Route::*;
-        for (route, refuse_guest, refuse_mob, nested) in [
-            (IntoEnd, true, false, false),
-            (IntoEnd, false, true, false),
-            (IntoEnd, false, false, false),
-            (IntoEnd, true, true, true),
-            (Nether, true, false, false),
-            (Nether, false, false, false),
-            (OutOfEnd, true, false, false),
-            (OutOfEnd, false, false, false),
-            (UnseenCredits, false, false, false),
+        for (route, refuse_guest, refuse_mob, nested_mob, nested_guest) in [
+            (IntoEnd, true, false, false, false),
+            (IntoEnd, false, true, false, false),
+            (IntoEnd, false, false, false, false),
+            (IntoEnd, true, true, true, false),
+            (Nether, true, false, false, false),
+            (Nether, false, false, false, false),
+            (OutOfEnd, true, false, false, false),
+            (OutOfEnd, false, false, false, false),
+            (UnseenCredits, false, false, false, false),
+            (IntoEnd, true, false, false, true),
+            (IntoEnd, false, true, false, true),
+            (Nether, false, false, false, true),
+            (UnseenCredits, false, false, false, true),
         ] {
             let (source, destination, cause) = route.levels();
             let hull_arrival = Arc::new(Mutex::new(None));
@@ -162,6 +176,7 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                 Box::new(DestinationPolicy {
                     refuse_guest,
                     refuse_mob,
+                    nested_guest,
                     source,
                     destination,
                     cause,
@@ -204,12 +219,19 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                     game.boats
                         .push(Boat::new(HULL, Arc::from("oak"), ENTRY, 35.0));
                     let species = game.res.mob_types()["minecraft:pig"].clone();
-                    game.mobs.push(Mob::new(PIG, species, ENTRY, 10.0));
+                    let mut body = Mob::new(PIG, species, ENTRY, 10.0);
+                    if nested_guest {
+                        body.set_saddle(Some(horizon_client::items::ItemStack::new(
+                            "minecraft:saddle",
+                            1,
+                        )));
+                    }
+                    game.mobs.push(body);
                     let pig = game.entity(PIG).unwrap();
                     let hull = game.entity(HULL).unwrap();
                     let pig_uuid = game.entity_uuid(pig).unwrap();
                     assert!(game.entity_start_riding(pig, hull, false));
-                    if nested {
+                    if nested_mob {
                         let species = game.res.mob_types()["minecraft:chicken"].clone();
                         game.mobs.push(Mob::new(CHILD, species, ENTRY, 0.0));
                         let child = game.entity(CHILD).unwrap();
@@ -226,9 +248,15 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                         }
                     });
                     let rider = game.player(u128::from(GUEST)).unwrap().entity();
-                    assert!(game.entity_start_riding(rider, hull, true));
+                    let mount = if nested_guest { pig } else { hull };
+                    assert!(game.entity_start_riding(rider, mount, !nested_guest));
                     game.guest_boarded(GUEST, None);
-                    assert_eq!(game.native_passenger_ids(HULL), [GUEST, PIG]);
+                    let source_passengers: &[u32] =
+                        if nested_guest { &[PIG] } else { &[GUEST, PIG] };
+                    assert_eq!(game.native_passenger_ids(HULL), source_passengers);
+                    if nested_guest {
+                        assert_eq!(game.native_passenger_ids(PIG), [GUEST]);
+                    }
                     steps.lock().unwrap().clear();
 
                     // Run the actual portal processor and carrier scheduler.
@@ -240,16 +268,16 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                     game.handle_vehicle_portals();
                     game.carry_riders_through_portals();
                     assert!(game.server_trips.is_empty());
-                    if matches!(route, UnseenCredits) {
+                    if matches!(route, UnseenCredits) && !nested_guest {
                         assert!(game.portal_hull_trips.is_empty());
-                        assert_eq!(game.native_passenger_ids(HULL), [GUEST, PIG]);
+                        assert_eq!(game.native_passenger_ids(HULL), source_passengers);
                         assert!(steps.lock().unwrap().is_empty());
                         return;
                     }
                     assert_eq!(game.portal_hull_trips.len(), 1);
                     assert!(game.on_server_trip(GUEST));
                     assert!(game.vehicle_waits_in(source));
-                    assert_eq!(game.native_passenger_ids(HULL), [GUEST, PIG]);
+                    assert_eq!(game.native_passenger_ids(HULL), source_passengers);
                     assert!(steps.lock().unwrap().is_empty());
 
                     let trip = &game.portal_hull_trips[0];
@@ -262,7 +290,7 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                     assert!(game.entity(PIG).is_none());
                     assert!(steps.lock().unwrap().is_empty());
                     game.enter_level(source).unwrap();
-                    assert_eq!(game.native_passenger_ids(HULL), [GUEST, PIG]);
+                    assert_eq!(game.native_passenger_ids(HULL), source_passengers);
 
                     game.enter_level(destination).unwrap();
                     for z in cz - 2..=cz + 2 {
@@ -273,7 +301,7 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                     }
                     let (expected_hull, expected_yaw) = match route {
                         IntoEnd => (END_SPAWN, 90.0),
-                        OutOfEnd => {
+                        OutOfEnd | UnseenCredits => {
                             game.world.set(6, 68, 9, floor).unwrap();
                             (END_RETURN, 60.0)
                         }
@@ -290,7 +318,6 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                             assert_eq!(turn, 90.0);
                             (at, 35.0 + turn)
                         }
-                        UnseenCredits => unreachable!(),
                     };
                     *hull_arrival.lock().unwrap() = Some(expected_hull);
                     game.arrive_server_trips();
@@ -300,22 +327,37 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                         Some((expected_hull, expected_yaw))
                     );
                     assert_eq!(game.boats.iter().filter(|boat| boat.id == HULL).count(), 1);
-                    let mut expected = vec![
-                        Step::Travel(HULL),
-                        Step::Dismount(PIG),
-                        Step::Dismount(GUEST),
-                        Step::Travel(GUEST),
-                        Step::OfferGuest,
-                    ];
-                    if !refuse_guest {
-                        expected.push(Step::CommitGuest);
-                    }
-                    expected.push(Step::Travel(PIG));
+                    let mut expected = vec![Step::Travel(HULL), Step::Dismount(PIG)];
                     let mut passengers = Vec::new();
-                    for (id, refused) in [(GUEST, refuse_guest), (PIG, refuse_mob)] {
-                        if !refused {
-                            expected.push(Step::Mount(id));
-                            passengers.push(id);
+                    if nested_guest {
+                        expected.push(Step::Travel(PIG));
+                        if !refuse_mob {
+                            expected.extend([
+                                Step::Dismount(GUEST),
+                                Step::Travel(GUEST),
+                                Step::OfferGuest,
+                            ]);
+                            if !refuse_guest {
+                                expected.extend([Step::CommitGuest, Step::Mount(GUEST)]);
+                            }
+                            expected.push(Step::Mount(PIG));
+                            passengers.push(PIG);
+                        }
+                    } else {
+                        expected.extend([
+                            Step::Dismount(GUEST),
+                            Step::Travel(GUEST),
+                            Step::OfferGuest,
+                        ]);
+                        if !refuse_guest {
+                            expected.push(Step::CommitGuest);
+                        }
+                        expected.push(Step::Travel(PIG));
+                        for (id, refused) in [(GUEST, refuse_guest), (PIG, refuse_mob)] {
+                            if !refused {
+                                expected.push(Step::Mount(id));
+                                passengers.push(id);
+                            }
                         }
                     }
                     assert_eq!(*steps.lock().unwrap(), expected);
@@ -329,12 +371,15 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                     }
                     let guest = game.lan.as_ref().unwrap().hub.guest(GUEST).unwrap();
                     assert!(!guest.landing && !guest.tp_held);
-                    if refuse_guest {
+                    if nested_guest && refuse_mob {
+                        assert_eq!(guest.dimension, source.id());
+                        assert_eq!(guest.vehicle, Some(PIG));
+                    } else if refuse_guest {
                         assert_eq!(guest.dimension, source.id());
                         assert_eq!(guest.vehicle, None);
                     } else {
                         assert_eq!(guest.dimension, destination.id());
-                        assert_eq!(guest.vehicle, Some(HULL));
+                        assert_eq!(guest.vehicle, Some(if nested_guest { PIG } else { HULL }));
                     }
 
                     game.enter_level(source).unwrap();
@@ -343,7 +388,7 @@ fn natural_portal_boat_admits_the_guest_and_mob_separately_in_passenger_order() 
                         let pig = game.entity(PIG).unwrap();
                         assert_eq!(game.entity_uuid(pig), Some(pig_uuid));
                         assert_eq!(game.mob_object(PIG).unwrap().extra.mount, None);
-                        if nested {
+                        if nested_mob {
                             assert_eq!(game.native_passenger_ids(PIG), [CHILD]);
                             assert_eq!(game.mob_object(CHILD).unwrap().extra.mount, Some(PIG));
                         }

@@ -909,13 +909,16 @@ impl Game<'_> {
                 })
                 .map(|g| g.conn)
                 .collect();
-            // Entity.canTeleport: out of the End, every rider has seen the
-            // credits.
+            // Entity.canTeleport checks direct player passengers on an End to
+            // Overworld trip. Descendants cross through the passenger transition.
             if plan.end
                 && self.dim == Dim::End
-                && riders
+                && plan.dim == Dim::Overworld
+                && host
+                    .hub
+                    .guests
                     .iter()
-                    .any(|c| !host.hub.guest(*c).is_some_and(|g| g.seen_credits))
+                    .any(|guest| guest.vehicle == Some(vehicle) && !guest.seen_credits)
             {
                 continue;
             }
