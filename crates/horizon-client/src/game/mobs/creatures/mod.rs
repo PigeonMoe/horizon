@@ -3302,13 +3302,18 @@ impl Game<'_> {
                     by,
                     breaker,
                 } => {
+                    if let Some(mob) = by
+                        && !self.mob_may_destroy(mob, pos)
+                    {
+                        continue;
+                    }
+                    let old = self.world.block(pos[0], pos[1], pos[2]);
                     if let Some(mob) = by {
-                        if !self.mob_may_destroy(mob, pos) {
+                        if self.mob_break_replaced(mob, pos, old) {
                             continue;
                         }
                         broke.push(mob);
                     }
-                    let old = self.world.block(pos[0], pos[1], pos[2]);
                     // Block.spawnDestroyParticles: fire breaks leave nothing.
                     if !self.res.facts().get(old).has_class("BaseFireBlock") {
                         self.level_event_at(2001, pos, old.0 as i32);
