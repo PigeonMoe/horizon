@@ -642,6 +642,7 @@ impl Game<'_> {
         diameter: f64,
         interaction: super::explosion::BlockInteraction,
         admission: Option<Option<&mod_api::DamagePlayer>>,
+        attribution: super::nonliving_hurt::DamageAttribution,
     ) {
         if self.blast_spares_decorations(interaction) {
             return;
@@ -660,7 +661,7 @@ impl Game<'_> {
                     let kind = self.item_frames[i].kind();
                     !self.entity_target_damage_allowed(kind, c, false, actor)
                 })
-                || !self.break_frame_by(i, self.explosion_kill_credit())
+                || !self.break_frame_with_attacker(i, attribution)
             {
                 i += 1;
             }
@@ -675,9 +676,19 @@ impl Game<'_> {
         index: usize,
         source: Option<super::commands::Target>,
     ) -> bool {
+        self.break_frame_with_attacker(index, source.into())
+    }
+
+    fn break_frame_with_attacker(
+        &mut self,
+        index: usize,
+        attribution: super::nonliving_hurt::DamageAttribution,
+    ) -> bool {
         let frame_id = self.item_frames[index].id;
         let (kind, pos) = (self.item_frames[index].kind(), self.item_frames[index].pos);
-        let player = source.and_then(|source| self.hanging_damage_player(source));
+        let player = attribution
+            .attacker
+            .and_then(|source| self.hanging_damage_player(source));
         if self.hanging_break_cancelled_by(kind, pos, player) {
             return false;
         }
@@ -686,7 +697,7 @@ impl Game<'_> {
             return false;
         };
         let mut f = self.item_frames.remove(index);
-        self.entity_killed_event_by(center(&f), source);
+        self.entity_killed_event_by(center(&f), attribution.credit);
         self.audio
             .play(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
         self.drop_frame_items(&mut f, true, false, false);

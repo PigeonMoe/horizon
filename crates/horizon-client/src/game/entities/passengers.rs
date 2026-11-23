@@ -1651,7 +1651,7 @@ mod nested_vehicle_discard_tests {
                             crate::game::minecarts::CartHit::default(),
                         ),
                         2 => {
-                            game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None, None);
+                            game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None);
                         }
                         3 | 4 => {
                             assert!(game.run_command(&format!("kill @e[type=minecraft:{kind}]")));
@@ -2000,7 +2000,7 @@ mod nested_vehicle_discard_tests {
                     } else {
                         game.carts
                             .update(0, |cart| cart.kind = super::super::minecarts::CartKind::Tnt);
-                        game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None, None);
+                        game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None);
                     }
                     assert_eq!(calls.load(Ordering::Relaxed), 1);
                     assert!(game.entity(71).is_none());
@@ -2277,7 +2277,7 @@ mod nested_vehicle_discard_tests {
                             game.carts.update(0, |cart| {
                                 cart.kind = super::super::minecarts::CartKind::Tnt
                             });
-                            game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None, None);
+                            game.arrow_hits_cart(0, 1.0, Vec3::ZERO, true, false, None);
                         }
                     }
                     assert_eq!(game.mob_object(72).unwrap().extra.mount, Some(71));

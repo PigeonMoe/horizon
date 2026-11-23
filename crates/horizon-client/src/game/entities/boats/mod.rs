@@ -2119,7 +2119,7 @@ impl Game<'_> {
         i: usize,
         mut damage: f32,
         creative: bool,
-        source: super::nonliving_hurt::VehicleDamageSource,
+        source: super::nonliving_hurt::DamageAttribution,
     ) -> Option<bool> {
         let id = self.boats[i].id;
         if self

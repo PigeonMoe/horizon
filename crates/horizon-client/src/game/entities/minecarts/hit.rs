@@ -2,14 +2,14 @@
 //! and the tail of an accepted hit: the `ENTITY_DAMAGE` game event, the drop's
 //! `CustomName` (`destroy`) and `chestVehicleDestroyed`'s angry piglins.
 use super::*;
-use crate::game::{commands::Target, nonliving_hurt::VehicleDamageSource};
+use crate::game::{commands::Target, nonliving_hurt::DamageAttribution};
 
 /// The `DamageSource` a cart took. `VehicleEntity.hurtServer` attributes its
 /// `ENTITY_DAMAGE` to `source.getEntity()`, and `chestVehicleDestroyed` angers
 /// piglins only when `source.getDirectEntity()` is the player.
 #[derive(Clone, Copy, Default)]
 pub(in crate::game) struct CartHit {
-    pub(in crate::game) source: VehicleDamageSource,
+    pub(in crate::game) source: DamageAttribution,
     pub(in crate::game) by_player: bool,
 }
 
@@ -50,7 +50,7 @@ impl CartHit {
         Self::indirect(by.into())
     }
 
-    pub(in crate::game) fn indirect(source: VehicleDamageSource) -> Self {
+    pub(in crate::game) fn indirect(source: DamageAttribution) -> Self {
         Self {
             source,
             by_player: false,

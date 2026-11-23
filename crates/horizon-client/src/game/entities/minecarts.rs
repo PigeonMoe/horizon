@@ -177,6 +177,9 @@ pub(super) struct Minecart {
     pub push: Vec3,
     /// TNT minecarts: ticks until the explosion, -1 when not primed.
     pub fuse: i32,
+    /// `MinecartTNT.ignitionSource` keeps the causing entity until the fuse
+    /// expires. Vanilla does not serialize it.
+    pub(super) ignition_source: Option<super::explosion::ExplosionCause>,
     /// TNT minecarts: `explosionPowerBase` and `explosionSpeedFactor`, the
     /// blast's power at rest and its gain with the cart's speed.
     pub explosion_power: f32,
@@ -560,6 +563,7 @@ impl Minecart {
             fuel: 0,
             push: Vec3::ZERO,
             fuse: -1,
+            ignition_source: None,
             explosion_power: DEFAULT_EXPLOSION_POWER,
             explosion_speed_factor: DEFAULT_EXPLOSION_SPEED_FACTOR,
             enabled: true,
@@ -2649,7 +2653,7 @@ impl Game<'_> {
     }
     /// An arrow hit cart `i` (`MinecartTNT.hurtServer`, then
     /// `VehicleEntity.hurtServer`): a burning arrow sets off a TNT minecart.
-    /// `owner` is `AbstractArrow.getOwner`, the hit's `DamageSource.getEntity`;
+    /// An owned arrow credits its shooter. An unowned arrow is its own cause.
     pub(super) fn arrow_hits_cart(
         &mut self,
         i: usize,
@@ -2657,19 +2661,31 @@ impl Game<'_> {
         arrow_velocity: Vec3,
         burning: bool,
         creative: bool,
-        owner: Option<Who>,
-        guest: Option<u32>,
+        arrow: Option<&horizon_client::projectiles::Projectile>,
     ) -> bool {
         if i >= self.carts.len() {
             return false;
         }
+        let hit = arrow.map_or_else(CartHit::default, |arrow| {
+            CartHit::projectile(arrow.owner, arrow.guest)
+        });
         if burning && self.carts[i].kind == CartKind::Tnt {
             let mut c = self.carts[i].clone();
+            c.ignition_source = self.cart_ignition_source(hit.source.credit).or_else(|| {
+                arrow.map(|arrow| super::explosion::ExplosionCause {
+                    entity: (
+                        arrow.id,
+                        self.explosion_entity_name(arrow.id, arrow.entity_type()),
+                    ),
+                    player: false,
+                    guest: None,
+                    species: None,
+                })
+            });
             if self.explode_cart(&mut c, arrow_velocity.length_squared()) {
                 return true;
             }
         }
-        let hit = CartHit::projectile(owner, guest);
         self.hurt_cart_result(i, damage, creative, false, hit)
     }
     /// `Containers.dropContents(level, entity, container)` at a vehicle's

@@ -1,7 +1,31 @@
 //! Save visibility while authoritative rows are lent out.
 use super::*;
+use crate::game::{commands::Target, explosion::ExplosionCause};
 
 impl Game<'_> {
+    /// Build the causing half of `DamageSources.explosion(cart, entity)`.
+    pub(super) fn cart_ignition_source(&self, causing: Option<Target>) -> Option<ExplosionCause> {
+        let causing = causing?;
+        let id = u32::try_from(self.network_entity_id(causing)?).ok()?;
+        if id == 0 {
+            return None;
+        }
+        let (player, guest, species) = match causing {
+            Target::Player => (true, self.lan_acting, None),
+            Target::Guest(conn) => (true, Some(conn), None),
+            Target::Mob(id) => {
+                let mob = self.mob_object(id).filter(|mob| !mob.removed)?;
+                (false, None, Some(mob.species()))
+            }
+            _ => (false, None, None),
+        };
+        Some(ExplosionCause {
+            entity: (id, self.target_name(causing)),
+            player,
+            guest,
+            species,
+        })
+    }
     /// `MinecartTNT.explode`: with explosions disabled, only a primed cart is
     /// discarded. An unprimed cart survives, including its current tick.
     pub(super) fn explode_cart(&mut self, c: &mut Minecart, speed_sqr: f64) -> bool {
@@ -78,7 +102,7 @@ impl Game<'_> {
         self.combat.explosion_in_water = self.bounds_in_water(c.bounds());
         self.combat.explosion_direct = Some(c.id);
         let _ = self.with_hive_emptying_blast(|g| {
-            g.server_explode_from(
+            g.server_explode_from_cause(
                 at,
                 power,
                 interaction,
@@ -86,6 +110,9 @@ impl Game<'_> {
                 super::super::explosion::ExplosionSource::default()
                     .with_silence(silent)
                     .with_entity(c.id, "minecraft:tnt_minecart"),
+                // The vanilla fallback is explosion(cart, null), even when
+                // the fuse was set by a rail or restored from a saved cart.
+                Some(c.ignition_source.clone()),
             )
         });
         self.combat.explosion_direct = None;
@@ -154,6 +181,7 @@ impl Game<'_> {
                 // MinecartTNT.destroy: prime instead of breaking.
                 if c.fuse < 0 {
                     self.prime_cart(&mut c);
+                    c.ignition_source = self.cart_ignition_source(hit.source.credit);
                     c.fuse = c.random.next_int_bound(20).unwrap_or(0)
                         + c.random.next_int_bound(20).unwrap_or(0);
                 }

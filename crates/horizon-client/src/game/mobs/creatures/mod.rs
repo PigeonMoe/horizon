@@ -5655,7 +5655,7 @@ impl Game<'_> {
                 p.owner.is_some(),
             );
             let hurt = !self.vehicle_refuses_projectile(p, id, kind, damage_type)
-                && self.arrow_hits_cart(i, amount, p.velocity, burning, creative, p.owner, p.guest);
+                && self.arrow_hits_cart(i, amount, p.velocity, burning, creative, Some(p));
             self.finish_arrow_hit(
                 arrow,
                 if hurt {

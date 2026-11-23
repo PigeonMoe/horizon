@@ -129,9 +129,14 @@ pub fn mob_source(damage: &Damage, attack: &Attack) -> HurtSource<'static> {
         {
             attack.attacker
         }
+        // A TNT cart's explicit blast can name the unowned arrow that
+        // ignited it. That is a damage cause, not the mob's living attacker.
+        None if matches!(damage.kind, DamageKind::Explosion) && attack.direct.is_some() => {
+            attack.attacker
+        }
         None => 0,
     };
-    let damage_type = source_damage_type(*damage);
+    let damage_type = damage_type(damage.kind, damage.attacker.is_some() || causing != 0);
     let melee = melee(damage.kind);
     HurtSource {
         damage_type,

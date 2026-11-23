@@ -369,12 +369,23 @@ impl Game<'_> {
         by_player: bool,
         source: Option<super::commands::Target>,
     ) -> bool {
-        let actor = source.and_then(|source| self.hanging_damage_player(source));
+        self.break_painting_with_attacker(index, by_player, source.into())
+    }
+
+    pub(super) fn break_painting_with_attacker(
+        &mut self,
+        index: usize,
+        by_player: bool,
+        attribution: super::nonliving_hurt::DamageAttribution,
+    ) -> bool {
+        let actor = attribution
+            .attacker
+            .and_then(|source| self.hanging_damage_player(source));
         let Some((p, at)) = self.remove_painting(index, by_player, actor) else {
             return false;
         };
         // BlockAttachedEntity.kill, before dropItem.
-        self.entity_killed_event_by(at, source);
+        self.entity_killed_event_by(at, attribution.credit);
         self.drop_painting(p, at, by_player);
         true
     }

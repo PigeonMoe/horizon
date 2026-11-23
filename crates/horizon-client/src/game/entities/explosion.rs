@@ -262,6 +262,7 @@ struct ExplosionHookContext<'a> {
     blocks: &'a [[i32; 3]],
     explicit_cause: Option<Option<ExplosionCause>>,
     direct_name: Option<Text>,
+    cart_attack: Option<horizon_client::health::Attack>,
     held_item: Option<Text>,
     credit: bool,
     entity_sourced: bool,
@@ -834,6 +835,12 @@ impl Game<'_> {
             self.note_direct_entity(damage_type, direct);
         }
         let rules = self.world.health_rules;
+        // A guest turn swaps in the victim's combat state. Keep the blast's
+        // original attack as it moves between the host and guest victims.
+        let attack = context
+            .cart_attack
+            .as_ref()
+            .unwrap_or_else(|| self.combat.attack());
         if let Some(p) = self.player.as_mut()
             && let Some(id) = self.health_resources.damage.id(damage_type)
         {
@@ -841,7 +848,7 @@ impl Game<'_> {
             if !spectator
                 && hurtable
                 && let Ok(o) = p.hurt_caused_by(
-                    &mut crate::game::entity::damage_level_of!(self, scoped)
+                    &mut crate::game::entity::damage_level_of!(self, attack)
                         .reborrow()
                         .after_target_admission(),
                     &self.motion.health,
@@ -882,13 +889,21 @@ impl Game<'_> {
         }
         self.combat.forget_noted(outcome.canceled);
         if raised {
-            let source = mod_api::entity::health::HurtSource {
-                damage_type,
-                causing: attacker.map_or(0, |(id, _)| *id as i32),
-                direct: 0,
-                position: None,
+            let causing = attacker.map_or(0, |(id, _)| *id as i32);
+            let attack = context
+                .cart_attack
+                .clone()
+                .unwrap_or_else(|| self.current_attack());
+            let source = if context.cart_attack.is_some() {
+                attack.player_source(damage_type, causing)
+            } else {
+                mod_api::entity::health::HurtSource {
+                    damage_type,
+                    causing,
+                    direct: 0,
+                    position: None,
+                }
             };
-            let attack = self.current_attack();
             self.after_block(outcome, (None, false), source, &attack);
         }
         pushed
@@ -972,10 +987,20 @@ impl Game<'_> {
         let attacker = self.blast_attacker();
         let entity_sourced =
             attacker.is_some() || exploding.is_some() || self.combat.explosion_direct.is_some();
-        let responsible = source
-            .projectile_player
-            .or_else(|| attacker.as_ref().map(|(id, _)| *id as i32))
-            .and_then(|id| self.damage_player_by_entity(id));
+        let direct_cart = match source.entity {
+            Some((id, "minecraft:tnt_minecart")) => Some(id),
+            _ => None,
+        };
+        // Bukkit's policy events identify the direct TNT cart. The damage
+        // source still credits the living entity that ignited it.
+        let responsible = if direct_cart.is_some() {
+            None
+        } else {
+            source
+                .projectile_player
+                .or_else(|| attacker.as_ref().map(|(id, _)| *id as i32))
+                .and_then(|id| self.damage_player_by_entity(id))
+        };
         if hurts {
             self.explosion_hits_special(
                 center,
@@ -992,6 +1017,7 @@ impl Game<'_> {
             blocks,
             explicit_cause: self.combat.explicit_explosion_cause.clone(),
             direct_name: self.combat.explicit_explosion_direct.clone(),
+            cart_attack: direct_cart.map(|_| self.current_attack()),
             credit: self
                 .combat
                 .explicit_explosion_cause
@@ -1094,10 +1120,10 @@ impl Game<'_> {
         // VehicleDamageEvent sees the crystal itself. Entity damage credit
         // remains with the breaker through DamageSource.getEntity.
         let vehicle_credit = self.explosion_kill_credit();
-        let vehicle_source = super::nonliving_hurt::VehicleDamageSource {
+        let vehicle_source = super::nonliving_hurt::DamageAttribution {
             credit: vehicle_credit,
             attacker: match source.entity {
-                Some((_, "minecraft:end_crystal")) => None,
+                Some((_, "minecraft:end_crystal" | "minecraft:tnt_minecart")) => None,
                 _ => vehicle_credit,
             },
         };
@@ -1413,8 +1439,20 @@ impl Game<'_> {
         // VehicleEntity.destroy above uses Entity.kill and keeps the vehicle as source.
         if hurts {
             let admission = entity_sourced.then_some(context.responsible.as_ref());
-            self.explosion_breaks_frames(center, diameter, interaction, admission);
-            self.explosion_breaks_decorations(center, diameter, interaction, admission);
+            let hanging_source = if direct_cart.is_some() {
+                vehicle_source
+            } else {
+                vehicle_credit.into()
+            };
+            self.explosion_breaks_frames(center, diameter, interaction, admission, hanging_source);
+            self.explosion_breaks_decorations(
+                center,
+                diameter,
+                interaction,
+                admission,
+                hanging_source,
+                direct_cart,
+            );
         }
         pushed
     }
@@ -1425,11 +1463,11 @@ impl Game<'_> {
         use super::commands::Target;
         // An explicit crystal or cart source names its own cause.
         if let Some(cause) = &self.combat.explicit_explosion_cause {
-            return cause.as_ref().map(|cause| {
+            return cause.as_ref().and_then(|cause| {
                 if cause.player {
-                    cause.guest.map_or(Target::Player, Target::Guest)
+                    Some(cause.guest.map_or(Target::Player, Target::Guest))
                 } else {
-                    Target::Mob(cause.entity.0)
+                    cause.species.map(|_| Target::Mob(cause.entity.0))
                 }
             });
         }
@@ -1505,6 +1543,8 @@ impl Game<'_> {
         diameter: f64,
         interaction: BlockInteraction,
         admission: Option<Option<&mod_api::DamagePlayer>>,
+        attribution: super::nonliving_hurt::DamageAttribution,
+        direct_cart: Option<u32>,
     ) {
         // An armour stand is no `BlockAttachedEntity`: a source in water does not spare it.
         let spares_stands = blast_spares_decorations(
@@ -1514,7 +1554,7 @@ impl Game<'_> {
             false,
         );
         if !self.blast_spares_decorations(interaction) {
-            self.explosion_breaks_hanging(center, diameter, admission);
+            self.explosion_breaks_hanging(center, diameter, admission, attribution);
         }
         if spares_stands {
             return;
@@ -1546,7 +1586,7 @@ impl Game<'_> {
                 let source = horizon_client::health::HurtSource {
                     damage_type,
                     causing: causing as i32,
-                    direct: causing as i32,
+                    direct: direct_cart.unwrap_or(causing) as i32,
                     position: Some(center),
                 };
                 let creative = self.creative_damage_source_id(source.causing);
@@ -1583,6 +1623,7 @@ impl Game<'_> {
         center: [f64; 3],
         diameter: f64,
         admission: Option<Option<&mod_api::DamagePlayer>>,
+        attribution: super::nonliving_hurt::DamageAttribution,
     ) {
         let mut i = 0;
         while i < self.paintings.len() {
@@ -1596,7 +1637,7 @@ impl Game<'_> {
                 && admission.is_none_or(|actor| {
                     self.entity_target_damage_allowed("minecraft:painting", at, false, actor)
                 })
-                && self.break_painting_by(i, false, self.explosion_kill_credit()))
+                && self.break_painting_with_attacker(i, false, attribution))
             {
                 i += 1;
             }
@@ -1611,7 +1652,7 @@ impl Game<'_> {
                     self.entity_target_damage_allowed("minecraft:cushion", at, false, actor)
                 })
             {
-                self.break_cushion_by(i, self.explosion_kill_credit());
+                self.break_cushion_by(i, attribution.credit);
             } else {
                 i += 1;
             }
@@ -1698,7 +1739,18 @@ impl Game<'_> {
                     io::Error::other("an explicit explosion cause needs its direct entity")
                 })?;
                 let direct = (id, self.explosion_entity_name(id, kind));
-                self.with_explosion_cause(cause, direct, blast)
+                let causing = cause.as_ref().map_or(0, |cause| cause.entity.0 as i32);
+                self.with_explosion_cause(cause, direct, |g| {
+                    if kind == "minecraft:tnt_minecart" {
+                        let mut attack = g.attack_of(causing);
+                        attack.direct = Some(id as i32);
+                        attack.position = Some(center);
+                        attack.policy_player = None;
+                        g.with_attack(attack, blast)
+                    } else {
+                        blast(g)
+                    }
+                })
             }
         }
     }
