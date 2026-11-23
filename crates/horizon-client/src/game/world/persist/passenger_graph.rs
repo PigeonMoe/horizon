@@ -2,6 +2,7 @@
 //! Creation, boarding, joining the level and saving are separate decisions.
 use super::{Game, PassengerSlot, Tag, entity_nbt};
 use crate::game::{commands::Target, native_entities::target_id};
+use horizon_client::mobs::Mob;
 
 impl Game<'_> {
     /// Object-backed vehicles load their entire ordered tree themselves.
@@ -41,22 +42,39 @@ impl Game<'_> {
     }
 
     pub(in crate::game) fn passenger_object_vehicle(&self, id: u32) -> Option<u32> {
-        if let Some(mob) = self.mob_object(id) {
+        self.passenger_object_vehicle_with_mobs(id, &[])
+    }
+
+    /// Look up the same object graph when the creature tick has taken the
+    /// resident list out of the game. Saved non-mob riders still refer to it.
+    pub(in crate::game) fn passenger_object_vehicle_with_mobs(
+        &self,
+        id: u32,
+        borrowed: &[Mob],
+    ) -> Option<u32> {
+        let borrowed_mob = |id| borrowed.iter().find(|mob| mob.id == id);
+        let present = |id| {
+            borrowed_mob(id).map_or_else(|| self.passenger_object_present(id), |mob| !mob.removed)
+        };
+        if let Some(mob) = borrowed_mob(id).or_else(|| self.mob_object(id)) {
             return (!mob.removed)
                 .then_some(mob.extra.mount)
                 .flatten()
-                .filter(|vehicle| self.passenger_object_present(*vehicle));
+                .filter(|vehicle| present(*vehicle));
         }
-        if !self.passenger_object_present(id) {
+        if !present(id) {
             return None;
         }
-        self.persist.passenger_slots.iter().find_map(|(&vehicle, slots)| {
-            (self.passenger_object_present(vehicle)
-                && slots
-                    .iter()
-                    .any(|slot| matches!(slot, PassengerSlot::Live(rider) if *rider == id)))
-            .then_some(vehicle)
-        })
+        self.persist
+            .passenger_slots
+            .iter()
+            .find_map(|(&vehicle, slots)| {
+                (present(vehicle)
+                    && slots
+                        .iter()
+                        .any(|slot| matches!(slot, PassengerSlot::Live(rider) if *rider == id)))
+                .then_some(vehicle)
+            })
     }
 
     /// Public riding queries still exclude objects refused level residency.

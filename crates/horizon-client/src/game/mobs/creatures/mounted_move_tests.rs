@@ -2,12 +2,13 @@ use super::*;
 use crate::game::{
     native_entity_refs::tests::run_on_guest_stack, native_guest_turn_tests::with_guests,
 };
-use horizon_client::chunk::Chunk;
+use horizon_client::{chunk::Chunk, entities::ArmorStand};
 use horizon_core::position::ChunkPos;
 use mod_api::{Flow, Hooks, Host, ModEntry, RiddenVehicleMovePreEvent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MOUNT: u32 = 151;
+const STAND: u32 = 152;
 const RIDER: u128 = 13;
 const START: Vec3 = Vec3::new(7.875, 200.0, 8.5);
 
@@ -33,10 +34,8 @@ impl Hooks for Boundary {
     }
 }
 
-#[test]
-#[ignore = "daily"]
-fn a_denied_living_mount_crossing_preserves_momentum_and_seat() {
-    run_on_guest_stack(|| {
+fn check_living_mount_crossing(nested: bool) {
+    run_on_guest_stack(move || {
         let calls = Arc::new(AtomicUsize::new(0));
         let mods = [ModEntry::new(
             "living-mount-boundary",
@@ -54,27 +53,55 @@ fn a_denied_living_mount_crossing_preserves_momentum_and_seat() {
                     .unwrap();
                 assert!(game.run_command("forceload add 0 0"));
 
-                let pig = game.res.mob_types().get("minecraft:pig").unwrap().clone();
-                let mut mount = Mob::new(MOUNT, pig, START, 0.0);
+                let kind = if nested {
+                    "minecraft:horse"
+                } else {
+                    "minecraft:pig"
+                };
+                let kind = game.res.mob_types().get(kind).unwrap().clone();
+                let mut mount = Mob::new(MOUNT, kind, START, 0.0);
                 mount.no_gravity = true;
                 game.mobs.push(mount);
                 let rider = game.player(RIDER).unwrap().entity();
-                let mount = game.entity(MOUNT).unwrap();
-                assert!(game.entity_start_riding(rider, mount, true));
+                let seat = if nested {
+                    game.armor_stands.push(ArmorStand::new(STAND, START, 0.0));
+                    game.link_loaded_passenger(STAND, MOUNT);
+                    assert_eq!(game.passenger_vehicle(STAND), Some(MOUNT));
+                    STAND
+                } else {
+                    MOUNT
+                };
+                let seat = game.entity(seat).unwrap();
+                assert!(game.entity_start_riding(rider, seat, true));
                 game.mobs[0].velocity.x = 0.5;
 
                 game.tick_creature_entities().unwrap();
                 assert_eq!(calls.load(Ordering::Relaxed), 1);
                 assert_eq!(game.mobs[0].position, START);
                 assert!(game.mobs[0].velocity.x > 0.0);
-                assert_eq!(game.entity_vehicle(rider), Some(mount));
+                assert_eq!(game.entity_vehicle(rider), Some(seat));
 
                 // A second tick crosses under the remaining momentum alone.
                 game.tick_creature_entities().unwrap();
                 assert_eq!(calls.load(Ordering::Relaxed), 2);
                 assert!(game.mobs[0].position.x >= 8.0);
-                assert_eq!(game.entity_vehicle(rider), Some(mount));
+                assert_eq!(game.entity_vehicle(rider), Some(seat));
+                if nested {
+                    assert_eq!(game.passenger_vehicle(STAND), Some(MOUNT));
+                }
             });
         });
     });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_denied_living_mount_crossing_preserves_momentum_and_seat() {
+    check_living_mount_crossing(false);
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_living_mount_checks_a_player_riding_its_armor_stand_passenger() {
+    check_living_mount_crossing(true);
 }
