@@ -675,7 +675,9 @@ impl Game<'_> {
             if self.entity_vehicle(rider) != Some(entity) {
                 continue;
             }
-            if !self.entity_stop_riding(rider) && self.entity_vehicle(rider) == Some(entity) {
+            if !self.entity_stop_riding_for_travel(rider)
+                && self.entity_vehicle(rider) == Some(entity)
+            {
                 return false;
             }
         }

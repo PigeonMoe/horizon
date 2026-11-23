@@ -1661,7 +1661,7 @@ impl Game<'_> {
                 })
                 .ok_or_else(|| err("commands.ride.not_riding", &[&name.plain()]))?;
             match target {
-                Target::Player => self.stop_riding(),
+                Target::Player => self.stop_riding_requested(),
                 Target::Mob(rider) => self.dismount_mob(rider),
                 _ => {
                     if let Some(id) = super::super::native_entities::target_id(target) {
@@ -1697,7 +1697,7 @@ impl Game<'_> {
                 .for_player(target, |g| {
                     let vehicle = g.passenger_vehicle_target(Target::Player)?;
                     let vehicle_name = g.target_name(vehicle);
-                    g.stop_riding();
+                    g.stop_riding_requested();
                     Some(vehicle_name)
                 })
                 .flatten()

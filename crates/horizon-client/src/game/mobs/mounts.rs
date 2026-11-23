@@ -719,7 +719,7 @@ impl Game<'_> {
         }
     }
 
-    fn prepare_mount_dismount(&mut self) -> Option<Vec3> {
+    pub(super) fn prepare_mount_dismount(&mut self) -> Option<Vec3> {
         let id = self.riding?;
         if !self.native_may_leave(id) || self.riding != Some(id) {
             return None;

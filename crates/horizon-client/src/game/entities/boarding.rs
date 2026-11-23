@@ -100,7 +100,7 @@ impl Game<'_> {
         let (Some(conn), Some(me)) = (self.lan_acting, self.lan_acting_entity) else {
             return;
         };
-        self.guest_removed_dismount = None;
+        self.guest_dismount = None;
         let order = self.boarding_order(vehicle, me, true);
         if let Some(host) = self.lan.as_mut() {
             host.hub.update_guest(conn, |g| g.vehicle_order = order);

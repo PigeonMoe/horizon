@@ -463,7 +463,7 @@ impl Game<'_> {
                 if self.lan_acting.is_some() {
                     self.riding = None;
                     if let Some(landing) = self.player_free_dismount_point(y) {
-                        self.defer_removed_vehicle_dismount(landing);
+                        self.defer_guest_dismount(landing);
                     }
                 } else {
                     self.dismount_removed_vehicle(y);
@@ -482,6 +482,41 @@ impl Game<'_> {
             self.get_off_seat();
         } else {
             self.dismount_mount();
+        }
+    }
+
+    /// A command or mod requests only a dismount. Compound teleports use
+    /// `stop_riding` while establishing their own source and destination.
+    pub(super) fn stop_riding_requested(&mut self) {
+        use super::commands::Target;
+        let vehicle = self
+            .riding
+            .and_then(|id| self.entity(id))
+            .and_then(|vehicle| self.native_entity_target(vehicle));
+        let landing = match vehicle {
+            Some(Target::Boat(id)) => self
+                .boats
+                .iter()
+                .position(|boat| boat.id == id)
+                .and_then(|i| self.prepare_boat_dismount(i)),
+            Some(Target::Cart(id)) => self
+                .carts
+                .iter()
+                .position(|cart| cart.id == id)
+                .and_then(|i| self.prepare_cart_dismount(i)),
+            Some(Target::Mob(id))
+                if self.mobs.iter().any(|mob| {
+                    mob.id == id
+                        && mob.alive()
+                        && mob.species() != horizon_client::mobs::Species::HappyGhast
+                }) =>
+            {
+                self.prepare_mount_dismount()
+            }
+            _ => return self.stop_riding(),
+        };
+        if let Some(landing) = landing {
+            self.finish_requested_player_dismount(landing);
         }
     }
 }

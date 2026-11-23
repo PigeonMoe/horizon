@@ -63,7 +63,7 @@ pub(super) struct GuestDismount {
     landing: Option<Vec3>,
 }
 
-pub(super) enum RemovedVehicleDismount {
+pub(super) enum DeferredGuestDismount {
     /// A new seat during the admission callback clears the in-flight landing.
     Checking,
     Ready(GuestDismount),
@@ -409,16 +409,45 @@ impl Game<'_> {
         })
     }
 
-    /// A removed root can be destroyed during the rider's own turn. Wait for
-    /// that turn to publish the unmount before sending the landing.
-    pub(super) fn defer_removed_vehicle_dismount(&mut self, landing: Vec3) {
-        self.guest_removed_dismount = Some(RemovedVehicleDismount::Checking);
+    /// Wait for the rider's turn to publish the unmount before sending the
+    /// landing.
+    pub(super) fn defer_guest_dismount(&mut self, landing: Vec3) {
+        self.guest_dismount = Some(DeferredGuestDismount::Checking);
         let admitted = self.admit_guest_dismount(landing);
-        if matches!(
-            self.guest_removed_dismount,
-            Some(RemovedVehicleDismount::Checking)
-        ) {
-            self.guest_removed_dismount = admitted.map(RemovedVehicleDismount::Ready);
+        if matches!(self.guest_dismount, Some(DeferredGuestDismount::Checking)) {
+            self.guest_dismount = admitted.map(DeferredGuestDismount::Ready);
+        }
+    }
+
+    pub(super) fn finish_requested_player_dismount(&mut self, landing: Vec3) {
+        if self.lan_acting.is_some() {
+            self.defer_guest_dismount(landing);
+            return;
+        }
+        let Some(dismount) = self.admit_guest_dismount(landing) else {
+            return;
+        };
+        let at = dismount.destination();
+        if let Some(rider) = self.player.as_mut() {
+            self.previous_position = dismount.from;
+            rider.position = at;
+            rider.velocity = Vec3::ZERO;
+        }
+        let from = dismount.from.components();
+        let to = at.components();
+        if from != to {
+            if let Ok(id) = u32::try_from(dismount.entity) {
+                self.entity_section_step(id, from, to);
+            }
+            if self.riding.is_none()
+                && self.active_teleport_origin() == Some((dismount.player, dismount.level, to))
+            {
+                self.notify_player_position(
+                    dismount.player,
+                    (dismount.level, from),
+                    (dismount.level, to),
+                );
+            }
         }
     }
 

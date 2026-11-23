@@ -1,5 +1,5 @@
 use super::*;
-use crate::game::lan_vehicles::{GuestDismount, RemovedVehicleDismount};
+use crate::game::lan_vehicles::{DeferredGuestDismount, GuestDismount};
 
 impl Game<'_> {
     /// Run `f` as the guest `conn`: the host's player state is swapped for theirs.
@@ -394,7 +394,7 @@ impl Game<'_> {
         self.hook.finish_loan();
         self.bind_current_hook_residency();
         let packets = std::mem::take(&mut self.guest_packets);
-        let removed_dismount = self.guest_removed_dismount.take();
+        let pending_dismount = self.guest_dismount.take();
         let entity_events = std::mem::take(&mut self.guest_entity_events);
         let cooldown_events = std::mem::take(&mut self.guest_cooldowns);
         let player_sounds = std::mem::take(&mut self.guest_player_sounds);
@@ -491,7 +491,7 @@ impl Game<'_> {
             acting_fake,
             known_movement,
             packets,
-            removed_dismount,
+            pending_dismount,
             entity_events,
             equipment_breaks,
             swings,
@@ -634,7 +634,7 @@ impl Game<'_> {
             acting_fake,
             known_movement,
             packets,
-            removed_dismount,
+            pending_dismount,
             entity_events,
             equipment_breaks,
             swings,
@@ -710,11 +710,10 @@ impl Game<'_> {
             self.send_level_sound(sound, Some(conn));
         }
         let outgoing = std::mem::replace(&mut self.guest_packets, packets);
-        let removed_dismount =
-            match std::mem::replace(&mut self.guest_removed_dismount, removed_dismount) {
-                Some(RemovedVehicleDismount::Ready(dismount)) => Some(dismount),
-                _ => None,
-            };
+        let pending_dismount = match std::mem::replace(&mut self.guest_dismount, pending_dismount) {
+            Some(DeferredGuestDismount::Ready(dismount)) => Some(dismount),
+            _ => None,
+        };
         let Some(host) = self.lan.as_mut() else {
             unreachable!("LanHost dropped inside a guest turn; closes are deferred");
         };
@@ -953,7 +952,7 @@ impl Game<'_> {
                         requested_motion.filter(|velocity| *velocity == m.velocity);
                 }
                 let moved: f64 = (0..3).map(|k| (at[k] - g.position[k]).powi(2)).sum();
-                let dismount = removed_dismount.filter(|dismount| {
+                let dismount = pending_dismount.filter(|dismount| {
                     !teleported
                         && !m.health.dead_or_dying()
                         && dismount.matches_guest(self.dim, g, at)

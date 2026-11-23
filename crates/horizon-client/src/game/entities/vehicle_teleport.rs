@@ -309,7 +309,7 @@ impl Game<'_> {
             if self.entity_vehicle(player).map(|mount| mount.id()) != Some(vehicle) {
                 continue;
             }
-            if self.entity_stop_riding(player) {
+            if self.entity_stop_riding_for_travel(player) {
                 ejected.push((id, conn));
             } else if self
                 .entity_vehicle(player)

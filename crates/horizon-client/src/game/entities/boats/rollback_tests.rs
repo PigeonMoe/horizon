@@ -318,6 +318,182 @@ fn check_boat_dismount(portal: bool) {
 
 #[test]
 #[ignore = "daily"]
+fn command_and_native_live_dismounts_check_the_edge_and_then_the_landing() {
+    use mod_api::{EntityMountEvent, PlayerPositionCommittedEvent};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug, PartialEq)]
+    enum Notice {
+        Edge(u32),
+        Landing(u128, [f64; 3], [f64; 3]),
+        Committed(u128, [f64; 3], [f64; 3]),
+    }
+
+    #[derive(Default)]
+    struct Policy {
+        veto_edge: AtomicBool,
+        notices: Mutex<Vec<Notice>>,
+    }
+    struct Protection(Arc<Policy>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn entity_mount(&self, _: &mut dyn ServerHost, event: &mut EntityMountEvent<'_>) -> Flow {
+            if event.mounting {
+                return Flow::Continue;
+            }
+            assert_eq!(event.vehicle, BOAT);
+            self.0
+                .notices
+                .lock()
+                .unwrap()
+                .push(Notice::Edge(event.entity));
+            if self.0.veto_edge.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_teleport_pre(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.cause, "dismount");
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.is_passenger(host), Some(false));
+            assert_eq!(rider.position(host), Some(event.from));
+            self.0.notices.lock().unwrap().push(Notice::Landing(
+                event.player,
+                event.from,
+                event.to,
+            ));
+            if event.player == FIRST {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_position_committed(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut PlayerPositionCommittedEvent<'_>,
+        ) {
+            let rider = host.player(event.player).unwrap().entity();
+            assert_eq!(rider.is_passenger(host), Some(false));
+            assert_eq!(rider.position(host), Some(event.to));
+            self.0.notices.lock().unwrap().push(Notice::Committed(
+                event.player,
+                event.from,
+                event.to,
+            ));
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let policy = Arc::new(Policy::default());
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new(
+                "explicit_disembark",
+                Box::new(Protection(policy.clone())),
+            )]
+            .into(),
+            || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    launch(game);
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world.set(7, 199, 9, stone).unwrap();
+                    let command = |game: &mut Game<'_>, player: u128| {
+                        game.as_console(|game| {
+                            game.run_command(&format!("ride guest{player} dismount"))
+                        })
+                    };
+                    let hull = game.entity(BOAT).unwrap();
+                    for player in [FIRST, SECOND] {
+                        let conn = player as u32;
+                        let rider = game.player(player).unwrap().entity();
+                        let edge = Notice::Edge(rider.id());
+                        assert!(!command(game, player));
+                        assert!(!rider.stop_riding(game));
+                        assert!(policy.notices.lock().unwrap().is_empty());
+                        assert!(rider.start_riding(game, hull, true));
+                        game.guest_boarded(conn, None);
+                        let (sender, packets) = mpsc::channel();
+                        game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                            guest.sender = PlayerSender::new(sender, Arc::default());
+                            guest.loaded = true;
+                            guest.load_timeout = 0;
+                            guest.awaiting_teleport = None;
+                        });
+                        let guest = game.command_guest(conn).unwrap();
+                        let from = guest.position;
+                        let target = game.boat_player_dismount_target(0, guest.yaw).components();
+                        assert_ne!(from, target);
+                        if player == FIRST {
+                            policy.veto_edge.store(true, Ordering::Relaxed);
+                            // RideCommand sends success after stopRiding even if
+                            // a mod kept the original mount edge.
+                            assert!(command(game, player));
+                            assert!(!rider.stop_riding(game));
+                            assert_eq!(game.command_guest(conn).unwrap().vehicle, Some(BOAT));
+                            assert_eq!(
+                                std::mem::take(&mut *policy.notices.lock().unwrap()),
+                                [Notice::Edge(rider.id()), Notice::Edge(rider.id())]
+                            );
+                            assert!(!received_packets(&packets).iter().any(|p| matches!(
+                                p,
+                                Clientbound::SetPassengers(_) | Clientbound::PlayerPosition(_)
+                            )));
+                            policy.veto_edge.store(false, Ordering::Relaxed);
+                            assert!(
+                                rider.stop_riding(game),
+                                "a landing veto still detached the rider"
+                            );
+                        } else {
+                            assert!(command(game, player));
+                        }
+                        let guest = game.command_guest(conn).unwrap();
+                        let at = if player == FIRST { from } else { target };
+                        assert_eq!(guest.position, at);
+                        assert_eq!(guest.vehicle, None);
+                        let updates: Vec<_> = received_packets(&packets)
+                            .into_iter()
+                            .filter(|p| {
+                                matches!(
+                                    p,
+                                    Clientbound::SetPassengers(_) | Clientbound::PlayerPosition(_)
+                                )
+                            })
+                            .collect();
+                        assert!(matches!(
+                            updates.as_slice(),
+                            [Clientbound::SetPassengers(seats), Clientbound::PlayerPosition(position)]
+                            if seats.vehicle == BOAT as i32 && seats.passengers.is_empty() && position.position == at
+                        ));
+                        let mut expected = vec![edge, Notice::Landing(player, from, target)];
+                        if player == SECOND {
+                            expected.push(Notice::Committed(player, from, target));
+                        }
+                        assert_eq!(
+                            std::mem::take(&mut *policy.notices.lock().unwrap()),
+                            expected
+                        );
+                    }
+                })
+            },
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn destroyed_boat_detaches_the_acting_rider_even_if_the_landing_is_denied() {
     check_removed_vehicle_dismount(RemovedDismountCase::DeniedBoat);
 }

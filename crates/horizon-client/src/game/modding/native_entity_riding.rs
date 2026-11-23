@@ -672,6 +672,16 @@ impl Game<'_> {
     /// vehicle lets it out, as `/ride ... dismount` does. False when it rode
     /// nothing, a mod's `mob_ride` hook kept it on, or for a stale handle.
     pub(super) fn entity_stop_riding(&mut self, entity: EntityRef) -> bool {
+        self.stop_entity_riding(entity, Self::stop_riding_requested)
+    }
+
+    /// Travel owns the passenger's destination and reads the source after
+    /// settling the seat. Do not queue an independent landing for that move.
+    pub(super) fn entity_stop_riding_for_travel(&mut self, entity: EntityRef) -> bool {
+        self.stop_entity_riding(entity, Self::stop_riding)
+    }
+
+    fn stop_entity_riding(&mut self, entity: EntityRef, stop_player: fn(&mut Self)) -> bool {
         let Some(t) = self.native_entity_target(entity) else {
             return false;
         };
@@ -681,7 +691,7 @@ impl Game<'_> {
         match t {
             Target::Mob(id) => self.dismount_mob(id),
             Target::Player | Target::Guest(_) => {
-                self.for_player(t, |g| g.stop_riding());
+                self.for_player(t, stop_player);
             }
             // A general row gets off by its mount link: the row keeps its
             // identity and place, and the level's next walk sees it as a
@@ -718,7 +728,7 @@ impl Game<'_> {
         };
         let mut any = false;
         for p in passengers.into_iter().rev() {
-            any |= self.entity_stop_riding(p);
+            any |= self.stop_entity_riding(p, Self::stop_riding);
         }
         any
     }
