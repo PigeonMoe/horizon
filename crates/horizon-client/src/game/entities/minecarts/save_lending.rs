@@ -113,7 +113,7 @@ impl Game<'_> {
             id,
             || kind.into(),
             self.carts[i].position.components(),
-            hit.by,
+            hit.source.attacker,
         ) {
             return false;
         }
@@ -142,7 +142,7 @@ impl Game<'_> {
         });
         // VehicleEntity.hurtServer: `gameEvent(ENTITY_DAMAGE, source.getEntity())`.
         let hurt_at = self.carts[i].position.components();
-        self.entity_event_by("minecraft:entity_damage", hurt_at, hit.by);
+        self.entity_event_by("minecraft:entity_damage", hurt_at, hit.source.credit);
         if destroyed {
             let speed = self.carts[i].velocity.x * self.carts[i].velocity.x
                 + self.carts[i].velocity.z * self.carts[i].velocity.z;

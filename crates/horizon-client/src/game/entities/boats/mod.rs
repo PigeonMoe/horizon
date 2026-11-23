@@ -2107,9 +2107,19 @@ impl Game<'_> {
     pub(super) fn hurt_boat_result(
         &mut self,
         i: usize,
-        mut damage: f32,
+        damage: f32,
         creative: bool,
         by: Option<super::commands::Target>,
+    ) -> Option<bool> {
+        self.hurt_boat_from(i, damage, creative, by.into())
+    }
+
+    pub(super) fn hurt_boat_from(
+        &mut self,
+        i: usize,
+        mut damage: f32,
+        creative: bool,
+        source: super::nonliving_hurt::VehicleDamageSource,
     ) -> Option<bool> {
         let id = self.boats[i].id;
         if self
@@ -2124,7 +2134,7 @@ impl Game<'_> {
             id,
             || boat.entity_type().into(),
             boat.position.components(),
-            by,
+            source.attacker,
         ) {
             return None;
         }
@@ -2151,7 +2161,7 @@ impl Game<'_> {
                 [b.position.x, b.position.y, b.position.z],
             )
         });
-        self.vehicle_damage_event(at, by);
+        self.vehicle_damage_event(at, source.credit);
         if destroyed {
             self.native_vehicle_destroy("boat", at);
             if !self.boats.iter().any(|b| {

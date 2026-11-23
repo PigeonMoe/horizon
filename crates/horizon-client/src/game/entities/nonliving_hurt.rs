@@ -9,6 +9,23 @@ use super::*;
 use horizon_client::mobs::Who;
 use horizon_client::projectiles::Projectile;
 
+/// The vehicle event's attacker and the damage source's combat credit can
+/// differ. An End Crystal's breaker gets credit without being its attacker.
+#[derive(Clone, Copy, Default)]
+pub(in crate::game) struct VehicleDamageSource {
+    pub(in crate::game) credit: Option<Target>,
+    pub(in crate::game) attacker: Option<Target>,
+}
+
+impl From<Option<Target>> for VehicleDamageSource {
+    fn from(by: Option<Target>) -> Self {
+        Self {
+            credit: by,
+            attacker: by,
+        }
+    }
+}
+
 /// The entity a projectile's damage names (`Projectile.getOwner`): a server's
 /// guest by connection, else the owner.
 pub(super) fn projectile_by(p: &Projectile) -> Option<Target> {

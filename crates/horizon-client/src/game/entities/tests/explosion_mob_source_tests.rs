@@ -213,6 +213,160 @@ fn a_deflected_ghast_fireballs_blast_protects_targets_against_the_actual_shooter
 
 #[test]
 #[ignore = "daily"]
+fn an_end_crystals_breaker_is_not_its_boat_or_cart_damage_attacker() {
+    use crate::game::{
+        minecarts::{CartKind, Minecart},
+        native_entity_refs::tests::run_on_guest_stack,
+        native_guest_turn_tests::with_guests,
+    };
+    use mod_api::{Flow, Hooks, Host, ModEntry, VehicleDamagePreEvent};
+    use std::sync::{Arc, Mutex};
+
+    const OWNER: u32 = 13;
+    const PROTECTED_BOAT: u32 = 90;
+    const PROTECTED_CART: u32 = 91;
+    const OPEN_BOAT: u32 = 92;
+    const OPEN_CART: u32 = 93;
+
+    #[derive(Default)]
+    struct Claim(Mutex<Vec<(u32, Option<u128>)>>);
+
+    struct Protection(Arc<Claim>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Protection {
+        fn vehicle_damage_pre(&self, _: &dyn Host, event: &mut VehicleDamagePreEvent<'_>) -> Flow {
+            let attacker = event.player.map(|player| player.uuid);
+            self.0.0.lock().unwrap().push((event.vehicle, attacker));
+            let protected = matches!(event.vehicle, PROTECTED_BOAT | PROTECTED_CART);
+            if protected && attacker != Some(u128::from(OWNER)) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    run_on_guest_stack(|| {
+        for crystal in [true, false] {
+            let claim = Arc::new(Claim::default());
+            let mods = vec![ModEntry::new(
+                "vehicle_claim",
+                Box::new(Protection(claim.clone())),
+            )]
+            .into();
+            mod_platform::testing::with_mods(mods, || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.build_registries();
+                    game.load_ticking_neighbourhood(0, 0);
+                    game.update_chunk_tickets();
+                    assert!(game.entity_ticking_area()(6, 6));
+                    let hub = &mut game.lan.as_mut().unwrap().hub;
+                    for conn in [12, OWNER] {
+                        hub.update_guest(conn, |guest| {
+                            guest.loaded = true;
+                            guest.loading = false;
+                            guest.load_timeout = 0;
+                        })
+                        .unwrap();
+                    }
+                    hub.update_guest(OWNER, |guest| {
+                        guest.position = [3.0, 100.0, 6.0];
+                        guest.previous_position = guest.position;
+                    })
+                    .unwrap();
+                    for (id, at) in [
+                        (PROTECTED_BOAT, Vec3::new(7.5, 100.0, 4.5)),
+                        (OPEN_BOAT, Vec3::new(4.5, 100.0, 8.5)),
+                    ] {
+                        game.boats.push(Boat::new(id, "oak".into(), at, 0.0));
+                    }
+                    for (id, at) in [
+                        (PROTECTED_CART, Vec3::new(4.5, 100.0, 4.5)),
+                        (OPEN_CART, Vec3::new(7.5, 100.0, 8.5)),
+                    ] {
+                        game.carts.push(Minecart::new(id, CartKind::Rideable, at));
+                    }
+                    crate::game::sculk::TEST_POSTED_EVENTS
+                        .with(|events| *events.borrow_mut() = Some(Vec::new()));
+                    if crystal {
+                        game.as_console(|game| {
+                            assert!(game.run_command(
+                                r#"summon minecraft:end_crystal 6.5 100 6.5 {Tags:["vehicle_crystal"]}"#
+                            ));
+                            assert!(game.run_command(
+                                "damage @e[tag=vehicle_crystal,limit=1] 1 minecraft:player_attack by guest13"
+                            ));
+                        });
+                        assert!(
+                            game.crystals.is_empty(),
+                            "the ordinary damage route broke the crystal"
+                        );
+                    } else {
+                        game.add_primed_tnt(
+                            BlockPos::new(6, 100, 6),
+                            0.0,
+                            1,
+                            Some(Who::Player),
+                            Some(OWNER),
+                        );
+                        game.tick_one_tnt(0, &[]).unwrap();
+                        assert!(game.tnts.is_empty(), "the player-primed TNT detonated");
+                    }
+                    let events = crate::game::sculk::TEST_POSTED_EVENTS
+                        .with(|events| events.borrow_mut().take().unwrap());
+                    let vehicle_credits: Vec<_> = events
+                        .into_iter()
+                        .filter(|(event, [x, y, z], _)| {
+                            *event == "minecraft:entity_damage"
+                                && [4.5, 7.5].contains(x)
+                                && *y == 100.0
+                                && [4.5, 8.5].contains(z)
+                        })
+                        .collect();
+                    assert_eq!(vehicle_credits.len(), if crystal { 2 } else { 4 });
+                    assert!(
+                        vehicle_credits
+                            .into_iter()
+                            .all(|(_, _, source)| source == Some(Who::Player)),
+                        "an admitted vehicle hit retains the breaker's combat credit"
+                    );
+                    let expected_attacker = (!crystal).then_some(u128::from(OWNER));
+                    let mut calls = claim.0.lock().unwrap();
+                    calls.sort_unstable();
+                    assert_eq!(
+                        *calls,
+                        [
+                            (PROTECTED_BOAT, expected_attacker),
+                            (PROTECTED_CART, expected_attacker),
+                            (OPEN_BOAT, expected_attacker),
+                            (OPEN_CART, expected_attacker),
+                        ]
+                    );
+                    assert!(game.boats.iter().all(|boat| boat.id != OPEN_BOAT));
+                    assert!(game.carts.iter().all(|cart| cart.id != OPEN_CART));
+                    if crystal {
+                        assert_eq!(game.boats[0].id, PROTECTED_BOAT);
+                        assert_eq!(game.boats[0].damage, 0.0);
+                        assert_eq!(game.carts[0].id, PROTECTED_CART);
+                        assert_eq!(game.carts[0].damage, 0.0);
+                        // Permission attribution must not change ordinary living
+                        // damage or turn a crystal into a PvP-only explosion.
+                        let owner = game.lan.as_ref().unwrap().hub.guest(OWNER).unwrap();
+                        assert!(owner.health < 20.0);
+                    } else {
+                        assert!(game.boats.is_empty());
+                        assert!(game.carts.is_empty());
+                    }
+                });
+            });
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_creeper_blast_primes_tnt_with_the_creeper_as_its_owner() {
     let mut resources = None;
     let mut game = server_game(&mut resources);

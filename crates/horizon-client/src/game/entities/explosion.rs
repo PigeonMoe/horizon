@@ -941,7 +941,7 @@ impl Game<'_> {
         damage_type: &str,
         interaction: BlockInteraction,
         blocks: &[[i32; 3]],
-        projectile_player: Option<i32>,
+        source: ExplosionSource,
     ) -> Vec<(u32, [f64; 3])> {
         if radius < 1.0e-5 {
             return Vec::new();
@@ -972,7 +972,8 @@ impl Game<'_> {
         let attacker = self.blast_attacker();
         let entity_sourced =
             attacker.is_some() || exploding.is_some() || self.combat.explosion_direct.is_some();
-        let responsible = projectile_player
+        let responsible = source
+            .projectile_player
             .or_else(|| attacker.as_ref().map(|(id, _)| *id as i32))
             .and_then(|id| self.damage_player_by_entity(id));
         if hurts {
@@ -1090,9 +1091,16 @@ impl Game<'_> {
             items_ignore: items_ignore_explosion(self.blast_griefs(), interaction),
             spared: exploding.filter(|_| self.combat.explosion_source_named),
         };
-        // `VehicleEntity.hurtServer` credits its ENTITY_DAMAGE to
-        // `DamageSource.getEntity`, which for a blast is its indirect source.
-        let blast_by = self.explosion_kill_credit();
+        // VehicleDamageEvent sees the crystal itself. Entity damage credit
+        // remains with the breaker through DamageSource.getEntity.
+        let vehicle_credit = self.explosion_kill_credit();
+        let vehicle_source = super::nonliving_hurt::VehicleDamageSource {
+            credit: vehicle_credit,
+            attacker: match source.entity {
+                Some((_, "minecraft:end_crystal")) => None,
+                _ => vehicle_credit,
+            },
+        };
         let mut destroyed_contents = Vec::new();
         macro_rules! blocked_damage {
             ($id:expr, $kind:expr) => {{
@@ -1339,7 +1347,7 @@ impl Game<'_> {
                                 amount,
                                 false,
                                 true,
-                                super::minecarts::CartHit::attributed(blast_by),
+                                super::minecarts::CartHit::indirect(vehicle_source),
                             );
                         }
                     }
@@ -1352,7 +1360,7 @@ impl Game<'_> {
                             else {
                                 continue;
                             };
-                            self.hurt_boat_by(i, amount, false, self.explosion_kill_credit());
+                            self.hurt_boat_from(i, amount, false, vehicle_source);
                         }
                     }
                     // `hurtServer` does nothing to the rest.
@@ -1781,7 +1789,7 @@ impl Game<'_> {
             damage_type,
             interaction,
             &targets,
-            source.projectile_player,
+            source,
         );
         self.combat.blast_hit_list = outer;
         self.combat.blast_hit_ids = outer_ids;
@@ -2215,7 +2223,7 @@ impl Game<'_> {
                     "minecraft:explosion",
                     BlockInteraction::Destroy,
                     &[],
-                    None,
+                    ExplosionSource::default(),
                 );
                 let mut remaining: Vec<_> = self
                     .dropped
