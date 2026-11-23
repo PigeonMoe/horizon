@@ -25,11 +25,17 @@ impl Game<'_> {
         vehicle: u32,
         from: Vec3,
         to: Vec3,
-        guest_boat_driver: Option<u128>,
+        guest_driver: u128,
+        driver_move_from: Option<[f64; 3]>,
     ) -> bool {
-        self.ridden_move_allowed_with(vehicle, from, to, guest_boat_driver, |seat| {
-            self.vehicle_carries_seat(vehicle, seat)
-        })
+        self.ridden_move_allowed_with(
+            vehicle,
+            from,
+            to,
+            Some(guest_driver),
+            driver_move_from,
+            |seat| self.vehicle_carries_seat(vehicle, seat),
+        )
     }
 
     pub(in crate::game) fn ridden_vehicle_move_allowed_with(
@@ -39,7 +45,7 @@ impl Game<'_> {
         to: Vec3,
         carried: impl Fn(u32) -> bool,
     ) -> bool {
-        self.ridden_move_allowed_with(vehicle, from, to, None, carried)
+        self.ridden_move_allowed_with(vehicle, from, to, None, None, carried)
     }
 
     fn ridden_move_allowed_with(
@@ -47,14 +53,15 @@ impl Game<'_> {
         vehicle: u32,
         from: Vec3,
         to: Vec3,
-        guest_boat_driver: Option<u128>,
+        guest_driver: Option<u128>,
+        driver_move_from: Option<[f64; 3]>,
         carried: impl Fn(u32) -> bool,
     ) -> bool {
-        if !self.checks_ridden_move(from, to) {
+        if !self.checks_ridden_move(from != to || driver_move_from.is_some()) {
             return true;
         }
         let allows = |uuid| {
-            self.ridden_move_denial(vehicle, from, to, uuid, guest_boat_driver)
+            self.ridden_move_denial(vehicle, from, to, uuid, guest_driver, driver_move_from)
                 .is_none()
         };
         if self.player.is_some()
@@ -88,11 +95,11 @@ impl Game<'_> {
         from: Vec3,
         to: Vec3,
     ) -> Option<(u128, bool)> {
-        if !self.checks_ridden_move(from, to) {
+        if !self.checks_ridden_move(from != to) {
             return None;
         }
         self.hull_rider_denial_with(vehicle, |uuid| {
-            self.ridden_move_denial(vehicle, from, to, uuid, None)
+            self.ridden_move_denial(vehicle, from, to, uuid, None, None)
         })
     }
 
@@ -170,10 +177,12 @@ impl Game<'_> {
         })
     }
 
-    fn checks_ridden_move(&self, from: Vec3, to: Vec3) -> bool {
-        from != to
-            && self.native_authoritative()
-            && mod_api::__private::listened(mod_api::HookId::RiddenVehicleMovePre)
+    fn checks_ridden_move(&self, moved: bool) -> bool {
+        moved && self.native_authoritative() && self.ridden_move_listened()
+    }
+
+    pub(in crate::game) fn ridden_move_listened(&self) -> bool {
+        mod_api::__private::listened(mod_api::HookId::RiddenVehicleMovePre)
     }
 
     fn riding_player_uuid(&self) -> Option<u128> {
@@ -190,7 +199,8 @@ impl Game<'_> {
         from: Vec3,
         to: Vec3,
         player: u128,
-        guest_boat_driver: Option<u128>,
+        guest_driver: Option<u128>,
+        driver_move_from: Option<[f64; 3]>,
     ) -> Option<bool> {
         let mut cancel = false;
         let mut paper_rollback = false;
@@ -200,7 +210,8 @@ impl Game<'_> {
             dimension: self.dim.id(),
             from: from.components(),
             to: to.components(),
-            guest_boat_driver,
+            guest_driver,
+            driver_move_from,
             paper_rollback: &mut paper_rollback,
             cancel: &mut cancel,
         });

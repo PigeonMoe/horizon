@@ -83,6 +83,11 @@ impl Hub {
         hearing: Hearing,
         events: &mut Vec<HostEvent>,
     ) {
+        if hearing == Hearing::Heard && self.mods_loaded {
+            self.guests.update(i, |guest| {
+                let _ = guest.record_paper_move(m.to, [m.yaw, m.pitch]);
+            });
+        }
         if hearing == Hearing::Heard && self.moves_listened && self.move_changes(i, &m) {
             let (since, conn) = (self.ticks, self.guests[i].conn);
             let (teleports, dimension) = {

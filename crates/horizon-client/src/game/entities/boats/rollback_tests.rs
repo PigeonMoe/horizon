@@ -1095,7 +1095,7 @@ impl Hooks for GuestBoundary {
         _: &dyn Host,
         event: &mut RiddenVehicleMovePreEvent<'_>,
     ) -> Flow {
-        assert_eq!(event.guest_boat_driver, Some(FIRST));
+        assert_eq!(event.guest_driver, Some(FIRST));
         self.checks.lock().unwrap().push(event.player);
         if (self.policy == GuestPolicy::DenyDriver && event.player == FIRST)
             || (self.policy == GuestPolicy::LegacyVeto && event.player == SECOND)
@@ -1148,6 +1148,149 @@ impl Hooks for GuestBoundary {
 struct HullDestination {
     policy: GuestPolicy,
     checks: Arc<Mutex<Vec<u128>>>,
+}
+
+#[derive(Debug, PartialEq)]
+enum DriverPolicyEvent {
+    Packet(Option<[f64; 3]>),
+    BoatTick,
+    Rollback,
+}
+
+struct PaperDriverBoundary(Arc<Mutex<Vec<DriverPolicyEvent>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for PaperDriverBoundary {
+    fn ridden_vehicle_move_pre(
+        &self,
+        _: &dyn Host,
+        event: &mut RiddenVehicleMovePreEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.guest_driver, Some(FIRST));
+        assert_eq!(event.player, FIRST);
+        self.0
+            .lock()
+            .unwrap()
+            .push(DriverPolicyEvent::Packet(event.driver_move_from));
+        // Movement is denied in the entire area starting at x=8, so a
+        // mounted player cannot move to another blocked cell in that area.
+        if event.to[0] >= 8.0
+            && event
+                .driver_move_from
+                .is_some_and(|from| from[0].floor() != event.to[0].floor())
+        {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn guest_boat_tick_move_pre(
+        &self,
+        _: &dyn Host,
+        event: &mut mod_api::GuestBoatTickMovePreEvent<'_>,
+    ) -> Flow {
+        assert_eq!(event.vehicle, BOAT);
+        assert_eq!(event.player, FIRST);
+        assert!(event.from[0] < 8.0 && event.to[0] >= 8.0);
+        self.0.lock().unwrap().push(DriverPolicyEvent::BoatTick);
+        Flow::Cancel
+    }
+
+    fn entity_teleport_pre(&self, _: &dyn Host, event: &mut EntityTeleportPreEvent<'_>) -> Flow {
+        assert_eq!(event.entity, BOAT);
+        assert_eq!(event.cause, "vehicle_rollback");
+        self.0.lock().unwrap().push(DriverPolicyEvent::Rollback);
+        Flow::Continue
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn paper_driver_packets_defer_small_boat_moves_and_check_horses_within_a_claim() {
+    run_on_guest_stack(|| {
+        for is_boat in [true, false] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let mods = vec![ModEntry::new(
+                "paper-driver-boundary",
+                Box::new(PaperDriverBoundary(seen.clone())),
+            )];
+            mod_platform::testing::with_mods(mods.into(), || {
+                with_guests(|game| {
+                    launch(game);
+                    let (id, x, distance) = if is_boat {
+                        (BOAT, 7.984375, 0.03125)
+                    } else {
+                        (CAMEL, 8.5, 1.0)
+                    };
+                    let from = Vec3::new(x, START.y, START.z);
+                    let to = [x + distance, START.y, START.z];
+                    if is_boat {
+                        game.boats.update(0, |boat| {
+                            boat.position = from;
+                            boat.velocity = Vec3::ZERO;
+                        });
+                    } else {
+                        let kind = game.res.mob_types().get("minecraft:horse").unwrap().clone();
+                        let mut horse = Mob::new(id, kind, from, 20.0);
+                        horse.extra.set_saddled(true);
+                        horse.no_gravity = true;
+                        game.mobs.push(horse);
+                    }
+                    let vehicle = game.entity(id).unwrap();
+                    let driver = game.player(FIRST).unwrap().entity();
+                    let conn = FIRST as u32;
+                    assert!(game.entity_start_riding(driver, vehicle, true));
+                    game.guest_boarded(conn, None);
+                    game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                        guest.loaded = true;
+                        guest.load_timeout = 0;
+                        guest.awaiting_teleport = None;
+                    });
+                    game.guest_vehicle_tick(conn);
+                    game.guest_vehicle_tick(conn);
+                    if is_boat {
+                        game.tick_boats();
+                    }
+                    game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                        guest.reset_paper_move_pose(from.components(), [20.0, 0.0]);
+                    });
+                    assert!(seen.lock().unwrap().is_empty());
+
+                    game.guest_move_vehicle(
+                        conn,
+                        &MoveVehicleRequest {
+                            position: to,
+                            yaw: 20.0,
+                            pitch: 0.0,
+                            on_ground: false,
+                        },
+                    );
+
+                    if is_boat {
+                        assert_eq!(game.entity_position(vehicle), Some(to));
+                        assert_eq!(*seen.lock().unwrap(), [DriverPolicyEvent::Packet(None)]);
+                        game.tick_boats();
+                        assert_eq!(
+                            *seen.lock().unwrap(),
+                            [
+                                DriverPolicyEvent::Packet(None),
+                                DriverPolicyEvent::BoatTick,
+                                DriverPolicyEvent::Rollback,
+                            ]
+                        );
+                    } else {
+                        assert_eq!(
+                            *seen.lock().unwrap(),
+                            [DriverPolicyEvent::Packet(Some(from.components())),]
+                        );
+                    }
+                    assert_eq!(game.entity_position(vehicle), Some(from.components()));
+                    assert_eq!(game.entity_vehicle(driver), Some(vehicle));
+                });
+            });
+        }
+    });
 }
 
 #[mod_api::__subscriptions]

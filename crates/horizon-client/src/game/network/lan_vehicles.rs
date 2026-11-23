@@ -10,12 +10,12 @@
 //! Sneaking gets out (`Player.rideTick`: `wantsToStopRiding`), and the client
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
 use super::{Dim, Game, Keys, commands::Target, lan::LanHost, minecarts::SEAT};
-use horizon_client::collisions::SceneCollisions;
 use horizon_client::lan::{
     guest::Guest,
     hub::{Hub, no_blocks_in},
 };
 use horizon_client::mobs::equine;
+use horizon_client::{camera::wrap_degrees, collisions::SceneCollisions};
 use horizon_core::geometry::{Aabb, Axis, Vec3};
 use horizon_protocol::{
     packets::play::{self, Clientbound as C},
@@ -755,7 +755,28 @@ impl Game<'_> {
                 return;
             }
         }
-        if !self.ridden_vehicle_packet_allowed(id, old, target, boat.map(|_| player)) {
+        let driver_move = if self.ridden_move_listened() {
+            self.lan.as_mut().unwrap().hub.guests.update(gi, |guest| {
+                guest.record_paper_move(
+                    target.components(),
+                    [wrap_degrees(p.yaw), wrap_degrees(p.pitch)],
+                )
+            })
+        } else {
+            None
+        };
+        if !self.ridden_vehicle_packet_allowed(
+            id,
+            old,
+            target,
+            player,
+            driver_move.map(|(from, _)| from),
+        ) {
+            if let Some((from, rotation)) = driver_move {
+                self.lan.as_mut().unwrap().hub.guests.update(gi, |guest| {
+                    guest.reset_paper_move_pose(from, rotation);
+                });
+            }
             if let Some(i) = mount {
                 self.mobs[i].velocity = Vec3::ZERO;
             } else if let Some(i) = boat {

@@ -2305,6 +2305,7 @@ impl Hub {
                 g.previous_position = p;
             }
             g.last_reported = (g.position, [g.yaw, g.pitch]);
+            g.reset_paper_move_pose(g.position, [g.yaw, g.pitch]);
             g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
             let id = g.teleport_counter;
             g.awaiting_teleport = Some((id, g.position));

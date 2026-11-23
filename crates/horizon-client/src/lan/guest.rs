@@ -185,6 +185,9 @@ pub struct Guest {
     /// to (position, `[yaw, pitch]`): what `player_move` compares reports with and reports as `from`.
     /// It is kept apart from the accepted position and may differ from it.
     pub last_reported: ([f64; 3], [f32; 2]),
+    /// Paper's last qualifying PlayerMoveEvent pose, shared with vehicle driver packets.
+    /// This baseline changes only when a move meets the distance or rotation threshold.
+    paper_move_pose: Option<([f64; 3], [f32; 2])>,
     /// The chunk cache centre placeNewPlayer already sent.
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
@@ -718,6 +721,7 @@ impl Guest {
             placed_at: 0,
             level_entered: 0,
             last_reported: (position, [0.0, 0.0]),
+            paper_move_pose: None,
             center_sent: None,
             left_reason: String::new(),
             pending_move: None,
@@ -1022,6 +1026,35 @@ impl Guest {
             self.previous_position,
             self.held_ticket_chunk,
         ) = (at, at, None);
+        self.reset_paper_move_pose(at, [self.yaw, self.pitch]);
+    }
+
+    /// `ServerGamePacketListenerImpl`'s distance and angle checks for `PlayerMoveEvent`.
+    pub fn record_paper_move(
+        &mut self,
+        to: [f64; 3],
+        rotation: [f32; 2],
+    ) -> Option<([f64; 3], [f32; 2])> {
+        let (from, previous_rotation) = *self
+            .paper_move_pose
+            .get_or_insert((self.position, [self.yaw, self.pitch]));
+        let distance_squared: f64 = from
+            .into_iter()
+            .zip(to)
+            .map(|(from, to)| (from - to).powi(2))
+            .sum();
+        let angle =
+            (previous_rotation[0] - rotation[0]).abs() + (previous_rotation[1] - rotation[1]).abs();
+        if distance_squared <= 1.0 / 256.0 && angle <= 10.0 {
+            return None;
+        }
+        self.reset_paper_move_pose(to, rotation);
+        Some((from, previous_rotation))
+    }
+
+    /// An internal player teleport or movement correction is the new event origin.
+    pub fn reset_paper_move_pose(&mut self, at: [f64; 3], rotation: [f32; 2]) {
+        self.paper_move_pose = Some((at, rotation));
     }
     /// `ServerChunkCache.move` after an accepted move: the tickets follow.
     pub fn accept_move(&mut self, to: [f64; 3]) {
@@ -3159,6 +3192,34 @@ mod tests {
             position,
             10,
         )
+    }
+
+    #[test]
+    fn paper_move_event_uses_the_last_emitted_pose_and_strict_thresholds() {
+        let start = [15.984375, 64.0, 0.5];
+        let mut guest = guest_at([0.5, 50.0, 0.5]);
+        guest.position = start;
+        guest.yaw = 20.0;
+        let edge = [start[0] + 0.03125, start[1], start[2]];
+        let limit = [start[0] + 0.0625, start[1], start[2]];
+        let beyond = [start[0] + 0.078125, start[1], start[2]];
+        assert_eq!(guest.record_paper_move(edge, [20.0, 0.0]), None);
+        assert_eq!(guest.record_paper_move(limit, [20.0, 0.0]), None);
+        assert_eq!(
+            guest.record_paper_move(beyond, [20.0, 0.0]),
+            Some((start, [20.0, 0.0]))
+        );
+        assert_eq!(guest.record_paper_move(beyond, [26.0, 4.0]), None);
+        assert_eq!(
+            guest.record_paper_move(beyond, [27.0, 4.0]),
+            Some((beyond, [20.0, 0.0]))
+        );
+        guest.reset_paper_move_pose(start, [40.0, 0.0]);
+        assert_eq!(guest.record_paper_move(edge, [40.0, 0.0]), None);
+        assert_eq!(
+            guest.record_paper_move(edge, [51.0, 0.0]),
+            Some((start, [40.0, 0.0]))
+        );
     }
 
     #[test]
