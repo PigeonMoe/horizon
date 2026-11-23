@@ -463,19 +463,13 @@ fn decode_equippable(bytes: &[u8]) -> Option<Equippable> {
     })
 }
 
-/// `EquipmentSlot.byId`'s serialized names.
+/// `EquipmentSlot.byId`'s serialized names, in protocol order.
+pub(crate) const EQUIPMENT_SLOT_NAMES: [&str; 8] = [
+    "mainhand", "feet", "legs", "chest", "head", "offhand", "body", "saddle",
+];
+
 fn equipment_slot_name(id: i32) -> Option<&'static str> {
-    Some(match id {
-        0 => "mainhand",
-        1 => "feet",
-        2 => "legs",
-        3 => "chest",
-        4 => "head",
-        5 => "offhand",
-        6 => "body",
-        7 => "saddle",
-        _ => return None,
-    })
+    EQUIPMENT_SLOT_NAMES.get(usize::try_from(id).ok()?).copied()
 }
 
 /// `DyeColor.byId`: an unknown id is white (`OutOfBoundsStrategy.ZERO`).

@@ -1378,6 +1378,7 @@ fn builtin_component(
         }
         "minecraft:tool" => write_tool(value, ids, &mut w)?,
         "minecraft:consumable" => write_consumable(value, ids, &mut w)?,
+        "minecraft:equippable" => write_equippable(value, ids, &mut w)?,
         "minecraft:bees" => write_bees(value, ids, &mut w)?,
         "minecraft:block_state" => write_block_state(value, &mut w)?,
         _ => return None,
@@ -1442,6 +1443,56 @@ fn write_sound(
         None => w.bool(false),
     }
     Some(())
+}
+
+/// `Equippable.STREAM_CODEC` from the saved component, including codec defaults.
+fn write_equippable(
+    value: &horizon_core::nbt::Tag,
+    ids: &dyn Fn(&str, &str) -> Option<i32>,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_core::nbt::Tag;
+    use horizon_world::datafix::dynamic::{as_bool_opt, namespaced};
+
+    let slot = tag_text(value.get("slot")?)?;
+    let slot_id = crate::item_sync::EQUIPMENT_SLOT_NAMES
+        .iter()
+        .position(|name| *name == slot)?;
+    w.varint(slot_id as i32);
+
+    let equip_sound = Tag::String("minecraft:item.armor.equip_generic".into());
+    write_sound(value.get("equip_sound").unwrap_or(&equip_sound), ids, w)?;
+    for key in ["asset_id", "camera_overlay"] {
+        let id = value.get(key);
+        w.bool(id.is_some());
+        if let Some(id) = id {
+            w.string(&namespaced(&tag_text(id)?));
+        }
+    }
+    let allowed_entities = value.get("allowed_entities");
+    w.bool(allowed_entities.is_some());
+    if let Some(entities) = allowed_entities {
+        write_holder_set("minecraft:entity_type", entities, ids, w)?;
+    }
+    for (key, default) in [
+        ("dispensable", true),
+        ("swappable", true),
+        ("damage_on_hurt", true),
+        ("equip_on_interact", false),
+        ("can_be_sheared", false),
+    ] {
+        w.bool(
+            value
+                .get(key)
+                .map_or(Some(default), |bit| as_bool_opt(Some(bit)))?,
+        );
+    }
+    let shearing_sound = Tag::String("minecraft:item.shears.snip".into());
+    write_sound(
+        value.get("shearing_sound").unwrap_or(&shearing_sound),
+        ids,
+        w,
+    )
 }
 
 /// `ConsumeEffect.STREAM_CODEC` from its saved form: the type's id, then its fields.
@@ -2089,6 +2140,10 @@ pub(super) fn network_stack(
                 "minecraft:attribute_modifiers",
                 horizon_protocol::item::component::ATTRIBUTE_MODIFIERS,
             ),
+            (
+                "minecraft:equippable",
+                horizon_protocol::item::component::EQUIPPABLE,
+            ),
             // A hive item's bees: its tooltip, its bundle weight and whether
             // it stacks all read them.
             ("minecraft:bees", horizon_protocol::item::component::BEES),
@@ -2625,6 +2680,73 @@ mod tests {
         };
         assert_eq!(profile.id, Some(0x0000_0001_0000_0002_0000_0003_0000_0004));
         assert_eq!(profile.properties, [("textures".into(), "original-skin".into(), None)]);
+    }
+
+    #[test]
+    fn saved_wearable_appearance_survives_inventory_sync() {
+        use horizon_core::nbt::parse_snbt;
+        use horizon_protocol::{item::Slot, registry::Ids};
+
+        let (value, _) = parse_snbt(r#"{slot:"chest",asset_id:"jianghu:changge"}"#).unwrap();
+        let mut armor = ItemStack::new("minecraft:leather_chestplate", 1);
+        armor
+            .data_mut()
+            .set_other("minecraft:equippable", Some(value));
+        let ids = |registry: &str, name: &str| match (registry, name) {
+            ("minecraft:data_component_type", "minecraft:equippable") => {
+                Some(component::EQUIPPABLE)
+            }
+            ("minecraft:sound_event", "minecraft:item.armor.equip_generic") => Some(10),
+            ("minecraft:sound_event", "minecraft:item.shears.snip") => Some(11),
+            _ => None,
+        };
+        let round_trip = |armor: &ItemStack| {
+            let stack = network_stack(&|_| 1, &ids, armor);
+            let mut writer = Writer::new();
+            Slot::write(&Some(stack), &mut writer);
+            let mut reader = Reader::new(&writer.data);
+            let decoded = Slot::read(&mut reader).unwrap().unwrap();
+            assert_eq!(reader.remaining(), 0);
+            decoded
+        };
+        let decoded = round_trip(&armor);
+        let Some(Component::Raw(bytes)) = decoded.component(component::EQUIPPABLE) else {
+            panic!("missing equippable component");
+        };
+        let mut expected = Writer::new();
+        expected.varint(3); // Chest
+        expected.varint(11); // Equip sound holder
+        expected.bool(true);
+        expected.string("jianghu:changge");
+        expected.bool(false); // Camera overlay
+        expected.bool(false); // Allowed entities
+        expected.bytes(&[1, 1, 1, 0, 0]); // Default interaction flags
+        expected.varint(12); // Shearing sound holder
+        assert_eq!(*bytes, expected.data);
+
+        let mut builtin = horizon_protocol::registry::Builtin::default();
+        builtin.registries.insert(
+            "minecraft:item".into(),
+            Ids::from_names(vec![
+                "minecraft:air".into(),
+                "minecraft:leather_chestplate".into(),
+            ]),
+        );
+        let synced = horizon_protocol::registry::Dynamic::default();
+        let received = crate::item_sync::from_network(&decoded, &builtin, &synced);
+        let items = crate::items::Items::for_tests(Default::default());
+        let appearance = crate::item_sync::equippable(&received, &items).unwrap();
+        assert_eq!(appearance.slot, "chest");
+        assert_eq!(appearance.asset_id.as_deref(), Some("jianghu:changge"));
+
+        armor.data_mut().set_other("minecraft:equippable", None);
+        armor.data_mut().set_other(
+            "!minecraft:equippable",
+            Some(Tag::Compound(Default::default())),
+        );
+        let without = round_trip(&armor);
+        assert!(without.component(component::EQUIPPABLE).is_none());
+        assert_eq!(without.removed, [component::EQUIPPABLE]);
     }
 
     /// A consumable a client made goes out as `Consumable.STREAM_CODEC`. A byte
