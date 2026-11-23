@@ -12,7 +12,7 @@ use std::{
 };
 
 pub const MOD_ID: &str = "pigeonauth";
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.1.1";
 const URL_ENV: &str = "HORIZON_PIGEONAUTH_URL";
 const HOST_ENV: &str = "HORIZON_PIGEONAUTH_OFFLINE_HOST";
 const KEY_ENV: &str = "HORIZON_PIGEONAUTH_KEY";
