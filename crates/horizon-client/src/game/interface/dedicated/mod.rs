@@ -886,6 +886,7 @@ fn append(to: &mut Tag, sibling: Tag) {
 struct ServerState {
     lists: Arc<Mutex<Lists>>,
     console: mpsc::Receiver<String>,
+    paper_activation: Option<transfer::PendingPaperActivation>,
     empty_ticks: i32,
     /// The mutable `DedicatedServer.pauseWhenEmptySeconds` setting.
     pause_when_empty_seconds: i32,
@@ -1419,6 +1420,7 @@ impl Game<'_> {
         let mut state = ServerState {
             lists,
             console,
+            paper_activation: None,
             empty_ticks: 0,
             pause_when_empty_seconds: props.pause_when_empty_seconds,
             ticks: Default::default(),

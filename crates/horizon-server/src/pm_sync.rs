@@ -3,7 +3,7 @@
 use crate::engine::Control;
 use horizon_platform::server_files::{
     pm_sync_spool::{MAX_SNAPSHOT_BYTES, write_checked},
-    pm_sync_store::{ReleasedClaim, Store},
+    pm_sync_store::{ReleasedClaim, Store, StoreError},
     properties::parse_uuid,
 };
 use horizon_server_launch::config::Config;
@@ -182,58 +182,45 @@ pub fn command(dir: &Path, arguments: &[String]) -> Result<(), String> {
     let claim = arrival.claim(&config)?;
     let mut control = Control::connect(dir)
         .map_err(|error| format!("could not connect to the game control endpoint: {error}"))?;
-    let url = std::env::var("HORIZON_PM_SYNC_DATABASE_URL")
-        .map_err(|_| "HORIZON_PM_SYNC_DATABASE_URL needs the Paper database connection")?;
-    let prefix = std::env::var("HORIZON_PM_SYNC_TABLE_PREFIX").unwrap_or_else(|_| "pmsync_".into());
-    let mut store =
-        Store::connect(&url, &prefix, MAX_SNAPSHOT_BYTES).map_err(|error| error.to_string())?;
+    if ask(&mut control, "transfer-status")?["paper_sql_authority"] != true {
+        return Err(
+            "the dedicated engine needs the PM-Sync MySQL feature and its database settings".into(),
+        );
+    }
     let paper = arrival.paper_arguments();
     let response = if let Some(proof) = prepared {
-        store
-            .with_released_claim(&claim, || -> Result<Value, String> {
-                let record = &proof.record_sha256;
-                let request = &proof.request_sha256;
-                let tuple = format!(
-                    "{} {} {} {} {record} {request} {}",
-                    arrival.player, arrival.handover, claim.source, claim.backend, claim.revision,
-                );
-                if phase == "resume" {
-                    let resumed = ask(
-                        &mut control,
-                        &format!(
-                            "player-profile-resume-paper {tuple} {}",
-                            arrival.snapshot_sha256
-                        ),
-                    )?;
-                    arrival.verify_binding(&resumed, claim.backend)?;
-                    if resumed["currently_placed"] != true {
-                        return Err("the current Paper owner was not placed".into());
-                    }
-                    return Ok(resumed);
-                }
-                let staged = ask(
-                    &mut control,
-                    &format!("player-profile-import-paper {paper} {record} {request}"),
-                )?;
-                arrival.verify_binding(&staged, claim.backend)?;
-                if staged["already_committed"] == true {
-                    return Ok(staged);
-                }
-                if staged["placed"] != false {
-                    return Err("the game did not hold the staged Paper arrival".into());
-                }
-                let committed = ask(&mut control, &format!("player-confirm {tuple}"))?;
-                arrival.verify_binding(&committed, claim.backend)?;
-                if committed["placed"] != true {
-                    return Err("the game did not confirm the Paper arrival".into());
-                }
-                Ok(committed)
-            })
-            .map_err(|error| error.to_string())??
+        let reply = ask(
+            &mut control,
+            &format!(
+                "player-profile-{phase}-paper {paper} {} {} {}",
+                proof.record_sha256, proof.request_sha256, arrival.owner_token,
+            ),
+        )?;
+        arrival.verify_binding(&reply, claim.backend)?;
+        let placed = if phase == "resume" {
+            "currently_placed"
+        } else {
+            "placed"
+        };
+        if reply[placed] != true {
+            return Err("the game did not place the authorized Paper arrival".into());
+        }
+        reply
     } else {
+        let url = std::env::var("HORIZON_PM_SYNC_DATABASE_URL")
+            .map_err(|_| "HORIZON_PM_SYNC_DATABASE_URL needs the Paper database connection")?;
+        let prefix =
+            std::env::var("HORIZON_PM_SYNC_TABLE_PREFIX").unwrap_or_else(|_| "pmsync_".into());
+        let mut store = Store::connect(&url, &prefix, MAX_SNAPSHOT_BYTES)
+            .map_err(|_| "could not connect to the Paper database")?;
         let lease = store
             .claim_released_snapshot(&claim)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                StoreError::Sql(_) => {
+                    "the Paper database did not acknowledge the released claim".into()
+                }
+                other => other.to_string(),
+            })?;
         let bytes = lease
             .snapshot
             .ok_or("the acquired Paper claim has no snapshot")?;

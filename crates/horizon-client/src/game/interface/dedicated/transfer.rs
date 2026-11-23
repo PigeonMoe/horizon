@@ -19,6 +19,7 @@ use std::time::Instant;
 
 #[path = "transfer_paper.rs"]
 mod paper;
+pub(super) use paper::PendingPaperActivation;
 
 #[path = "transfer_receipt.rs"]
 pub(super) mod receipt;
@@ -126,10 +127,16 @@ impl Game<'_> {
     /// (`arrivals::status_request`). A proxy asks it every few seconds, so it writes nothing to
     /// the log.
     pub(super) fn transfer_status(&self) -> Value {
-        match self.lan.as_ref() {
+        let mut status = match self.lan.as_ref() {
             Some(host) => arrivals::status_request(&host.hub, Instant::now()),
             None => json!({ "error": "the server is not open to players" }),
-        }
+        };
+        status["paper_sql_authority"] = json!(
+            cfg!(feature = "pm-sync-mysql")
+                && std::env::var_os("HORIZON_PM_SYNC_DATABASE_URL")
+                    .is_some_and(|url| !url.is_empty())
+        );
+        status
     }
 
     fn run_player_request(&mut self, verb: &str, args: &str) -> Value {
@@ -157,7 +164,6 @@ impl Game<'_> {
             "player-profile-resume" => self.resume_profile_owner(args),
             "player-profile-prepare-paper" => self.prepare_paper_profile(args),
             "player-profile-import-paper" => self.stage_paper_profile(args),
-            "player-profile-resume-paper" => self.resume_paper_profile(args),
             "player-drop" => match self.lan.as_mut() {
                 Some(host) => arrivals::drop_request(&mut host.hub, args),
                 None => json!({ "error": "the server is not open to players" }),
@@ -217,16 +223,23 @@ impl Game<'_> {
         request: Value,
         projected_paper: bool,
     ) -> Value {
-        let paper_digest = if projected_paper {
-            let Some(digest) = request["record"]["paper_snapshot_sha256"]
-                .as_str()
-                .and_then(receipt::parse_digest)
-            else {
-                return json!({ "error": "the Paper projection has no snapshot digest" });
-            };
-            Some(digest)
-        } else {
-            None
+        let paper_digest = match (
+            projected_paper,
+            request["record"].get("paper_snapshot_sha256"),
+        ) {
+            (true, claimed) => {
+                let Some(digest) = claimed
+                    .and_then(Value::as_str)
+                    .and_then(receipt::parse_digest)
+                else {
+                    return json!({ "error": "the Paper projection has no snapshot digest" });
+                };
+                Some(digest)
+            }
+            (false, Some(_)) => {
+                return json!({ "error": "Paper data needs the dedicated Paper import" });
+            }
+            (false, None) => None,
         };
         let Some(host) = self.lan.as_ref() else {
             return json!({ "error": "the server is not open to players" });
@@ -469,16 +482,32 @@ impl Game<'_> {
             Ok(binding) => binding,
             Err(error) => return json!({ "error": error }),
         };
+        self.confirm_bound_profile_arrival(&binding, None)
+    }
+
+    fn confirm_bound_profile_arrival(
+        &mut self,
+        binding: &receipt::Binding,
+        paper_digest: Option<[u8; 32]>,
+    ) -> Value {
+        let host = self.lan.as_ref().expect("the server is open");
+        let transfers = host.hub.transfers.as_ref().expect("transfers are enabled");
         let (owner, id) = (binding.owner, binding.handover);
-        match receipt::lookup(&self.world_root, &binding) {
+        match receipt::lookup(&self.world_root, binding) {
             Ok(Some(committed)) => {
+                let placed = host.hub.placed_arrival(owner, id).is_some();
+                if committed.paper_snapshot_sha256 != paper_digest {
+                    if paper_digest.is_some() {
+                        return json!({ "error": "the Paper snapshot differs from its durable arrival receipt" });
+                    }
+                    return committed.commit_reply(placed, true);
+                }
                 let returning = host
                     .hub
                     .held_profile_return(owner)
                     .filter(|authorization| binding.matches_return(authorization))
                     .filter(|_| host.hub.imported_arrival(owner, id).is_ok())
                     .cloned();
-                let placed = host.hub.placed_arrival(owner, id).is_some();
                 return match returning {
                     Some(authorization) if !transfers.stopping => {
                         match self.reconcile_return(&authorization) {
@@ -500,12 +529,15 @@ impl Game<'_> {
             Err(error) => return json!({ "error": error }),
         };
         let staged = match receipt::staged(&host.hub.guests[i]) {
-            Ok(Some(staged)) if staged.binding == binding => staged,
+            Ok(Some(staged)) if staged.binding == *binding => staged,
             Ok(_) => {
                 return json!({ "error": "the strict hand-over differs from the held profile stage" });
             }
             Err(error) => return json!({ "error": error }),
         };
+        if staged.paper_snapshot_sha256 != paper_digest {
+            return json!({ "error": "Paper placement requires its current PM-Sync claim" });
+        }
         if host
             .hub
             .held_profile_return(owner)
@@ -617,7 +649,7 @@ impl Game<'_> {
             if authorization.retired.owner != owner {
                 return Err("the resume authorization belongs to a different owner".into());
             }
-            let retried = self.resume_committed_profile(&authorization)?;
+            let retried = self.resume_committed_profile(&authorization, None)?;
             Ok(json!({
                 "ok": true,
                 "placed": true,
@@ -633,6 +665,7 @@ impl Game<'_> {
     fn resume_committed_profile(
         &mut self,
         authorization: &ReturnAuthorization,
+        paper_digest: Option<[u8; 32]>,
     ) -> Result<bool, String> {
         let (owner, id) = (authorization.retired.owner, authorization.handover);
         let hub = &self.lan.as_ref().expect("the server is open").hub;
@@ -661,6 +694,9 @@ impl Game<'_> {
         let (_, tag) = CurrentReturn::read_matching_player(&self.world_root, authorization)
             .map_err(|error| error.to_string())?
             .ok_or("the current player file does not confirm this return")?;
+        if receipt::paper_digest(&tag, id)? != paper_digest {
+            return Err("Paper resumption requires its current PM-Sync claim".into());
+        }
         self.verify_committed_profiles(owner, id, &tag)?;
         self.restore_held_profile(owner, id, tag)?;
         self.finish_arrival(owner, id, Some(authorization), false)?;

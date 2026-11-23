@@ -10,7 +10,9 @@ use chrono::{DateTime, Utc};
 use horizon_client::{
     advancements::{Progress, Tree},
     lan::{
-        arrivals, base64, playerdata,
+        arrivals, base64,
+        hub::Hub,
+        playerdata,
         pm_sync_paper::{PaperMigrationContext, stage_paper_migration},
         source_handover::AuthorityRevision,
     },
@@ -26,7 +28,11 @@ use horizon_server_files::{
     pm_sync_spool::{self, MAX_SNAPSHOT_BYTES},
 };
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::mpsc, time::Instant};
+
+#[cfg(feature = "pm-sync-mysql")]
+#[path = "transfer_paper_authority.rs"]
+mod authority;
 
 struct PaperRequest<'a> {
     owner: u128,
@@ -65,20 +71,170 @@ impl<'a> PaperRequest<'a> {
     }
 }
 
-impl Game<'_> {
-    /// A supervisor with the current Paper claim can resume a completed first arrival.
-    /// Older receipts still acknowledge their commit through the ordinary confirm operation.
-    pub(super) fn resume_paper_profile(&mut self, args: &str) -> Value {
-        self.resume_exact_paper_profile(args)
-            .unwrap_or_else(|error| json!({ "error": error }))
-    }
+struct PaperImport<'a> {
+    paper: PaperRequest<'a>,
+    record: &'a str,
+    request: &'a str,
+}
 
-    fn resume_exact_paper_profile(&mut self, args: &str) -> Result<Value, String> {
-        let (confirm, paper_digest) = args
+impl<'a> PaperImport<'a> {
+    fn parse(args: &'a str) -> Result<Self, String> {
+        let (before, request) = args
             .trim_end()
             .rsplit_once(char::is_whitespace)
-            .ok_or("Paper profile resume needs a confirm tuple and snapshot digest")?;
-        let paper_digest = parse_digest(paper_digest).ok_or("invalid Paper snapshot digest")?;
+            .ok_or("Paper profile import needs a prepared record and request digest")?;
+        let (paper, record) = before
+            .trim_end()
+            .rsplit_once(char::is_whitespace)
+            .ok_or("Paper profile import needs a prepared record and request digest")?;
+        Ok(Self {
+            paper: PaperRequest::parse(paper)?,
+            record,
+            request,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Activation {
+    Commit,
+    Resume,
+}
+
+impl Activation {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Commit => "player-profile-commit-paper",
+            Self::Resume => "player-profile-resume-paper",
+        }
+    }
+}
+
+struct AuthorityCheck {
+    deadline: Instant,
+    response: mpsc::Receiver<Result<(), String>>,
+}
+
+impl AuthorityCheck {
+    fn poll(&self, now: Instant) -> Option<Result<(), String>> {
+        if now >= self.deadline {
+            return Some(Err("the Paper SQL authority check timed out".into()));
+        }
+        match self.response.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("the Paper SQL authority worker did not answer".into()))
+            }
+        }
+    }
+}
+
+struct PaperIntent {
+    action: Activation,
+    import: String,
+    binding: Binding,
+    connection: Option<u32>,
+}
+
+pub(in crate::game::dedicated) struct PendingPaperActivation {
+    intent: PaperIntent,
+    check: AuthorityCheck,
+    reply: mpsc::Sender<String>,
+}
+
+#[cfg(not(feature = "pm-sync-mysql"))]
+fn submit_authority(_: &PaperRequest<'_>, _: &str, _: u128) -> Result<AuthorityCheck, String> {
+    Err("this dedicated engine was built without PM-Sync MySQL authority".into())
+}
+
+#[cfg(feature = "pm-sync-mysql")]
+use authority::submit_authority;
+
+impl Game<'_> {
+    pub(in crate::game::dedicated) fn start_paper_request(
+        &self,
+        verb: &str,
+        args: &str,
+        reply: mpsc::Sender<String>,
+        pending: &mut Option<PendingPaperActivation>,
+    ) {
+        let action = match verb {
+            "player-profile-commit-paper" => Activation::Commit,
+            _ => Activation::Resume,
+        };
+        if pending.is_some() {
+            send_paper_reply(
+                action,
+                reply,
+                Err("a Paper SQL authority check is already pending".into()),
+            );
+            return;
+        }
+        match self.submit_paper_activation(args, action, submit_authority) {
+            Ok((intent, check)) => {
+                *pending = Some(PendingPaperActivation {
+                    intent,
+                    check,
+                    reply,
+                })
+            }
+            Err(error) => send_paper_reply(action, reply, Err(error)),
+        }
+    }
+
+    fn submit_paper_activation(
+        &self,
+        args: &str,
+        action: Activation,
+        submit: impl FnOnce(&PaperRequest<'_>, &str, u128) -> Result<AuthorityCheck, String>,
+    ) -> Result<(PaperIntent, AuthorityCheck), String> {
+        let (import_args, token) = args
+            .trim_end()
+            .rsplit_once(char::is_whitespace)
+            .ok_or("Paper activation needs a prepared arrival and SQL owner token")?;
+        let import = PaperImport::parse(import_args)?;
+        let token = arrivals::parse_uuid(token)
+            .filter(|token| *token != 0)
+            .ok_or("invalid Paper SQL owner token")?;
+        let (hub, settings, destination) = self.paper_activation_route()?;
+        let binding = paper_binding(settings, &import, destination)?;
+        let connection = paper_connection(hub, &binding);
+        if connection.is_none() && matches!(action, Activation::Resume) {
+            return Err("no expected forwarded Paper player is connected".into());
+        }
+        let check = submit(&import.paper, destination, token)?;
+        Ok((
+            PaperIntent {
+                action,
+                import: import_args.into(),
+                binding,
+                connection,
+            },
+            check,
+        ))
+    }
+
+    pub(in crate::game::dedicated) fn poll_paper_request(
+        &mut self,
+        pending: &mut Option<PendingPaperActivation>,
+    ) {
+        let Some(activation) = pending.as_ref() else {
+            return;
+        };
+        let result = match self.paper_activation_route() {
+            Err(error) => Some(Err(error)),
+            Ok(_) => activation.check.poll(Instant::now()),
+        };
+        let Some(result) = result else { return };
+        let activation = pending
+            .take()
+            .expect("the pending activation was checked above");
+        let reply = result.and_then(|()| self.complete_paper_activation(&activation.intent));
+        send_paper_reply(activation.intent.action, activation.reply, reply);
+    }
+
+    fn paper_activation_route(&self) -> Result<(&Hub, &arrivals::Settings, &str), String> {
         let hub = &self
             .lan
             .as_ref()
@@ -94,11 +250,86 @@ impl Game<'_> {
             || net.online.is_some()
         {
             return Err(
-                "Paper profile resume needs required profiles and authenticated forwarding".into(),
+                "Paper profile activation needs required profiles and authenticated forwarding"
+                    .into(),
             );
         }
-        let binding = Binding::from_confirm(&transfer.settings, confirm)?;
+        let destination = transfer
+            .settings
+            .backend_id
+            .as_deref()
+            .ok_or("the destination is not configured for strict transfer")?;
+        Ok((hub, &transfer.settings, destination))
+    }
+
+    fn complete_paper_activation(&mut self, intent: &PaperIntent) -> Result<Value, String> {
+        let (hub, settings, destination) = self.paper_activation_route()?;
+        let import = PaperImport::parse(&intent.import)?;
+        let binding = paper_binding(settings, &import, destination)?;
+        if binding != intent.binding {
+            return Err(
+                "the Paper profile route or roster changed while checking authority".into(),
+            );
+        }
+        // A request without a connected player can acknowledge history, even if a new player
+        // arrived while SQL was running. That request must never attach to the new connection.
+        let Some(connection) = intent.connection else {
+            let committed = receipt::lookup(&self.world_root, &binding)?
+                .filter(|entry| entry.paper_snapshot_sha256 == Some(import.paper.digest))
+                .ok_or("no expected forwarded Paper player is connected")?;
+            return Ok(committed.commit_reply(false, true));
+        };
+        if paper_connection(hub, &binding) != Some(connection) {
+            return Err("the forwarded Paper connection changed while checking authority".into());
+        }
+        if hub.source_frozen_handover(binding.owner).is_some()
+            && hub
+                .held_profile_return(binding.owner)
+                .is_none_or(|returning| !binding.matches_return(returning))
+        {
+            return Err("a source hand-over still fences this Paper player".into());
+        }
+        let destination = destination.to_owned();
+        match intent.action {
+            Activation::Commit => {
+                let staged = self.stage_exact_paper_profile(&import, &binding)?;
+                if staged["ok"] != true {
+                    return Ok(staged);
+                }
+                Ok(self.confirm_bound_profile_arrival(&binding, Some(import.paper.digest)))
+            }
+            Activation::Resume => {
+                self.resume_exact_paper_profile(&binding, import.paper.digest, &destination)
+            }
+        }
+    }
+
+    fn resume_exact_paper_profile(
+        &mut self,
+        binding: &Binding,
+        paper_digest: [u8; 32],
+        destination: &str,
+    ) -> Result<Value, String> {
+        let hub = &self.lan.as_ref().expect("the server is open").hub;
         let (owner, id) = (binding.owner, binding.handover);
+        let mut returning = hub.held_profile_return(owner).cloned();
+        if returning.is_none()
+            && hub.placed_arrival(owner, id).is_some()
+            && let Some(journal) = &hub.lan.shared.config.source_handovers
+        {
+            returning = journal
+                .current_return(destination, owner)
+                .map_err(|error| error.to_string())?
+                .map(|current| current.authorization().clone());
+        }
+        if let Some(returning) = returning {
+            let committed = receipt::lookup(&self.world_root, binding)?
+                .filter(|entry| entry.paper_snapshot_sha256 == Some(paper_digest))
+                .filter(|_| binding.matches_return(&returning))
+                .ok_or("the current return differs from the Paper arrival receipt")?;
+            let live = self.resume_committed_profile(&returning, Some(paper_digest))?;
+            return Ok(paper_resume_reply(&committed, live));
+        }
         if hub.source_frozen_handover(owner).is_some() {
             return Err("a source hand-over still fences this Paper player".into());
         }
@@ -122,16 +353,13 @@ impl Game<'_> {
         }
         self.finish_player_autosaves(true)
             .map_err(|error| error.to_string())?;
-        let current = receipt::CurrentPaperArrival::read(&self.world_root, &binding, paper_digest)?;
+        let current = receipt::CurrentPaperArrival::read(&self.world_root, binding, paper_digest)?;
         self.verify_committed_profiles(owner, id, &current.player)?;
         if !live {
             self.restore_held_profile(owner, id, current.player)?;
             self.finish_arrival(owner, id, None, false)?;
         }
-        let mut reply = current.receipt.commit_reply(true, true);
-        reply["retried"] = json!(live);
-        reply["resumed"] = json!(!live);
-        Ok(reply)
+        Ok(paper_resume_reply(&current.receipt, live))
     }
 
     pub(super) fn prepare_paper_profile(&mut self, args: &str) -> Value {
@@ -152,41 +380,32 @@ impl Game<'_> {
     }
 
     pub(super) fn stage_paper_profile(&mut self, args: &str) -> Value {
-        self.stage_exact_paper_profile(args)
-            .unwrap_or_else(|error| json!({ "error": error }))
+        let result = (|| {
+            let import = PaperImport::parse(args)?;
+            let host = self
+                .lan
+                .as_ref()
+                .ok_or("the server is not open to players")?;
+            let transfer = host.hub.transfers.as_ref().ok_or(arrivals::OFF)?;
+            let destination = transfer
+                .settings
+                .backend_id
+                .as_deref()
+                .ok_or("the destination is not configured for strict transfer")?;
+            let binding = paper_binding(&transfer.settings, &import, destination)?;
+            self.stage_exact_paper_profile(&import, &binding)
+        })();
+        result.unwrap_or_else(|error| json!({ "error": error }))
     }
 
-    fn stage_exact_paper_profile(&mut self, args: &str) -> Result<Value, String> {
-        let args = args.trim_end();
-        let (before, expected_request) = args
-            .rsplit_once(char::is_whitespace)
-            .ok_or("Paper profile import needs a prepared record and request digest")?;
-        let (paper, expected_record) = before
-            .trim_end()
-            .rsplit_once(char::is_whitespace)
-            .ok_or("Paper profile import needs a prepared record and request digest")?;
-        let request = PaperRequest::parse(paper)?;
-        let host = self
-            .lan
-            .as_ref()
-            .ok_or("the server is not open to players")?;
-        let transfer = host.hub.transfers.as_ref().ok_or(arrivals::OFF)?;
-        let destination = transfer
-            .settings
-            .backend_id
-            .as_deref()
-            .ok_or("the destination is not configured for strict transfer")?;
-        let binding = Binding::from_confirm(
-            &transfer.settings,
-            &format!(
-                "{} {} {} {destination} {expected_record} {expected_request} {}",
-                uuid_string(request.owner),
-                arrivals::handover_text(request.handover),
-                request.source,
-                u64::from(request.revision)
-            ),
-        )?;
-        if let Some(committed) = receipt::lookup(&self.world_root, &binding)? {
+    fn stage_exact_paper_profile(
+        &mut self,
+        import: &PaperImport<'_>,
+        binding: &Binding,
+    ) -> Result<Value, String> {
+        let request = &import.paper;
+        let host = self.lan.as_ref().expect("the server is open");
+        if let Some(committed) = receipt::lookup(&self.world_root, binding)? {
             if committed.paper_snapshot_sha256 != Some(request.digest) {
                 return Err("the Paper snapshot differs from its durable arrival receipt".into());
             }
@@ -199,7 +418,7 @@ impl Game<'_> {
         if let Ok(index) = host.hub.imported_arrival(request.owner, request.handover) {
             let staged = receipt::staged(&host.hub.guests[index])?
                 .ok_or("the held Paper profile has no staged receipt")?;
-            if staged.binding != binding || staged.paper_snapshot_sha256 != Some(request.digest) {
+            if staged.binding != *binding || staged.paper_snapshot_sha256 != Some(request.digest) {
                 return Err("the Paper snapshot differs from its held profile stage".into());
             }
             let mut reply = json!({"ok": true, "placed": false, "retried": true,
@@ -207,9 +426,9 @@ impl Game<'_> {
             binding.add_to_reply(&mut reply);
             return Ok(reply);
         }
-        let mut projected = self.project_paper_profile(&request)?;
-        if projected["record_sha256"].as_str() != Some(expected_record)
-            || projected["request_sha256"].as_str() != Some(expected_request)
+        let mut projected = self.project_paper_profile(request)?;
+        if projected["record_sha256"].as_str() != Some(import.record)
+            || projected["request_sha256"].as_str() != Some(import.request)
         {
             return Err("the Paper projection changed since it was prepared".into());
         }
@@ -359,6 +578,63 @@ impl Game<'_> {
     }
 }
 
+fn paper_connection(hub: &Hub, binding: &Binding) -> Option<u32> {
+    hub.guests
+        .iter()
+        .find(|guest| {
+            guest.uuid == binding.owner
+                && guest.expected
+                && guest.participates_online()
+                && guest.left_reason.is_empty()
+                && ((guest.held
+                    && !guest.placed
+                    && guest
+                        .arrival_handover
+                        .is_none_or(|id| id == binding.handover))
+                    || (guest.placed && guest.arrival_handover == Some(binding.handover)))
+        })
+        .map(|guest| guest.conn)
+}
+
+fn send_paper_reply(
+    action: Activation,
+    sender: mpsc::Sender<String>,
+    result: Result<Value, String>,
+) {
+    let reply = result.unwrap_or_else(|error| json!({ "error": error }));
+    // The request holds a SQL owner credential, including on malformed input. Log only its result.
+    let (level, line) = arrivals::request_log(action.verb(), None, "Paper", &reply);
+    super::super::log(level, &line);
+    let _ = sender.send(reply.to_string());
+}
+
+fn paper_resume_reply(receipt: &receipt::Receipt, live: bool) -> Value {
+    let mut reply = receipt.commit_reply(true, true);
+    reply["retried"] = json!(live);
+    reply["resumed"] = json!(!live);
+    reply
+}
+
+fn paper_binding(
+    settings: &arrivals::Settings,
+    import: &PaperImport<'_>,
+    destination: &str,
+) -> Result<Binding, String> {
+    let paper = &import.paper;
+    Binding::from_confirm(
+        settings,
+        &format!(
+            "{} {} {} {destination} {} {} {}",
+            uuid_string(paper.owner),
+            arrivals::handover_text(paper.handover),
+            paper.source,
+            import.record,
+            import.request,
+            u64::from(paper.revision),
+        ),
+    )
+}
+
 fn requested_paper_sections(
     roster: &BTreeMap<Identifier, u32>,
     sections: &BTreeMap<String, &[u8]>,
@@ -421,6 +697,7 @@ fn project_advancements(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::{BanList, IpBanList, Lists, OpList, ServerState, WhiteList};
     use super::super::resume_tests::{
         KEY, forwarded_login, read_held_view, read_resumed_view, wait_for_join,
     };
@@ -430,7 +707,11 @@ mod tests {
         lan::source_handover::{Handover, Journal},
     };
     use horizon_core::nbt::Compound;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     #[derive(Default)]
     struct SlimefunReceiver;
@@ -457,6 +738,111 @@ mod tests {
             required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
                 .into(),
             ..arrivals::Settings::default()
+        }
+    }
+
+    const OWNER_TOKEN: &str = "00000000-0000-0000-0000-000000000055";
+
+    fn test_paper_request(
+        game: &Game<'_>,
+        args: &str,
+        action: Activation,
+    ) -> Result<
+        (
+            PendingPaperActivation,
+            mpsc::Sender<Result<(), String>>,
+            mpsc::Receiver<String>,
+        ),
+        String,
+    > {
+        let (send, response) = mpsc::channel();
+        let (intent, check) =
+            game.submit_paper_activation(args, action, |request, destination, token| {
+                assert_eq!(request.owner, 12);
+                assert_eq!(request.source, "paper");
+                assert_eq!(destination, "horizon");
+                assert_eq!(token, 0x55);
+                Ok(AuthorityCheck {
+                    deadline: Instant::now() + Duration::from_secs(8),
+                    response,
+                })
+            })?;
+        let (reply, result) = mpsc::channel();
+        Ok((
+            PendingPaperActivation {
+                intent,
+                check,
+                reply,
+            },
+            send,
+            result,
+        ))
+    }
+
+    fn result(receive: mpsc::Receiver<String>) -> Value {
+        serde_json::from_str(
+            &receive
+                .try_recv()
+                .expect("the control request was completed"),
+        )
+        .unwrap()
+    }
+
+    fn with_authority(
+        game: &mut Game<'_>,
+        command: &str,
+        action: Activation,
+        authority: Result<(), String>,
+    ) -> Value {
+        match test_paper_request(game, command, action) {
+            Err(error) => json!({ "error": error }),
+            Ok((pending, send, receive)) => {
+                send.send(authority).unwrap();
+                game.poll_paper_request(&mut Some(pending));
+                result(receive)
+            }
+        }
+    }
+
+    fn authorized(game: &mut Game<'_>, command: &str, action: Activation) -> Value {
+        with_authority(game, command, action, Ok(()))
+    }
+
+    fn control_state(world: &Path, paper_activation: PendingPaperActivation) -> ServerState {
+        let lists = Lists {
+            ops: OpList::new(world.join("ops.json")),
+            white: WhiteList::new(world.join("whitelist.json")),
+            bans: BanList::new(world.join("banned-players.json")),
+            ip_bans: IpBanList::new(world.join("banned-ips.json")),
+            use_whitelist: false,
+            enforce_whitelist: false,
+            op_level: 4,
+            player_idle_timeout: 0,
+            stop: false,
+            autosave: true,
+            whitelist_bypass: Vec::new(),
+        };
+        ServerState {
+            lists: Arc::new(Mutex::new(lists)),
+            console: mpsc::channel().1,
+            paper_activation: Some(paper_activation),
+            empty_ticks: 0,
+            pause_when_empty_seconds: 0,
+            ticks: Default::default(),
+            paused: false,
+            broadcast_console: false,
+            broadcast_rcon: false,
+            op_level: 4,
+            report: None,
+            memory_due: None,
+            perf: horizon_client::server_perf::ServerPerf::new(0.0, 250.0),
+            perf_epoch: Instant::now(),
+            horizon: horizon_client::server_perf::horizon_options(0, 0, false),
+            view: (2, 2),
+            compression: -1,
+            max_players: 2,
+            game_mode: 0,
+            force_game_mode: false,
         }
     }
 
@@ -561,9 +947,141 @@ mod tests {
                         native["error"]
                             .as_str()
                             .unwrap()
-                            .contains("food exhaustion"),
+                            .contains("dedicated Paper import"),
                         "{native}"
                     );
+                    let wire = format!("{apply} {OWNER_TOKEN}");
+                    let (reply, _receive) = std::sync::mpsc::channel();
+                    let control = horizon_client::control::Server::local();
+                    control
+                        .sender()
+                        .send(horizon_client::control::Request {
+                            line: format!("player-profile-commit-paper {wire}"),
+                            reply,
+                        })
+                        .unwrap();
+                    // The new authoritative head is observed at dispatch time, after queueing.
+                    let database_revision = 10;
+                    let late = control.try_recv().unwrap();
+                    let (_, delayed) = late.line.split_once(' ').unwrap();
+                    assert!(
+                        database_revision
+                            > u64::from(PaperImport::parse(&apply).unwrap().paper.revision)
+                    );
+                    let stale = with_authority(
+                        game,
+                        delayed,
+                        Activation::Commit,
+                        Err("PM-Sync source does not own the expected revision".into()),
+                    );
+                    assert!(
+                        stale["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("expected revision")
+                    );
+                    let interrupted = with_authority(
+                        game,
+                        &wire,
+                        Activation::Commit,
+                        Err("the Paper database did not acknowledge its authority check".into()),
+                    );
+                    assert!(
+                        interrupted["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("did not acknowledge")
+                    );
+                    #[cfg(not(feature = "pm-sync-mysql"))]
+                    {
+                        let (reply, receive) = mpsc::channel();
+                        game.start_paper_request(
+                            Activation::Commit.verb(),
+                            &wire,
+                            reply,
+                            &mut None,
+                        );
+                        assert!(
+                            result(receive)["error"]
+                                .as_str()
+                                .unwrap()
+                                .contains("built without PM-Sync MySQL")
+                        );
+                    }
+                    let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                    assert!(guest.held && !guest.placed && !guest.imported);
+                    assert!(!file.exists());
+
+                    let (pending, answer, receive) =
+                        test_paper_request(game, &wire, Activation::Commit).unwrap();
+                    let mut state = control_state(world.path(), pending);
+                    let control = horizon_client::control::Server::local();
+                    let (reply, status) = mpsc::channel();
+                    control
+                        .sender()
+                        .send(horizon_client::control::Request {
+                            line: "transfer-status".into(),
+                            reply,
+                        })
+                        .unwrap();
+                    game.control = Some(control);
+                    game.poll_server_control(&mut state);
+                    assert_eq!(result(status)["held"], 1);
+                    assert!(state.paper_activation.is_some());
+                    assert!(matches!(receive.try_recv(), Err(mpsc::TryRecvError::Empty)));
+                    assert!(!file.exists());
+                    // Disconnect the original slot and replace it with another connection for the same UUID.
+                    let hub = &mut game.lan.as_mut().unwrap().hub;
+                    let index = hub.guests.connection_index(12).unwrap();
+                    let mut guest = hub.guests.remove(index);
+                    guest.conn = 21;
+                    hub.guests.insert(index, guest);
+                    answer.send(Ok(())).unwrap();
+                    game.poll_server_control(&mut state);
+                    assert!(
+                        result(receive)["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("connection changed")
+                    );
+                    assert!(!file.exists());
+                    let hub = &mut game.lan.as_mut().unwrap().hub;
+                    let mut guest = hub.guests.remove(index);
+                    guest.conn = 12;
+                    hub.guests.insert(index, guest);
+
+                    let (mut pending, answer, receive) =
+                        test_paper_request(game, &wire, Activation::Commit).unwrap();
+                    pending.check.deadline = Instant::now();
+                    state.paper_activation = Some(pending);
+                    answer.send(Ok(())).unwrap();
+                    game.poll_server_control(&mut state);
+                    assert!(
+                        result(receive)["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("timed out")
+                    );
+                    assert!(!file.exists());
+
+                    let (pending, answer, receive) =
+                        test_paper_request(game, &wire, Activation::Commit).unwrap();
+                    state.paper_activation = Some(pending);
+                    state.lists.lock().unwrap().stop = true;
+                    answer.send(Ok(())).unwrap();
+                    game.poll_server_control(&mut state);
+                    assert_eq!(result(receive)["error"], arrivals::STOPPING);
+                    assert!(!file.exists());
+                    game.lan
+                        .as_mut()
+                        .unwrap()
+                        .hub
+                        .transfers
+                        .as_mut()
+                        .unwrap()
+                        .stopping = false;
+                    game.control = None;
+
                     let staged = game.player_request("player-profile-import-paper", &apply);
                     assert_eq!(staged["placed"], false, "{staged}");
                     assert_eq!(staged["ok"], true);
@@ -571,7 +1089,15 @@ mod tests {
                     let retry = game.player_request("player-profile-import-paper", &apply);
                     assert_eq!(retry["retried"], true, "{retry}");
                     assert_eq!(retry["placed"], false);
-                    let placed = game.player_request("player-confirm", &confirm);
+                    let bypass = game.player_request("player-confirm", &confirm);
+                    assert!(
+                        bypass["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("current PM-Sync claim")
+                    );
+                    assert!(!file.exists());
+                    let placed = authorized(game, &wire, Activation::Commit);
                     assert_eq!(placed["currently_placed"], true, "{placed}");
                     assert_eq!(placed["paper_snapshot_sha256"], digest_hex(digest));
                     let saved = horizon_client::save::read_dat(&file).unwrap();
@@ -616,7 +1142,7 @@ mod tests {
         );
 
         let (confirm, apply) = committed_proof.unwrap();
-        let resume = format!("{confirm} {}", digest_hex(digest));
+        let resume = format!("{apply} {OWNER_TOKEN}");
         let latest = std::fs::read(&file).unwrap();
         let Tag::Compound(mut legacy) = horizon_client::save::read_dat(&file).unwrap() else {
             unreachable!()
@@ -646,33 +1172,61 @@ mod tests {
                 hub.guests.remove(hub.guests.connection_index(12).unwrap());
                 let port = hub.lan.port;
                 assert!(forwarded_login(port, false).is_err());
-                assert!(
-                    game.player_request("player-profile-resume-paper", &resume)["error"]
-                        .is_string()
-                );
+                assert!(authorized(game, &resume, Activation::Resume)["error"].is_string());
+                let (mut historical, published, historical_reply) =
+                    test_paper_request(game, &resume, Activation::Commit).unwrap();
+                assert!(historical.intent.connection.is_none());
+                historical.check.deadline = Instant::now() + Duration::from_secs(30);
                 assert_eq!(game.player_request("player-expect", &uuid)["ok"], true);
                 let mut client = forwarded_login(port, true).unwrap();
                 let conn = wait_for_join(game);
                 assert!(!game.lan_guest_joined(conn, &[], [0.5, 64.0, 0.5]));
                 let blindness = read_held_view(&mut client);
-
-                let wrong = format!("{confirm} {}", "0".repeat(64));
-                assert!(
-                    game.player_request("player-profile-resume-paper", &wrong)["error"].is_string()
+                published.send(Ok(())).unwrap();
+                game.poll_paper_request(&mut Some(historical));
+                let historical_reply = result(historical_reply);
+                assert_eq!(
+                    historical_reply["already_committed"], true,
+                    "{historical_reply}"
                 );
+                assert_eq!(
+                    historical_reply["currently_placed"], false,
+                    "{historical_reply}"
+                );
+                assert!(game.lan.as_ref().unwrap().hub.guest(conn).unwrap().held);
+
+                let old_unsigned = format!("{confirm} {}", digest_hex(digest));
+                let (reply, receive) = mpsc::channel();
+                game.start_paper_request(
+                    Activation::Resume.verb(),
+                    &old_unsigned,
+                    reply,
+                    &mut None,
+                );
+                assert!(result(receive)["error"].is_string());
+                let wrong = resume.replace(&digest_hex(digest), &"0".repeat(64));
+                assert!(authorized(game, &wrong, Activation::Resume)["error"].is_string());
+                let interrupted = with_authority(
+                    game,
+                    &resume,
+                    Activation::Resume,
+                    Err("the Paper database did not acknowledge its authority check".into()),
+                );
+                assert!(
+                    interrupted["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("did not acknowledge")
+                );
+                assert!(game.lan.as_ref().unwrap().hub.guest(conn).unwrap().held);
+                assert_eq!(std::fs::read(&file).unwrap(), legacy_bytes);
                 let history = game.player_request("player-profile-import-paper", &apply);
                 assert_eq!(history["currently_placed"], false, "{history}");
                 assert!(file.with_extension("dat_old").is_file());
                 std::fs::remove_file(&file).unwrap();
-                assert!(
-                    game.player_request("player-profile-resume-paper", &resume)["error"]
-                        .is_string()
-                );
+                assert!(authorized(game, &resume, Activation::Resume)["error"].is_string());
                 std::fs::write(&file, b"broken data despite a correct backup").unwrap();
-                assert!(
-                    game.player_request("player-profile-resume-paper", &resume)["error"]
-                        .is_string()
-                );
+                assert!(authorized(game, &resume, Activation::Resume)["error"].is_string());
 
                 let mut superseded = legacy.clone();
                 let Some(Tag::Compound(profiles)) =
@@ -690,14 +1244,14 @@ mod tests {
                 );
                 horizon_client::save::write_dat_durable(&file, Tag::Compound(superseded)).unwrap();
                 assert!(
-                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                    authorized(game, &resume, Activation::Resume)["error"]
                         .as_str()
                         .unwrap()
                         .contains("required profile")
                 );
                 std::fs::write(&file, &legacy_bytes).unwrap();
 
-                let resumed = game.player_request("player-profile-resume-paper", &resume);
+                let resumed = authorized(game, &resume, Activation::Resume);
                 assert_eq!(resumed["resumed"], true, "{resumed}");
                 assert_eq!(resumed["already_committed"], true);
                 assert_eq!(resumed["retried"], false);
@@ -710,7 +1264,7 @@ mod tests {
                 assert_eq!(std::fs::read(&file).unwrap(), legacy_bytes);
 
                 std::fs::write(&file, &latest).unwrap();
-                let retried = game.player_request("player-profile-resume-paper", &resume);
+                let retried = authorized(game, &resume, Activation::Resume);
                 assert_eq!(retried["resumed"], false, "{retried}");
                 assert_eq!(retried["retried"], true);
                 assert_eq!(std::fs::read(&file).unwrap(), latest);
@@ -728,7 +1282,7 @@ mod tests {
                 assert_eq!(prepared["prepared"], true, "{prepared}");
                 let record = prepared["record_sha256"].as_str().unwrap();
                 let request = prepared["request_sha256"].as_str().unwrap();
-                let next_confirm = format!("{uuid} {next} paper horizon {record} {request} 10");
+                let next_wire = format!("{later} {record} {request} {OWNER_TOKEN}");
                 mod_platform::testing::with_mods(
                     vec![mod_api::ModEntry::new(
                         "slimefun",
@@ -741,7 +1295,7 @@ mod tests {
                             &format!("{later} {record} {request}"),
                         );
                         assert_eq!(staged["placed"], false, "{staged}");
-                        let placed = game.player_request("player-confirm", &next_confirm);
+                        let placed = authorized(game, &next_wire, Activation::Commit);
                         assert_eq!(placed["currently_placed"], true, "{placed}");
                     },
                 );
@@ -750,10 +1304,7 @@ mod tests {
                     guest.held = true;
                     guest.arrival_handover = None;
                 });
-                assert!(
-                    game.player_request("player-profile-resume-paper", &resume)["error"]
-                        .is_string()
-                );
+                assert!(authorized(game, &resume, Activation::Resume)["error"].is_string());
 
                 let outgoing = Handover {
                     owner,
@@ -765,9 +1316,8 @@ mod tests {
                 journal
                     .prepare_versioned(&outgoing, 11.try_into().unwrap())
                     .unwrap();
-                let next_resume = format!("{next_confirm} {}", digest_hex(digest));
                 let fenced = |game: &mut Game<'_>| {
-                    let answer = game.player_request("player-profile-resume-paper", &next_resume);
+                    let answer = authorized(game, &next_wire, Activation::Resume);
                     assert!(
                         answer["error"].as_str().unwrap().contains("fences"),
                         "{answer}"

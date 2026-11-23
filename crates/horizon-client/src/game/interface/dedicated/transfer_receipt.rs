@@ -344,6 +344,15 @@ fn decode(value: &Tag) -> Result<Receipt, String> {
     Ok(receipt)
 }
 
+pub(super) fn paper_digest(player: &Tag, handover: u128) -> Result<Option<[u8; 32]>, String> {
+    player
+        .get(RECEIPTS)
+        .and_then(|entries| entries.get(&arrivals::handover_text(handover)))
+        .map(decode)
+        .transpose()
+        .map(|receipt| receipt.and_then(|entry| entry.paper_snapshot_sha256))
+}
+
 /// Existing receipts are append-only inside the owner file. The same file activates the
 /// incoming SFP1 data and records completion. No second commit file can get out of step.
 pub(super) fn append_receipt(

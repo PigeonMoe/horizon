@@ -1,9 +1,9 @@
 //! The PM-Sync coordinator's durable ownership transitions on the Paper schema.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use horizon_protocol::crypto::uuid_string;
-use mysql::{Conn, Opts, Transaction, TxOpts, prelude::Queryable};
+use mysql::{Conn, Opts, OptsBuilder, Transaction, TxOpts, prelude::Queryable};
 use sha2::{Digest, Sha256};
 
 use crate::{pm_sync_envelope::SnapshotEnvelope, transfer_routes::valid_backend_id};
@@ -108,6 +108,24 @@ impl Store {
     pub fn connect(url: &str, prefix: &str, max_snapshot_bytes: usize) -> Result<Self, StoreError> {
         let options =
             Opts::from_url(url).map_err(|_| StoreError::Invalid("invalid PM-Sync database URL"))?;
+        Self::open(Conn::new(options)?, prefix, max_snapshot_bytes)
+    }
+
+    /// A short-lived authority query must bound socket I/O and avoid waiting on another owner.
+    /// The engine also bounds its complete wait, including DNS and all SQL round trips.
+    pub fn connect_authority(
+        url: &str,
+        prefix: &str,
+        max_snapshot_bytes: usize,
+    ) -> Result<Self, StoreError> {
+        let options =
+            Opts::from_url(url).map_err(|_| StoreError::Invalid("invalid PM-Sync database URL"))?;
+        let timeout = Some(Duration::from_secs(3));
+        let options = OptsBuilder::from_opts(options)
+            .tcp_connect_timeout(timeout)
+            .read_timeout(timeout)
+            .write_timeout(timeout)
+            .init(vec!["SET SESSION innodb_lock_wait_timeout=2"]);
         Self::open(Conn::new(options)?, prefix, max_snapshot_bytes)
     }
 

@@ -134,6 +134,8 @@ upstream-parallel-mobs = []
 default = ["audio", "controllers", "horizon-extras"]
 # Scoped trait-mod installation for a mod's own tests.
 testing = []
+# The dedicated engine verifies Paper transfer ownership against the configured database.
+pm-sync-mysql = ["horizon-server-files/pm-sync-mysql"]
 # Per-level-tick state digest for determinism checks (game/state_digest.rs).
 state-digest = []
 # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on

@@ -352,6 +352,31 @@ fn paper_release_can_only_be_claimed_by_one_exact_route() {
             .unwrap(),
         "engine receipt"
     );
+    // End only this disposable SQL session after it checks the locked claim. The callback
+    // completed, but the engine must still wait for an acknowledged transaction result.
+    let mut connection = connect();
+    let connection_id: u64 = connection
+        .query_first("SELECT CONNECTION_ID()")
+        .unwrap()
+        .unwrap();
+    let mut interrupted = Store::open(connection, CLAIM_SCHEMA, MAX_BYTES).unwrap();
+    assert!(matches!(
+        interrupted.with_released_claim(winner, || {
+            connect()
+                .query_drop(format!("KILL CONNECTION {connection_id}"))
+                .unwrap();
+        }),
+        Err(StoreError::Sql(_))
+    ));
+    assert!(matches!(
+        open().acquire(PLAYER, NORTH, "north"),
+        Err(StoreError::Fenced)
+    ));
+    let url = std::env::var("PIGEON_PM_SYNC_TEST_DATABASE_URL").unwrap();
+    Store::connect_authority(&url, CLAIM_SCHEMA, MAX_BYTES)
+        .unwrap()
+        .with_released_claim(winner, || ())
+        .unwrap();
     assert!(matches!(
         open().claim_released_snapshot(&ReleasedClaim {
             source: "other-paper",

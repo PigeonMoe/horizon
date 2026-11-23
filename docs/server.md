@@ -425,11 +425,12 @@ receipts. A destination reply with `already_committed` and `currently_placed: fa
 commit and leaves the current connection alone. The durable source fence survives restart and remains effective
 until the coordinator completes ownership recovery. The legacy freeze timer and `player-release` apply to version 1.
 
-**Released Paper PM-Sync snapshots.** A server supervisor built with the `pm-sync-mysql` Cargo feature
-can receive a released Paper snapshot through `horizon-server pm-sync-arrival prepare` and
-`horizon-server pm-sync-arrival commit`. Run these on the destination host using its ordinary `--dir`.
-Set `HORIZON_PM_SYNC_DATABASE_URL` to the Paper database URL and `HORIZON_PM_SYNC_TABLE_PREFIX` to the
-existing table prefix if it differs from `pmsync_`.
+**Released Paper PM-Sync snapshots.** Build both `horizon-server` and the dedicated engine with the
+optional `pm-sync-mysql` Cargo feature. For a native SDK use `tools/prebuilt_game.py build OUT --server
+--pm-sync-mysql`. Run `horizon-server pm-sync-arrival prepare`, `commit` and `resume` on the destination
+host using its ordinary `--dir`. Set `HORIZON_PM_SYNC_DATABASE_URL` in the dedicated daemon and the
+prepare process to the same database URL. Set `HORIZON_PM_SYNC_TABLE_PREFIX` in both if the existing
+table prefix differs from `pmsync_`.
 
 The proxy adapter calls `prepare` after it receives the departure acknowledgement from the player's current
 Paper backend and holds the forwarded connection on Horizon with `player-expect`. It sends one JSON object
@@ -439,12 +440,16 @@ and `compression` (`json` or `snappy`). Keep the owner token and hand-over id ac
 requires the exact released bytes and leaves the approved destination holding the lease. `prepare` puts the
 bytes in the world's private spool and returns the engine's `record_sha256` and `request_sha256`.
 
-Call `commit` with the same JSON plus `prepared`, an object containing those two digests. The supervisor
-checks the same live SQL lease while the game stages and confirms the arrival. The game writes the native
-player file and its receipt before placement. A lost commit acknowledgement is reconciled by retrying the
-same request. Use `currently_placed` to distinguish an active connection from a historical receipt. The
-proxy keeps the lease until placement is resolved. A control timeout alone cannot tell it whether the game
-committed the player file.
+Call `commit` with the same JSON plus `prepared`, an object containing those two digests. When the
+dedicated engine handles the command it checks the exact SQL owner in the background. The original
+connection stays held until the database acknowledges the check. The engine writes the native player file and receipt
+before placement. Retry the same request after a lost acknowledgement. Use `currently_placed` to
+distinguish an active connection from a historical receipt. After restart, hold a new expected connection
+and call `resume` with the same JSON to restore the current native file under the exact same SQL claim.
+
+The proxy keeps the lease token private and retains the same SQL owner while resolving placement, including
+after a control timeout or disconnect. Before using the token to release or advance the lease, fence the
+current player on their owning backend. Losing a database connection does not release the persisted token.
 
 **A server that stops.** From the `/stop` command (the console's, a player's or the control endpoint's) or a stop
 signal on, `player-expect`, `player-import` and `player-confirm` are refused `{"error": "the server is stopping"}`: a
