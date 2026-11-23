@@ -1596,6 +1596,12 @@ impl Game<'_> {
         }
         (self.native_acting_player() == Some(player)).then_some(false)
     }
+    pub(super) fn player_client_language(&self, player: PlayerRef) -> Option<String> {
+        if let Some(guest) = self.online_player_record(player) {
+            return Some(guest.info.language.clone());
+        }
+        (self.native_acting_player() == Some(player)).then(|| self.settings.language.clone())
+    }
     /// `ServerPlayer.getRespawnConfig`: the player's respawn point as the
     /// game keeps it (the guest's record, or the acting player's in place),
     /// `Some(None)` when they have none. None for a stale or unavailable

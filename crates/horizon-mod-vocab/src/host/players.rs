@@ -511,6 +511,11 @@ pub trait PlayersBackend {
     #[access(WorldOnly)]
     fn player_sees(&self, viewer: PlayerRef, target: PlayerRef)
     -> Result<bool, PlayerWorldRefusal>;
+    /// Side: server.
+    /// The current locale from the player's Client Information, including the one
+    /// supplied while connecting. None for a stale or unavailable player.
+    #[access(WorldOnly)]
+    fn player_client_language(&self, player: PlayerRef) -> Option<String>;
 }
 /// The handles' client reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
