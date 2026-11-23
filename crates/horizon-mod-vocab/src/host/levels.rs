@@ -792,10 +792,10 @@ pub trait LevelsBackend {
 #[horizon_mod_api_macros::host_area]
 pub trait LevelsBackendMut {
     /// Side: server.
-    /// Ask `inventory_move_item` before a mod moves a stack between block inventories.
+    /// Ask `inventory_move_item` before a mod moves a stack between or within block inventories.
     /// The caller must preserve both inventories on refusal. This call neither moves items
     /// nor loads chunks. Returns false for stale or inactive levels, nonresident positions,
-    /// an unknown item, overlapping endpoints or a veto from a listener.
+    /// an unknown item or a veto from a listener.
     #[access(WorldOnly)]
     fn level_allow_inventory_transfer(
         &mut self,
