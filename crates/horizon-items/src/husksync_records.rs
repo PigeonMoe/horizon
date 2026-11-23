@@ -62,7 +62,11 @@ impl HuskStatistics {
             if value < 0 {
                 return;
             }
-            let key = format!("minecraft:{key}");
+            let key = if key.contains(':') {
+                key.to_owned()
+            } else {
+                format!("minecraft:{key}")
+            };
             if supported(kind, &key) {
                 destination
                     .entry(kind.to_owned())
@@ -71,7 +75,8 @@ impl HuskStatistics {
             }
         };
         for (id, &value) in &self.generic {
-            set("minecraft:custom", vanilla_custom_stat(id), value);
+            let stat = id.strip_prefix("minecraft:").unwrap_or(id);
+            set("minecraft:custom", vanilla_custom_stat(stat), value);
         }
         for (paper, vanilla, values) in [
             ("mine_block", "minecraft:mined", &self.blocks),
@@ -83,7 +88,10 @@ impl HuskStatistics {
             ("kill_entity", "minecraft:killed", &self.entities),
             ("entity_killed_by", "minecraft:killed_by", &self.entities),
         ] {
-            if let Some(counters) = values.get(paper) {
+            // Live Bukkit captures use key parts. HuskSync's legacy migrator writes
+            // the full registry key for both the type and the value.
+            let qualified = format!("minecraft:{paper}");
+            for counters in values.get(paper).into_iter().chain(values.get(&qualified)) {
                 for (key, &value) in counters {
                     set(vanilla, key, value);
                 }

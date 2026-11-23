@@ -174,3 +174,34 @@ fn projects_bukkit_statistic_names_and_keeps_unmentioned_counters() {
     assert_eq!(native["minecraft:custom"]["minecraft:jump"], 10);
     assert!(!native["minecraft:custom"].contains_key("minecraft:unknown"));
 }
+
+#[test]
+fn projects_qualified_statistics_from_the_husksync_legacy_migrator() {
+    let mut input: Value = serde_json::from_str(FIXTURE).unwrap();
+    input["data"]["husksync:statistics"] = json!(
+        r#"{
+        "generic":{"minecraft:play_one_minute":110},
+        "blocks":{"minecraft:mine_block":{"minecraft:stone":21}},
+        "items":{"minecraft:use_item":{"minecraft:stone_pickaxe":8}},
+        "entities":{"minecraft:kill_entity":{"minecraft:zombie":6}}
+    }"#
+    );
+    let records = packed(&input.to_string())
+        .player_records(LIMITS.max_json_bytes)
+        .unwrap();
+    let expected = [
+        ("minecraft:custom", "minecraft:play_time", 110),
+        ("minecraft:mined", "minecraft:stone", 21),
+        ("minecraft:used", "minecraft:stone_pickaxe", 8),
+        ("minecraft:killed", "minecraft:zombie", 6),
+    ];
+    let mut native = BTreeMap::new();
+    records.statistics.overlay_native(&mut native, |kind, key| {
+        expected
+            .iter()
+            .any(|(known_kind, known_key, _)| (*known_kind, *known_key) == (kind, key))
+    });
+    for (kind, key, count) in expected {
+        assert_eq!(native[kind][key], count);
+    }
+}
