@@ -432,20 +432,18 @@ pub fn reconcile_profile_arrival(
 /// has read the exact canonical file and verified all configured profiles.
 pub fn resume_profile_arrival(
     guest: &mut Guest,
-    current: &super::source_handover::CurrentReturn,
+    owner: u128,
+    generation: u128,
     level: &Level,
 ) -> Result<(), String> {
-    let authorization = current.authorization();
     if !guest.held
         || guest.placed
         || !guest.left_reason.is_empty()
-        || guest.uuid != authorization.retired.owner
-        || guest
-            .arrival_handover
-            .is_some_and(|id| id != authorization.handover)
+        || guest.uuid != owner
+        || guest.arrival_handover.is_some_and(|id| id != generation)
         || guest.dimension != level.dimension
     {
-        return Err("the committed return belongs to another held player or level".into());
+        return Err("the committed arrival belongs to another held player or level".into());
     }
     guest.inventory.fill(None);
     guest.armor = Default::default();
@@ -454,7 +452,7 @@ pub fn resume_profile_arrival(
     guest.ender_items.fill(None);
     apply(guest, level);
     guest.imported = true;
-    guest.arrival_handover = Some(authorization.handover);
+    guest.arrival_handover = Some(generation);
     guest.arrival_announce = true;
     guest.arrival_profiles = None;
     guest.arrival_profile_fingerprint = None;
@@ -462,21 +460,21 @@ pub fn resume_profile_arrival(
 }
 
 /// Verify required immutable sidecars before restored local gameplay can write player data.
-pub fn verify_committed_return_profile(
+pub fn verify_committed_profile(
     world: &Path,
-    current: &super::source_handover::CurrentReturn,
+    owner: u128,
+    generation: u128,
     tag: &Tag,
     id: &horizon_core::identifier::Identifier,
     schema: u32,
 ) -> Result<(), String> {
-    let authorization = current.authorization();
     super::profile_storage::verify_committed_profile(
         world,
-        authorization.retired.owner,
+        owner,
         Some(tag),
         id,
         schema,
-        authorization.handover,
+        generation,
     )
 }
 

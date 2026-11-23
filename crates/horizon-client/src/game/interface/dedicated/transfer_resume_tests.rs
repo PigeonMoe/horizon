@@ -19,11 +19,11 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 const OWNER: u128 = 12;
 const NAME: &str = "ResumeQA";
-const KEY: &[u8] = b"synthetic-return-resume-fixture";
+pub(super) const KEY: &[u8] = b"synthetic-return-resume-fixture";
 const PROFILE: &str = "example:profile";
 const DIMENSION: &str = "minecraft:the_nether";
 
-fn forwarded_login(port: u16, complete: bool) -> Result<Connection, String> {
+pub(super) fn forwarded_login(port: u16, complete: bool) -> Result<Connection, String> {
     let mut client = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
     client
         .reader
@@ -106,7 +106,7 @@ fn forwarded_login(port: u16, complete: bool) -> Result<Connection, String> {
     }
 }
 
-fn wait_for_join(game: &mut Game<'_>) -> u32 {
+pub(super) fn wait_for_join(game: &mut Game<'_>) -> u32 {
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         let mut ctx = TickCtx {
@@ -148,7 +148,7 @@ fn wait_for_join(game: &mut Game<'_>) -> u32 {
     }
 }
 
-fn read_held_view(client: &mut Connection) -> i32 {
+pub(super) fn read_held_view(client: &mut Connection) -> i32 {
     let (mut login, mut blank, mut blinded) = (false, false, None);
     while !login || !blank || blinded.is_none() {
         let (id, body) = client.recv().unwrap();
@@ -171,7 +171,7 @@ fn read_held_view(client: &mut Connection) -> i32 {
     blinded.unwrap()
 }
 
-fn read_resumed_view(client: &mut Connection, blindness: i32) {
+pub(super) fn read_resumed_view(client: &mut Connection, blindness: i32) {
     let (mut unblinded, mut inventory) = (false, false);
     while !unblinded || !inventory {
         let (id, body) = client.recv().unwrap();
@@ -315,6 +315,7 @@ fn reopened_current_owner_requires_trusted_resume_and_loads_latest_local_player(
         resources,
         |net| {
             net.listen = true;
+            net.bind = Some(std::net::Ipv4Addr::LOCALHOST.into());
             net.arrivals = Some(expected);
             net.forwarding_secret = Some(KEY.to_vec());
             net.source_handovers = Some(journal.clone());

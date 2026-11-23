@@ -127,7 +127,9 @@ pub fn main() -> ExitCode {
         None | Some("help" | "-h" | "--help") => {
             print!("{HELP}");
             #[cfg(feature = "pm-sync-mysql")]
-            println!("PM-Sync: pm-sync-arrival prepare|commit reads a proxy request from stdin.");
+            println!(
+                "PM-Sync: pm-sync-arrival prepare|commit|resume reads a proxy request from stdin."
+            );
             Ok(())
         }
         Some("version" | "-V" | "--version") => {

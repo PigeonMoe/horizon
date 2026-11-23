@@ -1,8 +1,10 @@
 //! The destination's receipt is published in the same player file as the profile.
 //! Historical receipts acknowledge a completed hand-over without placing another guest.
 
+#[cfg(unix)]
+use cap_fs_ext::OpenOptionsSyncExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::{Dir, File, OpenOptions};
 use horizon_client::lan::{
     arrivals,
     guest::Guest,
@@ -19,6 +21,7 @@ use std::{
 
 const RECEIPTS: &str = "HorizonArrivalReceipts";
 const STAGED: &str = "HorizonStagedArrivalReceipt";
+pub(super) const PAPER_AUTHORITY_KEY: &str = "HorizonPaperArrivalAuthority";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -251,6 +254,7 @@ pub(in crate::game::dedicated) struct Hidden {
     receipts: Option<Tag>,
     staged: Option<Tag>,
     authority: Option<Tag>,
+    paper_authority: Option<Tag>,
 }
 
 impl Hidden {
@@ -260,18 +264,24 @@ impl Hidden {
                 receipts: root.remove(&RECEIPTS.into()),
                 staged: root.remove(&STAGED.into()),
                 authority: root.remove(&AUTHORITY_KEY.into()),
+                paper_authority: root.remove(&PAPER_AUTHORITY_KEY.into()),
             }
         } else {
             Self {
                 receipts: None,
                 staged: None,
                 authority: None,
+                paper_authority: None,
             }
         }
     }
 
     pub(in crate::game::dedicated) fn restore(self, guest: &mut Guest) {
-        if self.receipts.is_none() && self.staged.is_none() && self.authority.is_none() {
+        if self.receipts.is_none()
+            && self.staged.is_none()
+            && self.authority.is_none()
+            && self.paper_authority.is_none()
+        {
             return;
         }
         let root = root_for(guest);
@@ -279,6 +289,7 @@ impl Hidden {
             (RECEIPTS, self.receipts),
             (STAGED, self.staged),
             (AUTHORITY_KEY, self.authority),
+            (PAPER_AUTHORITY_KEY, self.paper_authority),
         ] {
             if let Some(value) = value {
                 root.insert(key.into(), value);
@@ -347,6 +358,9 @@ pub(super) fn append_receipt(
         .map(|authorization| authorization.marker(&encoded))
         .transpose()
         .map_err(|error| error.to_string())?;
+    let paper_authority =
+        (returning.is_none() && receipt.version == 2 && receipt.paper_snapshot_sha256.is_some())
+            .then(|| Tag::ByteArray(Sha256::digest(&encoded).to_vec()));
     if history
         .entries
         .insert(
@@ -364,6 +378,9 @@ pub(super) fn append_receipt(
     root.insert(RECEIPTS.into(), Tag::Compound(history.entries));
     if let Some(authority) = authority {
         root.insert(AUTHORITY_KEY.into(), authority);
+    }
+    if let Some(authority) = paper_authority {
+        root.insert(PAPER_AUTHORITY_KEY.into(), authority);
     }
     Ok(previous)
 }
@@ -401,7 +418,7 @@ struct History {
     directory: Option<Dir>,
 }
 
-fn read_history(world: &Path, owner: u128) -> Result<History, String> {
+fn player_directory(world: &Path) -> Result<Option<Dir>, String> {
     let root = Dir::open_ambient_dir(world, cap_std::ambient_authority())
         .map_err(|error| error.to_string())?;
     let child = |parent: &Dir, name| match parent.open_dir_nofollow(name) {
@@ -410,9 +427,77 @@ fn read_history(world: &Path, owner: u128) -> Result<History, String> {
         Err(error) => Err(error.to_string()),
     };
     let Some(players) = child(&root, "players")? else {
-        return Ok(History::default());
+        return Ok(None);
     };
-    let Some(directory) = child(&players, "data")? else {
+    child(&players, "data")
+}
+
+/// A current Paper receipt read from the canonical player file. The caller
+/// must still verify that every current required sidecar uses its generation.
+pub(super) struct CurrentPaperArrival {
+    pub receipt: Receipt,
+    pub player: Tag,
+}
+
+impl CurrentPaperArrival {
+    pub(super) fn read(
+        world: &Path,
+        binding: &Binding,
+        paper_digest: [u8; 32],
+    ) -> Result<Self, String> {
+        let directory =
+            player_directory(world)?.ok_or("the current Paper player file is missing")?;
+        let name = format!(
+            "{}.dat",
+            horizon_protocol::crypto::uuid_string(binding.owner)
+        );
+        let (player, file) = read_player_file(&directory, &name)?
+            .ok_or("the current Paper player file is missing")?;
+        if !matches!(player.get("UUID"), Some(Tag::IntArray(ints)) if ints.as_slice() == horizon_client::lan::playerdata::uuid_ints(binding.owner))
+            || player.get(AUTHORITY_KEY).is_some()
+            || player.get(STAGED).is_some()
+        {
+            return Err("the current player file cannot authorize this Paper arrival".into());
+        }
+        let id = arrivals::handover_text(binding.handover);
+        let encoded = player
+            .get(RECEIPTS)
+            .and_then(|entries| entries.get(&id))
+            .ok_or("the current player file does not contain this Paper arrival")?;
+        let receipt = decode(encoded)?;
+        if receipt.version != 2
+            || &receipt.binding != binding
+            || receipt.paper_snapshot_sha256 != Some(paper_digest)
+        {
+            return Err("the current player file differs from the Paper arrival receipt".into());
+        }
+        // Older Paper commits have only the exact receipt and the current profile generations.
+        // All their sidecars are checked by the same caller before any gameplay is enabled.
+        if let Some(marker) = player.get(PAPER_AUTHORITY_KEY) {
+            let Tag::ByteArray(bytes) = encoded else {
+                unreachable!("receipt was decoded")
+            };
+            if !matches!(marker, Tag::ByteArray(marker) if marker.as_slice() == Sha256::digest(bytes).as_slice())
+            {
+                return Err("a different Paper arrival owns the current player file".into());
+            }
+        }
+        #[cfg(unix)]
+        {
+            file.sync_all().map_err(|error| error.to_string())?;
+            directory
+                .open(".")
+                .and_then(|dir| dir.sync_all())
+                .map_err(|error| error.to_string())?;
+        }
+        #[cfg(not(unix))]
+        drop(file);
+        Ok(Self { receipt, player })
+    }
+}
+
+fn read_history(world: &Path, owner: u128) -> Result<History, String> {
+    let Some(directory) = player_directory(world)? else {
         return Ok(History::default());
     };
     let owner_name = horizon_protocol::crypto::uuid_string(owner);
@@ -422,7 +507,8 @@ fn read_history(world: &Path, owner: u128) -> Result<History, String> {
     let file = match read("dat")? {
         Some(file) => Some(file),
         None => read("dat_old")?,
-    };
+    }
+    .map(|(tag, _)| tag);
     let entries = match file.as_ref().and_then(|file| file.get(RECEIPTS)) {
         Some(Tag::Compound(entries)) => entries.clone(),
         None => Compound::new(),
@@ -448,7 +534,7 @@ fn read_history(world: &Path, owner: u128) -> Result<History, String> {
     })
 }
 
-fn read_player_file(directory: &Dir, name: &str) -> Result<Option<Tag>, String> {
+fn read_player_file(directory: &Dir, name: &str) -> Result<Option<(Tag, File)>, String> {
     let max = Limits::saved().max_bytes as u64;
     let metadata = match directory.symlink_metadata(name) {
         Ok(metadata) => metadata,
@@ -460,6 +546,8 @@ fn read_player_file(directory: &Dir, name: &str) -> Result<Option<Tag>, String> 
     }
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.nonblock(true);
     let file = match directory.open_with(name, &options) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -470,14 +558,15 @@ fn read_player_file(directory: &Dir, name: &str) -> Result<Option<Tag>, String> 
         return Err("arrival receipt player file is invalid".into());
     }
     let mut bytes = Vec::new();
-    file.take(max + 1)
+    (&file)
+        .take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > max {
         return Err("arrival receipt player file is too large".into());
     }
     match horizon_client::save::decode_dat(bytes) {
-        Ok(tag @ Tag::Compound(_)) => Ok(Some(tag)),
+        Ok(tag @ Tag::Compound(_)) => Ok(Some((tag, file))),
         _ => Err("arrival receipt player file is corrupt".into()),
     }
 }

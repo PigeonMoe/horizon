@@ -157,6 +157,7 @@ impl Game<'_> {
             "player-profile-resume" => self.resume_profile_owner(args),
             "player-profile-prepare-paper" => self.prepare_paper_profile(args),
             "player-profile-import-paper" => self.stage_paper_profile(args),
+            "player-profile-resume-paper" => self.resume_paper_profile(args),
             "player-drop" => match self.lan.as_mut() {
                 Some(host) => arrivals::drop_request(&mut host.hub, args),
                 None => json!({ "error": "the server is not open to players" }),
@@ -657,10 +658,22 @@ impl Game<'_> {
         }
         self.finish_player_autosaves(true)
             .map_err(|error| error.to_string())?;
-        let (current, tag) = CurrentReturn::read_matching_player(&self.world_root, authorization)
+        let (_, tag) = CurrentReturn::read_matching_player(&self.world_root, authorization)
             .map_err(|error| error.to_string())?
             .ok_or("the current player file does not confirm this return")?;
-        let hub = &mut self.lan.as_mut().expect("the server is open").hub;
+        self.verify_committed_profiles(owner, id, &tag)?;
+        self.restore_held_profile(owner, id, tag)?;
+        self.finish_arrival(owner, id, Some(authorization), false)?;
+        Ok(false)
+    }
+
+    fn verify_committed_profiles(
+        &self,
+        owner: u128,
+        id: u128,
+        tag: &horizon_core::nbt::Tag,
+    ) -> Result<(), String> {
+        let hub = &self.lan.as_ref().expect("the server is open").hub;
         for (profile, &schema) in &hub
             .transfers
             .as_ref()
@@ -668,14 +681,25 @@ impl Game<'_> {
             .settings
             .required_profiles
         {
-            playerdata::verify_committed_return_profile(
+            playerdata::verify_committed_profile(
                 &self.world_root,
-                &current,
-                &tag,
+                owner,
+                id,
+                tag,
                 profile,
                 schema,
             )?;
         }
+        Ok(())
+    }
+
+    fn restore_held_profile(
+        &mut self,
+        owner: u128,
+        id: u128,
+        tag: horizon_core::nbt::Tag,
+    ) -> Result<(), String> {
+        let hub = &mut self.lan.as_mut().expect("the server is open").hub;
         let mut level = playerdata::saved_player(tag);
         if !hub.config.levels.has(&level.dimension) {
             level.dimension = "minecraft:overworld".into();
@@ -684,13 +708,13 @@ impl Game<'_> {
             .guests
             .iter()
             .position(|g| g.uuid == owner && g.held)
-            .ok_or("the return connection went away")?;
+            .ok_or("the held connection went away")?;
         let forced_mode = hub
             .config
             .force_game_mode
             .then_some(hub.config.default_game_mode);
         hub.guests.update(i, |guest| {
-            playerdata::resume_profile_arrival(guest, &current, &level)?;
+            playerdata::resume_profile_arrival(guest, owner, id, &level)?;
             if let Some(mode) = forced_mode {
                 guest.game_mode = mode;
                 guest.abilities.update_for_mode(mode);
@@ -699,8 +723,7 @@ impl Game<'_> {
         })?;
         let conn = hub.guests[i].conn;
         self.load_guest_records(conn);
-        self.finish_arrival(owner, id, Some(authorization), false)?;
-        Ok(false)
+        Ok(())
     }
 
     fn finish_arrival(
@@ -737,8 +760,10 @@ impl Game<'_> {
             self.sync_replaced_book_settings(uuid);
         }
         let directory = playerdata::directory(&self.world_root);
-        if returning.is_some() {
+        if returning.is_some() || !saved {
             self.bind_player_attachments(conn, false);
+        }
+        if returning.is_some() {
             self.native_player_load_from_file(uuid, &name, &directory);
         }
         if saved {

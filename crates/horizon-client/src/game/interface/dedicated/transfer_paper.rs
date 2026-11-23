@@ -66,6 +66,74 @@ impl<'a> PaperRequest<'a> {
 }
 
 impl Game<'_> {
+    /// A supervisor with the current Paper claim can resume a completed first arrival.
+    /// Older receipts still acknowledge their commit through the ordinary confirm operation.
+    pub(super) fn resume_paper_profile(&mut self, args: &str) -> Value {
+        self.resume_exact_paper_profile(args)
+            .unwrap_or_else(|error| json!({ "error": error }))
+    }
+
+    fn resume_exact_paper_profile(&mut self, args: &str) -> Result<Value, String> {
+        let (confirm, paper_digest) = args
+            .trim_end()
+            .rsplit_once(char::is_whitespace)
+            .ok_or("Paper profile resume needs a confirm tuple and snapshot digest")?;
+        let paper_digest = parse_digest(paper_digest).ok_or("invalid Paper snapshot digest")?;
+        let hub = &self
+            .lan
+            .as_ref()
+            .ok_or("the server is not open to players")?
+            .hub;
+        let transfer = hub.transfers.as_ref().ok_or(arrivals::OFF)?;
+        if transfer.stopping {
+            return Err(arrivals::STOPPING.into());
+        }
+        let net = &hub.lan.shared.config;
+        if transfer.settings.required_profiles.is_empty()
+            || net.forwarding_secret.is_none()
+            || net.online.is_some()
+        {
+            return Err(
+                "Paper profile resume needs required profiles and authenticated forwarding".into(),
+            );
+        }
+        let binding = Binding::from_confirm(&transfer.settings, confirm)?;
+        let (owner, id) = (binding.owner, binding.handover);
+        if hub.source_frozen_handover(owner).is_some() {
+            return Err("a source hand-over still fences this Paper player".into());
+        }
+        let guest = hub
+            .guests
+            .iter()
+            .find(|guest| {
+                guest.uuid == owner
+                    && guest.expected
+                    && guest.participates_online()
+                    && guest.left_reason.is_empty()
+            })
+            .ok_or("no expected forwarded Paper player is connected")?;
+        let live = guest.placed && guest.arrival_handover == Some(id);
+        if !live
+            && (!guest.held
+                || guest.placed
+                || guest.arrival_handover.is_some_and(|staged| staged != id))
+        {
+            return Err("the forwarded connection belongs to a different arrival".into());
+        }
+        self.finish_player_autosaves(true)
+            .map_err(|error| error.to_string())?;
+        let current = receipt::CurrentPaperArrival::read(&self.world_root, &binding, paper_digest)?;
+        self.verify_committed_profiles(owner, id, &current.player)?;
+        if !live {
+            self.restore_held_profile(owner, id, current.player)?;
+            self.finish_arrival(owner, id, None, false)?;
+        }
+        let mut reply = current.receipt.commit_reply(true, true);
+        reply["retried"] = json!(live);
+        reply["resumed"] = json!(!live);
+        Ok(reply)
+    }
+
     pub(super) fn prepare_paper_profile(&mut self, args: &str) -> Value {
         let result =
             PaperRequest::parse(args).and_then(|request| self.project_paper_profile(&request));
@@ -211,6 +279,7 @@ impl Game<'_> {
             "HorizonTransferAuthority",
             "HorizonArrivalReceipts",
             "HorizonStagedArrivalReceipt",
+            receipt::PAPER_AUTHORITY_KEY,
         ] {
             projected.player.remove(&key.into());
         }
@@ -352,9 +421,16 @@ fn project_advancements(
 
 #[cfg(test)]
 mod tests {
+    use super::super::resume_tests::{
+        KEY, forwarded_login, read_held_view, read_resumed_view, wait_for_join,
+    };
     use super::*;
+    use horizon_client::{
+        items::ItemStack,
+        lan::source_handover::{Handover, Journal},
+    };
     use horizon_core::nbt::Compound;
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     #[derive(Default)]
     struct SlimefunReceiver;
@@ -371,6 +447,16 @@ mod tests {
             assert_eq!(event.schema, 1);
             assert_eq!(event.payload, b"SFP1");
             *event.reply = Some(Ok(Compound::new()));
+        }
+    }
+
+    fn paper_settings() -> arrivals::Settings {
+        arrivals::Settings {
+            backend_id: Some("horizon".into()),
+            allowed_sources: ["paper".into()].into(),
+            required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
+                .into(),
+            ..arrivals::Settings::default()
         }
     }
 
@@ -416,22 +502,14 @@ mod tests {
         let paper = format!("{uuid} {handover} paper 9 {} json", digest_hex(digest));
         let file = playerdata::path(world.path(), owner);
         let resources = PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let mut committed_proof = None;
         crate::game::native_guest_turn_tests::with_guests_configured(
-            resources,
+            resources.clone(),
             |net| net.forwarding_secret = Some(b"local test forwarding".to_vec()),
             |game| {
                 game.world_root = world.path().to_owned();
                 let hub = &mut game.lan.as_mut().unwrap().hub;
-                hub.transfers = Some(arrivals::Transfers::new(arrivals::Settings {
-                    backend_id: Some("horizon".into()),
-                    allowed_sources: ["paper".into()].into(),
-                    required_profiles: [(
-                        Identifier::parse_namespaced("slimefun:profile").unwrap(),
-                        1,
-                    )]
-                    .into(),
-                    ..arrivals::Settings::default()
-                }));
+                hub.transfers = Some(arrivals::Transfers::new(paper_settings()));
                 hub.update_guest(12, |guest| {
                     guest.placed = false;
                     guest.held = true;
@@ -497,6 +575,7 @@ mod tests {
                     assert_eq!(placed["currently_placed"], true, "{placed}");
                     assert_eq!(placed["paper_snapshot_sha256"], digest_hex(digest));
                     let saved = horizon_client::save::read_dat(&file).unwrap();
+                    assert!(saved.get(receipt::PAPER_AUTHORITY_KEY).is_some());
                     assert_eq!(saved.get("SelectedItemSlot"), Some(&Tag::Int(4)));
                     assert_eq!(
                         saved.get("foodExhaustionLevel"),
@@ -520,6 +599,190 @@ mod tests {
                     );
                     assert_eq!(std::fs::read(&file).unwrap(), exact_file);
                 });
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.update_guest(12, |guest| {
+                    guest.place([12.0, 70.0, 24.0]);
+                    guest.dimension = "minecraft:the_nether".into();
+                    guest.xp_level = 41;
+                    guest.inventory.fill(None);
+                    guest.armor.fill(None);
+                    guest.offhand = None;
+                    guest.equipment = Default::default();
+                    guest.inventory[0] = Some(ItemStack::new("minecraft:diamond", 3));
+                    playerdata::save_now(guest, world.path()).unwrap();
+                });
+                committed_proof = Some((confirm, apply));
+            },
+        );
+
+        let (confirm, apply) = committed_proof.unwrap();
+        let resume = format!("{confirm} {}", digest_hex(digest));
+        let latest = std::fs::read(&file).unwrap();
+        let Tag::Compound(mut legacy) = horizon_client::save::read_dat(&file).unwrap() else {
+            unreachable!()
+        };
+        legacy.remove(&receipt::PAPER_AUTHORITY_KEY.into()).unwrap();
+        horizon_client::save::write_dat_durable(&file, Tag::Compound(legacy.clone())).unwrap();
+        let legacy_bytes = std::fs::read(&file).unwrap();
+        let spool = world.path().join("horizon-pm-sync-spool");
+        let frozen_spool = world.path().join("unavailable-paper-spool");
+        std::fs::rename(&spool, &frozen_spool).unwrap();
+        let journal = Arc::new(Journal::open(world.path()).unwrap());
+        let transfers = arrivals::Transfers::new(paper_settings());
+        let table = transfers.expected.clone();
+        crate::game::native_guest_turn_tests::with_guests_configured(
+            resources,
+            |net| {
+                net.listen = true;
+                net.bind = Some(std::net::Ipv4Addr::LOCALHOST.into());
+                net.forwarding_secret = Some(KEY.to_vec());
+                net.arrivals = Some(table);
+                net.source_handovers = Some(journal.clone());
+            },
+            |game| {
+                game.world_root = world.path().to_owned();
+                let hub = &mut game.lan.as_mut().unwrap().hub;
+                hub.transfers = Some(transfers);
+                hub.guests.remove(hub.guests.connection_index(12).unwrap());
+                let port = hub.lan.port;
+                assert!(forwarded_login(port, false).is_err());
+                assert!(
+                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                        .is_string()
+                );
+                assert_eq!(game.player_request("player-expect", &uuid)["ok"], true);
+                let mut client = forwarded_login(port, true).unwrap();
+                let conn = wait_for_join(game);
+                assert!(!game.lan_guest_joined(conn, &[], [0.5, 64.0, 0.5]));
+                let blindness = read_held_view(&mut client);
+
+                let wrong = format!("{confirm} {}", "0".repeat(64));
+                assert!(
+                    game.player_request("player-profile-resume-paper", &wrong)["error"].is_string()
+                );
+                let history = game.player_request("player-profile-import-paper", &apply);
+                assert_eq!(history["currently_placed"], false, "{history}");
+                assert!(file.with_extension("dat_old").is_file());
+                std::fs::remove_file(&file).unwrap();
+                assert!(
+                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                        .is_string()
+                );
+                std::fs::write(&file, b"broken data despite a correct backup").unwrap();
+                assert!(
+                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                        .is_string()
+                );
+
+                let mut superseded = legacy.clone();
+                let Some(Tag::Compound(profiles)) =
+                    superseded.get_mut(&"HorizonTransferProfiles".into())
+                else {
+                    unreachable!()
+                };
+                let Some(Tag::Compound(marker)) = profiles.get_mut(&"slimefun:profile".into())
+                else {
+                    unreachable!()
+                };
+                marker.insert(
+                    "generation".into(),
+                    Tag::ByteArray(32u128.to_be_bytes().to_vec()),
+                );
+                horizon_client::save::write_dat_durable(&file, Tag::Compound(superseded)).unwrap();
+                assert!(
+                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("required profile")
+                );
+                std::fs::write(&file, &legacy_bytes).unwrap();
+
+                let resumed = game.player_request("player-profile-resume-paper", &resume);
+                assert_eq!(resumed["resumed"], true, "{resumed}");
+                assert_eq!(resumed["already_committed"], true);
+                assert_eq!(resumed["retried"], false);
+                assert_eq!(resumed["currently_placed"], true);
+                read_resumed_view(&mut client, blindness);
+                let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+                assert!(guest.placed_in("minecraft:the_nether"));
+                assert_eq!(guest.position, [12.0, 70.0, 24.0]);
+                assert_eq!(guest.xp_level, 41);
+                assert_eq!(std::fs::read(&file).unwrap(), legacy_bytes);
+
+                std::fs::write(&file, &latest).unwrap();
+                let retried = game.player_request("player-profile-resume-paper", &resume);
+                assert_eq!(retried["resumed"], false, "{retried}");
+                assert_eq!(retried["retried"], true);
+                assert_eq!(std::fs::read(&file).unwrap(), latest);
+
+                // A later successful strict Paper commit supersedes the old marker and active generation.
+                std::fs::rename(&frozen_spool, &spool).unwrap();
+                game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                    guest.placed = false;
+                    guest.held = true;
+                    guest.arrival_handover = None;
+                });
+                let next = arrivals::handover_text(32);
+                let later = format!("{uuid} {next} paper 10 {} json", digest_hex(digest));
+                let prepared = game.player_request("player-profile-prepare-paper", &later);
+                assert_eq!(prepared["prepared"], true, "{prepared}");
+                let record = prepared["record_sha256"].as_str().unwrap();
+                let request = prepared["request_sha256"].as_str().unwrap();
+                let next_confirm = format!("{uuid} {next} paper horizon {record} {request} 10");
+                mod_platform::testing::with_mods(
+                    vec![mod_api::ModEntry::new(
+                        "slimefun",
+                        Box::new(SlimefunReceiver),
+                    )]
+                    .into(),
+                    || {
+                        let staged = game.player_request(
+                            "player-profile-import-paper",
+                            &format!("{later} {record} {request}"),
+                        );
+                        assert_eq!(staged["placed"], false, "{staged}");
+                        let placed = game.player_request("player-confirm", &next_confirm);
+                        assert_eq!(placed["currently_placed"], true, "{placed}");
+                    },
+                );
+                game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                    guest.placed = false;
+                    guest.held = true;
+                    guest.arrival_handover = None;
+                });
+                assert!(
+                    game.player_request("player-profile-resume-paper", &resume)["error"]
+                        .is_string()
+                );
+
+                let outgoing = Handover {
+                    owner,
+                    id: 47,
+                    destination: "next".into(),
+                    record: b"exact outgoing record".to_vec(),
+                    local_checkpoint: b"exact current checkpoint".to_vec(),
+                };
+                journal
+                    .prepare_versioned(&outgoing, 11.try_into().unwrap())
+                    .unwrap();
+                let next_resume = format!("{next_confirm} {}", digest_hex(digest));
+                let fenced = |game: &mut Game<'_>| {
+                    let answer = game.player_request("player-profile-resume-paper", &next_resume);
+                    assert!(
+                        answer["error"].as_str().unwrap().contains("fences"),
+                        "{answer}"
+                    );
+                };
+                fenced(game);
+                journal
+                    .retire(
+                        owner,
+                        outgoing.id,
+                        &outgoing.destination,
+                        outgoing.record_digest(),
+                    )
+                    .unwrap();
+                fenced(game);
             },
         );
     }

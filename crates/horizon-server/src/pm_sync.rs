@@ -152,10 +152,10 @@ fn ask(control: &mut Control, line: &str) -> Result<Value, String> {
 
 pub fn command(dir: &Path, arguments: &[String]) -> Result<(), String> {
     let [phase] = arguments else {
-        return Err("pm-sync-arrival needs prepare or commit".into());
+        return Err("pm-sync-arrival needs prepare, commit or resume".into());
     };
-    if !matches!(phase.as_str(), "prepare" | "commit") {
-        return Err("pm-sync-arrival needs prepare or commit".into());
+    if !matches!(phase.as_str(), "prepare" | "commit" | "resume") {
+        return Err("pm-sync-arrival needs prepare, commit or resume".into());
     }
     let mut input = Vec::new();
     std::io::stdin()
@@ -170,13 +170,13 @@ pub fn command(dir: &Path, arguments: &[String]) -> Result<(), String> {
         serde_json::from_slice(&input).map_err(|_| "invalid PM-Sync arrival request")?;
     let prepared = match (phase.as_str(), &arrival.prepared) {
         ("prepare", None) => None,
-        ("commit", Some(proof))
+        ("commit" | "resume", Some(proof))
             if exact_hex::<32>(&proof.record_sha256).is_some()
                 && exact_hex::<32>(&proof.request_sha256).is_some() =>
         {
             Some(proof)
         }
-        _ => return Err("PM-Sync commit needs both digests returned by prepare".into()),
+        _ => return Err("PM-Sync commit or resume needs both digests returned by prepare".into()),
     };
     let config = Config::load(dir)?;
     let claim = arrival.claim(&config)?;
@@ -193,6 +193,24 @@ pub fn command(dir: &Path, arguments: &[String]) -> Result<(), String> {
             .with_released_claim(&claim, || -> Result<Value, String> {
                 let record = &proof.record_sha256;
                 let request = &proof.request_sha256;
+                let tuple = format!(
+                    "{} {} {} {} {record} {request} {}",
+                    arrival.player, arrival.handover, claim.source, claim.backend, claim.revision,
+                );
+                if phase == "resume" {
+                    let resumed = ask(
+                        &mut control,
+                        &format!(
+                            "player-profile-resume-paper {tuple} {}",
+                            arrival.snapshot_sha256
+                        ),
+                    )?;
+                    arrival.verify_binding(&resumed, claim.backend)?;
+                    if resumed["currently_placed"] != true {
+                        return Err("the current Paper owner was not placed".into());
+                    }
+                    return Ok(resumed);
+                }
                 let staged = ask(
                     &mut control,
                     &format!("player-profile-import-paper {paper} {record} {request}"),
@@ -204,17 +222,7 @@ pub fn command(dir: &Path, arguments: &[String]) -> Result<(), String> {
                 if staged["placed"] != false {
                     return Err("the game did not hold the staged Paper arrival".into());
                 }
-                let committed = ask(
-                    &mut control,
-                    &format!(
-                        "player-confirm {} {} {} {} {record} {request} {}",
-                        arrival.player,
-                        arrival.handover,
-                        claim.source,
-                        claim.backend,
-                        claim.revision,
-                    ),
-                )?;
+                let committed = ask(&mut control, &format!("player-confirm {tuple}"))?;
                 arrival.verify_binding(&committed, claim.backend)?;
                 if committed["placed"] != true {
                     return Err("the game did not confirm the Paper arrival".into());
