@@ -112,10 +112,11 @@ impl Game<'_> {
             return player.entity_id as u32;
         }
         if let Some(guest) = self.lan.as_ref().and_then(|host| {
+            // EntityReference resolves the UUID in any server dimension.
             host.hub
                 .guests
                 .iter()
-                .find(|g| g.uuid == as_u128 && g.placed && host.hub.here(g))
+                .find(|g| g.uuid == as_u128 && g.placed && g.participates_in_player_simulation())
         }) {
             return guest.entity_id as u32;
         }
@@ -244,39 +245,42 @@ impl Game<'_> {
         let b = horizon_core::geometry::Aabb::new(lo, hi);
         // Every player in the box, the server's players too.
         let pos = f.pos;
-        // `EvokerFangs.dealDamageTo`: indirectMagic(fangs, owner) while the
-        // owner lives, plain magic (nobody to name) once it is gone.
-        let owner_id = if f.owner == 0 {
-            self.persist
-                .raw
-                .get(&f.id)
-                .map_or(0, |tag| self.loaded_fangs_owner(tag))
-        } else {
-            f.owner
+        // EntityReference re-resolves a stale owner from its saved UUID.
+        let live_owner = |id| {
+            if id == 0 {
+                return None;
+            }
+            let player_name = self
+                .player
+                .as_ref()
+                .filter(|p| p.entity_id as u32 == id && !p.health.dead)
+                .map(|_| self.acting_player_name().to_owned())
+                .or_else(|| {
+                    self.lan.as_ref().and_then(|host| {
+                        host.hub
+                            .guests
+                            .iter()
+                            .find(|g| {
+                                g.entity_id as u32 == id
+                                    && g.placed
+                                    && !g.dead
+                                    && g.participates_in_player_simulation()
+                            })
+                            .map(|g| g.name.clone())
+                    })
+                });
+            (player_name.is_some() || self.mobs.iter().any(|m| m.id == id && m.alive()))
+                .then_some((id, player_name))
         };
-        let player_owner = self
-            .player
-            .as_ref()
-            .filter(|p| p.entity_id as u32 == owner_id && !p.health.dead)
-            .map(|_| self.acting_player_name().to_owned())
+        let (owner_id, player_owner) = live_owner(f.owner)
             .or_else(|| {
-                self.lan.as_ref().and_then(|host| {
-                    host.hub
-                        .guests
-                        .iter()
-                        .find(|g| {
-                            g.entity_id as u32 == owner_id
-                                && g.placed
-                                && !g.dead
-                                && host.hub.here(g)
-                        })
-                        .map(|g| g.name.clone())
-                })
-            });
-        let owner = (owner_id != 0
-            && (player_owner.is_some() || self.mobs.iter().any(|m| m.id == owner_id && m.alive())))
-        .then_some(owner_id);
-        let mut attack = self.attack_of(owner.unwrap_or(0) as i32);
+                let tag = self.persist.raw.get(&f.id)?;
+                live_owner(self.loaded_fangs_owner(tag))
+            })
+            .unwrap_or_default();
+        // indirectMagic(fangs, owner) when resolved, plain magic otherwise.
+        let owner = (owner_id != 0).then_some(owner_id);
+        let mut attack = self.attack_of(owner_id as i32);
         attack.direct = owner.map(|_| f.id as i32);
         let bite = |g: &mut Self| {
             if let Some(p) = g.player_view()
@@ -497,6 +501,186 @@ fn p_zrot(p: &mut Poses, part: &str, v: f32) {
 mod tests {
     use super::{Party, fang_attack_pitch, fang_crit, fangs_allied};
     use horizon_core::random::LegacyRandom;
+
+    #[test]
+    #[ignore = "daily"]
+    fn evoker_fangs_resolve_the_live_owner_across_dimensions_and_rejoins() {
+        use crate::game::{
+            native_entity_refs::tests::run_on_guest_stack, native_guest_turn_tests::with_guests,
+        };
+        use horizon_client::mobs::Mob;
+        use horizon_core::geometry::Vec3;
+        use mod_api::{
+            EntityDamageTargetPreEvent, Flow, Hooks, LevelRandomHost, LivingIncomingDamageEvent,
+            ModEntry, Mods,
+        };
+        use std::sync::{Arc, Mutex};
+
+        const OWNER: u32 = 13;
+        const RECONNECTED: u32 = 12;
+        const PIG: u32 = 88;
+        const NETHER: &str = "minecraft:the_nether";
+        const OVERWORLD: &str = "minecraft:overworld";
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum OwnerAtBite {
+            ChangedDimension,
+            AlreadyAbroadOnLoad,
+            Reconnected,
+            SameNameDifferentUuid,
+        }
+
+        #[derive(Default)]
+        struct Observation {
+            actors: Mutex<Vec<Option<(u128, String)>>>,
+            sources: Mutex<Vec<(String, i32, i32)>>,
+        }
+
+        struct Guard {
+            deny: bool,
+            seen: Arc<Observation>,
+        }
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Guard {
+            fn entity_damage_target_pre(
+                &self,
+                _: &mut dyn LevelRandomHost,
+                event: &mut EntityDamageTargetPreEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.target_kind, "minecraft:pig");
+                assert_eq!(event.dimension, OVERWORLD);
+                let actor = event
+                    .player
+                    .map(|player| (player.uuid, player.dimension.clone()));
+                self.seen.actors.lock().unwrap().push(actor);
+                if self.deny && event.player.is_some() {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+
+            fn living_incoming_damage(
+                &self,
+                _: &mut dyn LevelRandomHost,
+                event: &mut LivingIncomingDamageEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.entity, PIG as i32);
+                let source = event.source;
+                self.seen.sources.lock().unwrap().push((
+                    source.damage_type.to_owned(),
+                    source.causing,
+                    source.direct,
+                ));
+                Flow::Continue
+            }
+        }
+
+        crate::entry::install_client_hooks();
+        run_on_guest_stack(|| {
+            for scenario in [
+                OwnerAtBite::ChangedDimension,
+                OwnerAtBite::AlreadyAbroadOnLoad,
+                OwnerAtBite::Reconnected,
+                OwnerAtBite::SameNameDifferentUuid,
+            ] {
+                let owner_abroad_on_load = scenario == OwnerAtBite::AlreadyAbroadOnLoad;
+                let seen = Arc::new(Observation::default());
+                let mods: Mods = vec![ModEntry::new(
+                    "fangs_owner_probe",
+                    Box::new(Guard {
+                        deny: owner_abroad_on_load,
+                        seen: seen.clone(),
+                    }),
+                )]
+                .into();
+                mod_platform::testing::with_mods(mods, || {
+                    with_guests(|game| {
+                        game.options.dedicated = Some(Vec::new());
+                        game.build_registries();
+                        game.load_ticking_neighbourhood(0, 0);
+                        game.update_chunk_tickets();
+                        assert!(game.entity_ticking_area()(6, 6));
+                        game.lan
+                            .as_mut()
+                            .unwrap()
+                            .hub
+                            .update_guest(OWNER, |guest| {
+                                guest.dimension = if owner_abroad_on_load {
+                                    NETHER
+                                } else {
+                                    OVERWORLD
+                                }
+                                .into();
+                            })
+                            .unwrap();
+                        let kind = game.res.mob_types()["minecraft:pig"].clone();
+                        game.mobs
+                            .push(Mob::new(PIG, kind, Vec3::new(6.5, 200.0, 6.5), 0.0));
+                        let starting_health = game.mobs[0].health;
+                        game.as_console(|game| {
+                            assert!(game.run_command(
+                                "summon minecraft:evoker_fangs 6.5 200.0 6.5 {Owner:[I;0,0,0,13]}"
+                            ));
+                        });
+                        let fangs = &game.fangs.list[0];
+                        assert_eq!(fangs.owner, OWNER, "resolve the saved Owner on summon");
+                        let fangs_id = fangs.id;
+                        let hub = &mut game.lan.as_mut().unwrap().hub;
+                        let live_id = match scenario {
+                            OwnerAtBite::AlreadyAbroadOnLoad => Some(OWNER),
+                            OwnerAtBite::ChangedDimension => {
+                                hub.update_guest(OWNER, |guest| guest.dimension = NETHER.into())
+                                    .unwrap();
+                                Some(OWNER)
+                            }
+                            OwnerAtBite::Reconnected | OwnerAtBite::SameNameDifferentUuid => {
+                                let index = hub.guests.connection_index(OWNER).unwrap();
+                                let original = hub.guests.remove(index);
+                                let same_uuid = scenario == OwnerAtBite::Reconnected;
+                                hub.update_guest(RECONNECTED, |guest| {
+                                    guest.dimension = NETHER.into();
+                                    guest.name = original.name;
+                                    if same_uuid {
+                                        guest.uuid = original.uuid;
+                                    }
+                                })
+                                .unwrap();
+                                same_uuid.then_some(RECONNECTED)
+                            }
+                        };
+                        for _ in 0..8 {
+                            game.tick_fangs();
+                        }
+                        let actors = seen.actors.lock().unwrap();
+                        let sources = seen.sources.lock().unwrap();
+                        let expected_actor = Some((u128::from(OWNER), NETHER.into()));
+                        if live_id.is_some() {
+                            assert_eq!(*actors, [expected_actor], "{scenario:?}");
+                        } else {
+                            assert!(actors.is_empty(), "{scenario:?}");
+                        }
+                        if owner_abroad_on_load {
+                            assert_eq!(game.mobs[0].health, starting_health);
+                            assert!(sources.is_empty());
+                        } else {
+                            assert_eq!(game.mobs[0].health, starting_health - 6.0);
+                            let expected_source = match live_id {
+                                Some(id) => (
+                                    "minecraft:indirect_magic".into(),
+                                    id as i32,
+                                    fangs_id as i32,
+                                ),
+                                None => ("minecraft:magic".into(), 0, 0),
+                            };
+                            assert_eq!(*sources, [expected_source], "{scenario:?}");
+                        }
+                    });
+                });
+            }
+        });
+    }
 
     #[test]
     #[ignore = "daily"]
