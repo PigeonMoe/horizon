@@ -17,9 +17,9 @@ use horizon_client::{lan::hub::TickCtx, world_spawn::PlayerSpawnFinder};
 use horizon_core::{geometry::Vec3, position::BlockPos};
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
-#[path = "server_travel/nether_hull.rs"]
-mod nether_hull;
-pub(super) use nether_hull::NetherHullTrip;
+#[path = "server_travel/hull_portal.rs"]
+mod hull_portal;
+pub(super) use hull_portal::PortalHullTrip;
 
 /// Why an entity changes level (`entity_travel_to_dimension`'s `cause`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,7 +375,7 @@ impl Game<'_> {
                 .server_trips
                 .iter()
                 .any(|t| t.is(conn) && t.holds_movement())
-                || self.nether_hull_trips.iter().any(|trip| trip.holds(g))
+                || self.portal_hull_trips.iter().any(|trip| trip.holds(g))
             {
                 continue;
             }
@@ -399,7 +399,7 @@ impl Game<'_> {
                 .lan
                 .as_ref()
                 .and_then(|host| host.hub.guest(conn))
-                .is_some_and(|guest| self.nether_hull_trips.iter().any(|trip| trip.holds(guest)))
+                .is_some_and(|guest| self.portal_hull_trips.iter().any(|trip| trip.holds(guest)))
     }
 
     /// Whether a vehicle waits in `dim` for its rider to arrive elsewhere:
@@ -408,7 +408,7 @@ impl Game<'_> {
         self.server_trips
             .iter()
             .any(|t| t.vehicle.is_some() && t.source == dim)
-            || self.nether_hull_trips.iter().any(|trip| trip.source == dim)
+            || self.portal_hull_trips.iter().any(|trip| trip.source == dim)
     }
 
     /// Per server tick in each level, after the guests' own: the arrivals of
@@ -921,9 +921,7 @@ impl Game<'_> {
             }
             // Refused passengers are detached and stay in the source level.
             let cause = TravelCause::of_plan(&plan);
-            if cause == TravelCause::NetherPortal
-                && self.schedule_nether_hull(vehicle, plan, &riders)
-            {
+            if self.schedule_portal_hull(vehicle, plan, &riders) {
                 continue;
             }
             if !self.entity_may_travel(vehicle, plan.dim, cause) {
@@ -1041,7 +1039,7 @@ impl Game<'_> {
             None => scaled,
         };
         if origin.is_none() {
-            self.place_portal_guest(conn, source, from, destination, yaw, credits_respawn);
+            self.place_portal_guest(conn, source, from, destination, yaw, None, credits_respawn);
         } else if let Some(host) = self.lan.as_mut() {
             host.hub.guests.update_connection(conn, |guest| {
                 guest.landing = true;
@@ -1080,6 +1078,7 @@ impl Game<'_> {
         from: Vec3,
         destination: Vec3,
         yaw: f32,
+        pitch: Option<f32>,
         credits_respawn: bool,
     ) {
         let Some(i) = self.guest_index(conn) else {
@@ -1098,7 +1097,7 @@ impl Game<'_> {
         // Entity.handlePortal set before the teleport.
         if let Some(host) = self.lan.as_mut() {
             host.hub
-                .change_level(i, at, yaw, None, true, PLAYER_DELAY, &ctx);
+                .change_level(i, at, yaw, pitch, true, PLAYER_DELAY, &ctx);
         }
         if credits_respawn && let Some(host) = self.lan.as_mut() {
             host.hub.guests.update(i, |g| {
@@ -1191,7 +1190,7 @@ impl Game<'_> {
             .filter(move |trip| trip.origin.is_some() && trip.dim == dim)
             .map(|trip| Self::chunk_of(trip.target))
             .chain(
-                self.nether_hull_trips
+                self.portal_hull_trips
                     .iter()
                     .filter_map(move |trip| trip.pending_chunk(dim)),
             )
@@ -1400,7 +1399,7 @@ impl Game<'_> {
     /// End platform, the Overworld's spawn column) and the teleport there.
     fn arrive_server_trips(&mut self) {
         self.follow_command_arrivals();
-        self.arrive_nether_hulls();
+        self.arrive_portal_hulls();
         let mut k = 0;
         while k < self.server_trips.len() {
             let trip = &self.server_trips[k];
@@ -1668,6 +1667,7 @@ impl Game<'_> {
                     Vec3::new(x, y, z),
                     position,
                     yaw,
+                    None,
                     false,
                 );
                 if trip.missing.is_some()
@@ -2382,6 +2382,14 @@ mod tests {
         const HULL: u32 = 702;
         const HULL_YAW: f32 = 35.0;
         const RIDER_YAW: f32 = 105.0;
+        const RIDER_PITCH: f32 = 22.0;
+        #[derive(Clone, Copy, PartialEq)]
+        enum Route {
+            Nether,
+            IntoEnd,
+            OutOfEnd,
+            UnseenCredits,
+        }
         #[derive(Debug, PartialEq)]
         enum Order {
             Off(u32),
@@ -2397,6 +2405,9 @@ mod tests {
         }
         struct Protection {
             refuse: &'static [u128],
+            source: Dim,
+            destination: Dim,
+            cause: TravelCause,
             trace: Arc<Trace>,
         }
         #[mod_api::__subscriptions]
@@ -2420,11 +2431,11 @@ mod tests {
                 host: &mut dyn ServerHost,
                 event: &mut PlayerTeleportPreEvent<'_>,
             ) -> Flow {
-                if event.cause != "nether_portal" {
+                if event.cause != self.cause.id() {
                     return Flow::Continue;
                 }
-                assert_eq!(event.from_level, "minecraft:overworld");
-                assert_eq!(event.to_level, "minecraft:the_nether");
+                assert_eq!(event.from_level, self.source.id());
+                assert_eq!(event.to_level, self.destination.id());
                 let rider = host.player(event.player).unwrap().entity();
                 assert_eq!(rider.vehicle(host), None);
                 assert_eq!(rider.position(host), Some(event.from));
@@ -2469,20 +2480,35 @@ mod tests {
         }
 
         run_on_guest_stack(|| {
-            for (cart, refuse, two_players, disconnect) in [
-                (false, &[12][..], false, false),
-                (true, &[12][..], false, false),
-                (true, &[][..], false, false),
-                (false, &[12][..], true, false),
-                (false, &[12, 13][..], true, false),
-                (false, &[][..], true, false),
-                (false, &[][..], false, true),
+            use Route::*;
+            for (route, cart, refuse, two_players, disconnect) in [
+                (Nether, false, &[12][..], false, false),
+                (Nether, true, &[12][..], false, false),
+                (Nether, true, &[][..], false, false),
+                (Nether, false, &[12][..], true, false),
+                (Nether, false, &[12, 13][..], true, false),
+                (Nether, false, &[][..], true, false),
+                (Nether, false, &[][..], false, true),
+                (IntoEnd, false, &[12, 13][..], true, false),
+                (IntoEnd, false, &[12][..], true, false),
+                (IntoEnd, true, &[12][..], false, false),
+                (IntoEnd, true, &[][..], false, false),
+                (OutOfEnd, false, &[13][..], true, false),
+                (UnseenCredits, true, &[][..], false, false),
             ] {
+                let (source, destination, cause) = match route {
+                    Nether => (Dim::Overworld, Dim::Nether, TravelCause::NetherPortal),
+                    IntoEnd => (Dim::Overworld, Dim::End, TravelCause::EndPortal),
+                    OutOfEnd | UnseenCredits => (Dim::End, Dim::Overworld, TravelCause::EndPortal),
+                };
                 let trace = Arc::new(Trace::default());
                 let mods = vec![ModEntry::new(
                     "portal_passenger_region",
                     Box::new(Protection {
                         refuse,
+                        source,
+                        destination,
+                        cause,
                         trace: trace.clone(),
                     }),
                 )]
@@ -2490,17 +2516,26 @@ mod tests {
                 mod_platform::testing::with_mods(mods, || {
                     with_guests(|game| {
                         game.options.dedicated = Some(Vec::new());
-                        let source = game.dim;
+                        game.enter_level(source).unwrap();
+                        game.level.world_spawn = Some([6, 80, 9]);
+                        game.level.world_spawn_angle = [25.0, -12.0];
                         let entry = BlockPos::new(3, 70, 5);
                         prepare_entity_ticking_neighborhood(game, ChunkPos::new(0, 0));
                         game.tickets.add_portal((0, 0));
                         game.update_chunk_tickets();
                         assert!(game.entity_ticking_area()(entry.x, entry.z));
                         let registry = &game.pack.assets.registry;
-                        let portal = registry.default_state("minecraft:nether_portal").unwrap();
-                        let mut exit_state = registry.state(portal).unwrap().clone();
-                        exit_state.properties.insert("axis".into(), "z".into());
-                        let exit_portal = registry.resolve(&exit_state).unwrap();
+                        let portal = registry
+                            .default_state(match cause {
+                                TravelCause::NetherPortal => "minecraft:nether_portal",
+                                _ => "minecraft:end_portal",
+                            })
+                            .unwrap();
+                        let nether_exit = (route == Nether).then(|| {
+                            let mut state = registry.state(portal).unwrap().clone();
+                            state.properties.insert("axis".into(), "z".into());
+                            registry.resolve(&state).unwrap()
+                        });
                         let floor = registry.default_state("minecraft:stone").unwrap();
                         for z in 3..=7 {
                             for x in 1..=5 {
@@ -2521,13 +2556,27 @@ mod tests {
                         let vehicle = game.entity(HULL).unwrap();
                         let players: &[u32] = if two_players { &[12, 13] } else { &[12] };
                         for &conn in players {
+                            game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                                guest.dimension = source.id().into();
+                                guest.loaded = true;
+                                guest.load_timeout = 0;
+                                guest.seen_credits = route != UnseenCredits;
+                                if source == Dim::End {
+                                    guest.respawn_elsewhere = Some((
+                                        Dim::Overworld.id().into(),
+                                        [54, 72, 47],
+                                        70.0,
+                                        10.0,
+                                        true,
+                                    ));
+                                }
+                            });
                             let rider = game.player(u128::from(conn)).unwrap().entity();
                             assert!(game.entity_start_riding(rider, vehicle, true));
                             game.guest_boarded(conn, None);
                             game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
                                 guest.yaw = RIDER_YAW;
-                                guest.loaded = true;
-                                guest.load_timeout = 0;
+                                guest.pitch = RIDER_PITCH;
                             });
                         }
                         if two_players {
@@ -2555,7 +2604,14 @@ mod tests {
                         game.handle_vehicle_portals();
                         game.carry_riders_through_portals();
                         assert!(game.server_trips.is_empty());
-                        assert_eq!(game.nether_hull_trips.len(), 1);
+                        if route == UnseenCredits {
+                            assert!(game.portal_hull_trips.is_empty());
+                            assert_eq!(game.portal_hull_pose(HULL), Some((at, HULL_YAW)));
+                            assert_eq!(game.native_passenger_ids(HULL), [12]);
+                            assert!(trace.order.lock().unwrap().is_empty());
+                            return;
+                        }
+                        assert_eq!(game.portal_hull_trips.len(), 1);
                         assert!(players.iter().all(|&conn| game.on_server_trip(conn)));
                         assert!(game.lan.as_ref().unwrap().hub.guest(12).unwrap().landing);
                         let players = if disconnect {
@@ -2572,28 +2628,46 @@ mod tests {
                             players
                         };
                         game.arrive_server_trips();
-                        assert_eq!(game.nether_hull_trips.len(), 1);
+                        assert_eq!(game.portal_hull_trips.len(), 1);
                         assert!(trace.order.lock().unwrap().is_empty());
-                        let trip = &game.nether_hull_trips[0];
+                        let trip = &game.portal_hull_trips[0];
                         let plan = trip.plan;
                         let (cx, cz) = Game::chunk_of(trip.target);
-                        game.enter_level(Dim::Nether).unwrap();
+                        game.enter_level(destination).unwrap();
                         for z in cz - 2..=cz + 2 {
                             for x in cx - 2..=cx + 2 {
                                 game.streaming
                                     .insert_remote(&mut game.world, Chunk::empty(x, z));
                             }
                         }
-                        let (exit_x, exit_z) = (plan.approximate.x + 2, plan.approximate.z + 2);
-                        for y in 70..73 {
-                            for z in exit_z..exit_z + 2 {
-                                game.world.set(exit_x, y, z, exit_portal).unwrap();
+                        let (expected_hull, expected_yaw, expected_pitch) = match route {
+                            Nether => {
+                                let (exit_x, exit_z) =
+                                    (plan.approximate.x + 2, plan.approximate.z + 2);
+                                for y in 70..73 {
+                                    for z in exit_z..exit_z + 2 {
+                                        game.world.set(exit_x, y, z, nether_exit.unwrap()).unwrap();
+                                    }
+                                }
+                                let (_, exit) =
+                                    game.find_exit_portal(&plan).expect("pre-existing portal");
+                                let (at, turn) = game.arrival(&plan, exit);
+                                assert_ne!(turn, 0.0);
+                                (at, HULL_YAW + turn, RIDER_PITCH)
                             }
-                        }
-                        let (_, exit) = game.find_exit_portal(&plan).expect("pre-existing portal");
-                        let (expected_hull, turn) = game.arrival(&plan, exit);
+                            IntoEnd => (Vec3::new(100.5, 50.0, 0.5), 90.0, RIDER_PITCH),
+                            OutOfEnd => {
+                                game.world.set(6, 68, 9, floor).unwrap();
+                                (
+                                    Vec3::new(6.5, 69.0, 9.5),
+                                    HULL_YAW + 25.0,
+                                    RIDER_PITCH - 12.0,
+                                )
+                            }
+                            UnseenCredits => unreachable!(),
+                        };
                         game.arrive_server_trips();
-                        assert!(game.nether_hull_trips.is_empty());
+                        assert!(game.portal_hull_trips.is_empty());
                         let mut order: Vec<_> =
                             players.iter().rev().copied().map(Order::Off).collect();
                         let mut mounted = Vec::new();
@@ -2607,11 +2681,14 @@ mod tests {
                         }
                         order.extend(mounted.iter().copied().map(Order::On));
                         assert_eq!(*trace.order.lock().unwrap(), order);
-                        let hull_pose = game
-                            .portal_hull_pose(HULL)
-                            .expect("hull reached the Nether");
-                        assert_eq!(hull_pose, (expected_hull, HULL_YAW + turn));
-                        assert_ne!(turn, 0.0);
+                        assert_eq!(
+                            game.portal_hull_pose(HULL),
+                            Some((expected_hull, expected_yaw))
+                        );
+                        if route == IntoEnd {
+                            assert_eq!(&*game.block_name([100, 48, 0]), "minecraft:obsidian");
+                            assert_eq!(&*game.block_name([100, 50, 0]), "minecraft:air");
+                        }
                         assert_eq!(game.native_passenger_ids(HULL), mounted);
                         let proposals = trace.proposals.lock().unwrap();
                         let committed = trace.committed.lock().unwrap();
@@ -2641,7 +2718,7 @@ mod tests {
                                 assert_eq!(guest.vehicle, None);
                                 assert_eq!(guest.position, from);
                             } else {
-                                assert_eq!(guest.dimension, Dim::Nether.id());
+                                assert_eq!(guest.dimension, destination.id());
                                 assert_eq!(guest.vehicle, Some(HULL));
                                 assert!(committed.contains(&(u128::from(conn), to)));
                                 assert_eq!(guest.vehicle_good, Some(expected_hull.components()));
@@ -2662,7 +2739,8 @@ mod tests {
                                         )
                                 };
                                 assert_eq!(guest.position, expected_seat.components());
-                                assert_eq!(guest.yaw, RIDER_YAW + turn);
+                                assert_eq!(guest.yaw, RIDER_YAW + (expected_yaw - HULL_YAW));
+                                assert_eq!(guest.pitch, expected_pitch);
                             }
                         }
                         if mounted.len() == 2 {

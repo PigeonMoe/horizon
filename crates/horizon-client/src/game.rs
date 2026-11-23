@@ -1511,8 +1511,8 @@ struct Game<'a> {
     /// A server's players on their way to another level, each waiting for
     /// the destination to load around them.
     server_trips: Vec<server_travel::Trip>,
-    /// Nether portal exits waiting for an actual boat or minecart and its direct riders.
-    nether_hull_trips: Vec<server_travel::NetherHullTrip>,
+    /// Portal exits waiting for an actual boat or minecart and its direct riders.
+    portal_hull_trips: Vec<server_travel::PortalHullTrip>,
     /// Players a command sends to another level, once it has run.
     level_teleports: Vec<server_travel::LevelTeleport>,
     /// Teleports a command made inside a level, for `native_player_teleported`
@@ -11028,7 +11028,7 @@ impl<'a> Game<'a> {
             world_flat: false,
             world_debug: false,
             server_trips: Vec::new(),
-            nether_hull_trips: Vec::new(),
+            portal_hull_trips: Vec::new(),
             level_teleports: Vec::new(),
             teleport_notes: Vec::new(),
             levels: Default::default(),

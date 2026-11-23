@@ -1,7 +1,10 @@
-//! A Nether transition belongs to the hull, even if none of its players can follow it.
+//! A portal transition belongs to the hull, even if none of its players can follow it.
 
 use super::{Dim, Game, PLAYER_DELAY, Plan, PlayerTravelOrigin, TravelCause};
-use crate::game::{minecarts::SEAT, vehicle_teleport::passenger_destination};
+use crate::game::{
+    minecarts::SEAT,
+    vehicle_teleport::{absolute_pitch, passenger_destination},
+};
 use horizon_client::lan::guest::Guest;
 use horizon_core::geometry::Vec3;
 
@@ -45,7 +48,7 @@ impl PortalRider {
     }
 }
 
-pub(in crate::game) struct NetherHullTrip {
+pub(in crate::game) struct PortalHullTrip {
     pub(super) source: Dim,
     hull: u32,
     source_chunk: (i32, i32),
@@ -54,7 +57,7 @@ pub(in crate::game) struct NetherHullTrip {
     riders: Vec<PortalRider>,
 }
 
-impl NetherHullTrip {
+impl PortalHullTrip {
     pub(in crate::game) fn holds(&self, guest: &Guest) -> bool {
         self.riders
             .iter()
@@ -70,14 +73,43 @@ impl NetherHullTrip {
     }
 }
 
+struct HullArrival {
+    at: Vec3,
+    yaw: f32,
+    relative_yaw: bool,
+    pitch_delta: f32,
+}
+
+impl HullArrival {
+    fn rider_rotation(&self, hull_yaw: f32, [yaw, pitch]: [f32; 2]) -> [f32; 2] {
+        let passenger_yaw = if self.relative_yaw {
+            yaw
+        } else {
+            yaw - hull_yaw
+        };
+        [
+            self.yaw + passenger_yaw,
+            absolute_pitch(pitch + self.pitch_delta).unwrap_or(pitch),
+        ]
+    }
+
+    fn hull_yaw(&self, source_yaw: f32) -> f32 {
+        if self.relative_yaw {
+            self.yaw + source_yaw
+        } else {
+            self.yaw
+        }
+    }
+}
+
 impl Game<'_> {
     /// The existing entity tree transfer handles mobs and nested mounts. A
     /// boat or cart whose seats contain only network players owns its wait
     /// independently of any of those connections.
-    pub(super) fn schedule_nether_hull(&mut self, hull: u32, plan: Plan, conns: &[u32]) -> bool {
+    pub(super) fn schedule_portal_hull(&mut self, hull: u32, plan: Plan, conns: &[u32]) -> bool {
         let source = self.dim;
         if self
-            .nether_hull_trips
+            .portal_hull_trips
             .iter()
             .any(|trip| trip.source == source && trip.hull == hull)
         {
@@ -111,14 +143,19 @@ impl Game<'_> {
             })
             .collect();
         let Some(riders) = riders else { return false };
-        if !self.open_nether_hull_level(plan.dim) {
+        if !self.open_portal_hull_level(plan.dim) {
             return true;
         }
-        let target = self.arrival_centre(&plan);
-        if !self.open_nether_hull_level(source) {
+        let target = if plan.end {
+            let p = plan.approximate;
+            Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y), f64::from(p.z) + 0.5)
+        } else {
+            self.arrival_centre(&plan)
+        };
+        if !self.open_portal_hull_level(source) {
             return true;
         }
-        let trip = NetherHullTrip {
+        let trip = PortalHullTrip {
             source,
             hull,
             source_chunk: Self::chunk_of(at),
@@ -136,13 +173,13 @@ impl Game<'_> {
                 }
             }
         }
-        self.nether_hull_trips.push(trip);
+        self.portal_hull_trips.push(trip);
         true
     }
 
-    pub(super) fn arrive_nether_hulls(&mut self) {
+    pub(super) fn arrive_portal_hulls(&mut self) {
         let mut i = 0;
-        while let Some(trip) = self.nether_hull_trips.get(i) {
+        while let Some(trip) = self.portal_hull_trips.get(i) {
             if trip.plan.dim != self.dim {
                 i += 1;
                 continue;
@@ -152,28 +189,31 @@ impl Game<'_> {
                 i += 1;
                 continue;
             }
-            let trip = self.nether_hull_trips.remove(i);
-            self.arrive_nether_hull(trip);
+            let trip = self.portal_hull_trips.remove(i);
+            self.arrive_portal_hull(trip);
         }
     }
 
-    fn arrive_nether_hull(&mut self, trip: NetherHullTrip) {
+    fn arrive_portal_hull(&mut self, trip: PortalHullTrip) {
         let destination = trip.plan.dim;
+        let cause = TravelCause::of_plan(&trip.plan);
         self.resolve_arrivals();
-        let Some(exit) = self.nether_exit_portal(&trip.plan) else {
-            return;
-        };
         if self.dim != destination
             || self.parked_vehicle_root(trip.source, trip.hull) != Some(trip.hull)
         {
             return;
         }
-        let (at, turn) = self.arrival(&trip.plan, exit);
-        if !self.open_nether_hull_level(trip.source) {
+        let Some(arrival) = self.resolve_portal_hull_exit(&trip.plan) else {
+            return;
+        };
+        if self.dim != destination {
             return;
         }
-        let Some((hull_from, hull_yaw, riders)) = self.detach_nether_hull_riders(&trip) else {
-            self.open_nether_hull_level(destination);
+        if !self.open_portal_hull_level(trip.source) {
+            return;
+        }
+        let Some((hull_from, hull_yaw, riders)) = self.detach_portal_hull_riders(&trip) else {
+            self.open_portal_hull_level(destination);
             return;
         };
 
@@ -182,31 +222,34 @@ impl Game<'_> {
         // listener can observe an earlier accepted rider already in the destination.
         let mut landed = Vec::new();
         for rider in riders {
-            if !self.open_nether_hull_level(trip.source) {
+            if !self.open_portal_hull_level(trip.source) {
                 break;
             }
             let [x, y, z] = rider.origin.position;
-            let destination_at = passenger_destination(hull_from, at, Vec3::new(x, y, z));
-            let Some(yaw) =
-                self.admit_nether_rider(rider, trip.source, destination, destination_at)
+            let destination_at = passenger_destination(hull_from, arrival.at, Vec3::new(x, y, z));
+            let Some(rotation) =
+                self.admit_portal_rider(rider, trip.source, destination, destination_at, cause)
             else {
-                if self.nether_rider_is_current(rider, trip.source) {
+                if self.portal_rider_is_current(rider, trip.source) {
                     self.cool_down_refused_portal(rider.conn);
                 }
                 continue;
             };
-            if !self.open_nether_hull_level(destination) {
+            if !self.open_portal_hull_level(destination) {
                 break;
             }
-            if let Some(rider) =
-                self.land_nether_rider(rider, trip.source, destination_at, yaw + turn)
-            {
+            if let Some(rider) = self.land_portal_rider(
+                rider,
+                trip.source,
+                destination_at,
+                arrival.rider_rotation(hull_yaw, rotation),
+            ) {
                 landed.push(rider);
             }
         }
 
-        if !self.open_nether_hull_level(trip.source) {
-            self.open_nether_hull_level(destination);
+        if !self.open_portal_hull_level(trip.source) {
+            self.open_portal_hull_level(destination);
             return;
         }
         let hull_ready = self.portal_hull_pose(trip.hull) == Some((hull_from, hull_yaw))
@@ -215,18 +258,55 @@ impl Game<'_> {
         if hull_ready {
             self.release_vehicle_container(trip.hull);
         }
-        if !self.open_nether_hull_level(destination) || !hull_ready {
+        if !self.open_portal_hull_level(destination) || !hull_ready {
             return;
         }
-        self.arrive_vehicle(trip.source, trip.hull, at, hull_yaw + turn);
+        self.arrive_vehicle(
+            trip.source,
+            trip.hull,
+            arrival.at,
+            arrival.hull_yaw(hull_yaw),
+        );
         self.portals.carried_at.remove(&trip.hull);
         for rider in landed {
-            self.reattach_nether_rider(rider, destination, trip.hull);
+            self.reattach_portal_rider(rider, destination, trip.hull);
         }
     }
 
-    fn reattach_nether_rider(&mut self, rider: PortalRider, destination: Dim, hull: u32) {
-        if !self.nether_rider_is_current(rider, destination) {
+    fn resolve_portal_hull_exit(&mut self, plan: &Plan) -> Option<HullArrival> {
+        if plan.end {
+            // The transitioning entity is the hull, so the entrance uses the
+            // full End anchor and the return uses the shared world spawn.
+            let at = self.end_portal_exit(plan);
+            if self.dim != plan.dim {
+                return None;
+            }
+            self.place_portal_ticket(Self::chunk_of(at));
+            let into_end = plan.dim == Dim::End;
+            let [yaw, pitch_delta] = if into_end {
+                [90.0, 0.0]
+            } else {
+                self.level.world_spawn_angle
+            };
+            return Some(HullArrival {
+                at,
+                yaw,
+                relative_yaw: !into_end,
+                pitch_delta,
+            });
+        }
+        let exit = self.nether_exit_portal(plan)?;
+        let (at, yaw) = self.arrival(plan, exit);
+        Some(HullArrival {
+            at,
+            yaw,
+            relative_yaw: true,
+            pitch_delta: 0.0,
+        })
+    }
+
+    fn reattach_portal_rider(&mut self, rider: PortalRider, destination: Dim, hull: u32) {
+        if !self.portal_rider_is_current(rider, destination) {
             return;
         }
         let (Some(entity), Some(vehicle)) = (self.entity(rider.entity), self.entity(hull)) else {
@@ -270,9 +350,9 @@ impl Game<'_> {
         host.hub.teleport(i, Some(seat_at.components()));
     }
 
-    fn detach_nether_hull_riders(
+    fn detach_portal_hull_riders(
         &mut self,
-        trip: &NetherHullTrip,
+        trip: &PortalHullTrip,
     ) -> Option<(Vec3, f32, Vec<PortalRider>)> {
         let root = self.entity(trip.hull)?;
         let hull_pose = self.portal_hull_pose(trip.hull)?;
@@ -281,7 +361,7 @@ impl Game<'_> {
             self.native_entity_travel_to_dimension(
                 root,
                 trip.plan.dim.id(),
-                TravelCause::NetherPortal.id(),
+                TravelCause::of_plan(&trip.plan).id(),
                 &mut cancel,
             );
             if cancel
@@ -343,7 +423,7 @@ impl Game<'_> {
         Some((hull_pose.0, hull_pose.1, detached))
     }
 
-    fn nether_rider_is_current(&self, rider: PortalRider, source: Dim) -> bool {
+    fn portal_rider_is_current(&self, rider: PortalRider, source: Dim) -> bool {
         !self.on_server_trip(rider.conn)
             && self
                 .lan
@@ -352,18 +432,18 @@ impl Game<'_> {
                 .is_some_and(|guest| rider.still_at_origin(guest, source))
     }
 
-    fn admit_nether_rider(
+    fn admit_portal_rider(
         &mut self,
         rider: PortalRider,
         source: Dim,
         destination: Dim,
         at: Vec3,
-    ) -> Option<f32> {
-        let cause = TravelCause::NetherPortal;
-        if !self.nether_rider_is_current(rider, source)
+        cause: TravelCause,
+    ) -> Option<[f32; 2]> {
+        if !self.portal_rider_is_current(rider, source)
             || !self.server_player_travel_allowed(rider.conn, destination, cause)
             || self.dim != source
-            || !self.nether_rider_is_current(rider, source)
+            || !self.portal_rider_is_current(rider, source)
             || !self.player_teleport_allowed(
                 rider.origin.uuid,
                 (source, rider.origin.position),
@@ -376,22 +456,30 @@ impl Game<'_> {
         }
         let guest = self.lan.as_ref()?.hub.guest(rider.conn)?;
         (!self.on_server_trip(rider.conn) && rider.still_at_origin(guest, source))
-            .then_some(guest.yaw)
+            .then_some([guest.yaw, guest.pitch])
     }
 
-    fn land_nether_rider(
+    fn land_portal_rider(
         &mut self,
         rider: PortalRider,
         source: Dim,
         at: Vec3,
-        yaw: f32,
+        [yaw, pitch]: [f32; 2],
     ) -> Option<PortalRider> {
-        if !self.nether_rider_is_current(rider, source) {
+        if !self.portal_rider_is_current(rider, source) {
             return None;
         }
         let destination = self.dim;
         let [x, y, z] = rider.origin.position;
-        self.place_portal_guest(rider.conn, source, Vec3::new(x, y, z), at, yaw, false);
+        self.place_portal_guest(
+            rider.conn,
+            source,
+            Vec3::new(x, y, z),
+            at,
+            yaw,
+            Some(pitch),
+            false,
+        );
         let i = self.guest_index(rider.conn)?;
         let host = self.lan.as_mut()?;
         let guest = &host.hub.guests[i];
@@ -413,12 +501,9 @@ impl Game<'_> {
         Some(arrived)
     }
 
-    fn open_nether_hull_level(&mut self, dim: Dim) -> bool {
+    fn open_portal_hull_level(&mut self, dim: Dim) -> bool {
         if let Err(error) = self.enter_level(dim) {
-            log::error!(
-                "could not open {} for a Nether portal hull: {error}",
-                dim.id()
-            );
+            log::error!("could not open {} for a portal hull: {error}", dim.id());
             return false;
         }
         self.dim == dim
