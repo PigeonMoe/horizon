@@ -288,6 +288,23 @@ impl Game<'_> {
         };
         b.seat(0, count, false, PLAYER_RIDING_OFFSET, false)
     }
+
+    /// `AbstractBoat.getPassengerAttachmentPoint` uses the rider's index in
+    /// the passenger list, which can differ from its connection's join order.
+    pub(super) fn guest_boat_seat(&self, i: usize, rider: u32) -> Option<Vec3> {
+        let boat = &self.boats[i];
+        let passengers = self.native_passenger_ids(boat.id);
+        let seat = passengers.iter().position(|&id| id == rider)?;
+        // A window host can occupy the first seat without a network guest row.
+        let local = usize::from(self.lan_acting.is_none() && self.riding == Some(boat.id));
+        Some(boat.seat(
+            seat + local,
+            passengers.len() + local,
+            false,
+            PLAYER_RIDING_OFFSET,
+            false,
+        ))
+    }
     /// `getRootVehicle` of mob `j`: the mob or boat at the bottom of what it
     /// rides, None when it rides nothing.
     pub(super) fn mob_root_vehicle(&self, mut j: usize) -> Option<u32> {

@@ -2665,6 +2665,28 @@ mod tests {
                                 assert_eq!(guest.yaw, RIDER_YAW + turn);
                             }
                         }
+                        if mounted.len() == 2 {
+                            // The portal initially seats the first player in the middle.
+                            // An ordinary tick repositions each rider for the now-full boat.
+                            for &conn in mounted.iter().rev() {
+                                game.guest_vehicle_tick(conn);
+                            }
+                            let boat = game.boats.iter().find(|boat| boat.id == HULL).unwrap();
+                            let host = game.lan.as_ref().unwrap();
+                            for (seat, &conn) in mounted.iter().enumerate() {
+                                let guest = host.hub.guest(conn).unwrap();
+                                let expected = boat.seat(
+                                    seat,
+                                    2,
+                                    false,
+                                    super::super::boat_passengers::PLAYER_RIDING_OFFSET,
+                                    false,
+                                );
+                                assert_eq!(guest.position, expected.components());
+                            }
+                            assert!(game.guest_controls_vehicle(mounted[0], HULL));
+                            assert!(!game.guest_controls_vehicle(mounted[1], HULL));
+                        }
                         game.enter_level(source).unwrap();
                         assert!(game.portal_hull_pose(HULL).is_none());
                     });

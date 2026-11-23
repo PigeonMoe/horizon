@@ -1,9 +1,7 @@
 //! A Nether transition belongs to the hull, even if none of its players can follow it.
 
 use super::{Dim, Game, PLAYER_DELAY, Plan, PlayerTravelOrigin, TravelCause};
-use crate::game::{
-    boat_passengers::PLAYER_RIDING_OFFSET, minecarts::SEAT, vehicle_teleport::passenger_destination,
-};
+use crate::game::{minecarts::SEAT, vehicle_teleport::passenger_destination};
 use horizon_client::lan::guest::Guest;
 use horizon_core::geometry::Vec3;
 
@@ -237,15 +235,11 @@ impl Game<'_> {
         if !self.entity_start_riding(entity, vehicle, true) || self.dim != destination {
             return;
         }
-        let seats = self.native_passenger_ids(hull);
-        let Some(seat) = seats.iter().position(|&id| id == rider.entity) else {
-            return;
-        };
-        let (at, seat_at) = if let Some(boat) = self.boats.iter().find(|boat| boat.id == hull) {
-            (
-                boat.position,
-                boat.seat(seat, seats.len(), false, PLAYER_RIDING_OFFSET, false),
-            )
+        let (at, seat_at) = if let Some(i) = self.boats.iter().position(|boat| boat.id == hull) {
+            let Some(seat_at) = self.guest_boat_seat(i, rider.entity) else {
+                return;
+            };
+            (self.boats[i].position, seat_at)
         } else if let Some(cart) = self.carts.iter().find(|cart| cart.id == hull) {
             (
                 cart.position,

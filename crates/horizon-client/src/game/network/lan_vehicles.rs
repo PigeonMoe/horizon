@@ -283,6 +283,7 @@ impl Game<'_> {
         }
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
         let boat = self.boats.iter().position(|b| b.id == vehicle);
+        let boat_seat = boat.and_then(|i| self.guest_boat_seat(i, g.entity_id as u32));
         let cart = self.carts.iter().any(|c| c.id == vehicle);
         let mount = self.mobs.iter().any(|m| m.id == vehicle);
         let cushion = self.cushions.iter().any(|c| c.id == vehicle);
@@ -350,8 +351,7 @@ impl Game<'_> {
                         .and_then(|landing| game.admit_guest_dismount(landing));
                     return None;
                 }
-                let p = game.player_boat_seat(i);
-                return Some([p.x, p.y, p.z]);
+                return boat_seat.map(Vec3::components);
             }
             if keys.shift
                 && let Some(i) = game.carts.iter().position(|c| Some(c.id) == game.riding)
@@ -506,6 +506,7 @@ impl Game<'_> {
         let Some(vehicle) = host.hub.guests[gi].vehicle else {
             return;
         };
+        let rider = host.hub.guests[gi].entity_id as u32;
         if before == Some(vehicle) {
             return;
         }
@@ -521,7 +522,7 @@ impl Game<'_> {
             .boats
             .iter()
             .position(|b| b.id == vehicle)
-            .map(|i| (self.boats[i].position, self.player_boat_seat(i)))
+            .and_then(|i| Some((self.boats[i].position, self.guest_boat_seat(i, rider)?)))
             .or_else(|| {
                 self.carts
                     .iter()
@@ -600,6 +601,7 @@ impl Game<'_> {
             return;
         }
         let player = g.uuid;
+        let rider = g.entity_id as u32;
         let owner = host.hub.singleplayer_owner == Some(player);
         let allow_flight = host.hub.config.allow_flight;
         let good = g.vehicle_good;
@@ -899,14 +901,14 @@ impl Game<'_> {
             self.boat_fall(&self.boats[i], resolved.y)
         };
         self.boats.update(i, |b| b.fall_distance = fall);
-        let seat = self.player_boat_seat(i);
-        let Some(host) = self.lan.as_mut() else {
-            return;
-        };
-        host.hub.guests.update(gi, |g| {
-            g.previous_position = g.position;
-            g.position = [seat.x, seat.y, seat.z];
-        });
+        if let Some(seat) = self.guest_boat_seat(i, rider)
+            && let Some(host) = self.lan.as_mut()
+        {
+            host.hub.guests.update(gi, |g| {
+                g.previous_position = g.position;
+                g.position = seat.components();
+            });
+        }
         self.notify_vehicle_driver_move(conn, player, old, target);
     }
 
@@ -1040,7 +1042,8 @@ mod controller_tests {
     /// (`getControllingPassenger`), whichever joined the server first. Its
     /// client hears it sits first, and only its moves count; the second
     /// seat's client, which still sends where it sees the boat, used to put
-    /// the boat back every tick (#11541).
+    /// the boat back every tick (#11541). Both server bodies follow distinct
+    /// attachment points even though their guest rows are in the opposite order.
     #[test]
     #[ignore = "daily"]
     fn the_first_rider_in_drives_the_boat() {
@@ -1162,6 +1165,16 @@ mod controller_tests {
             on_ground: true,
         };
         game.lan = Some(host);
+        game.guest_boarded(2, None);
+        let rider_position =
+            |game: &Game<'_>, conn| game.lan.as_ref().unwrap().hub.guest(conn).unwrap().position;
+        let rear = f64::from(-0.6_f32);
+        let front = f64::from(0.2_f32);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        game.guest_vehicle_tick(2);
+        game.guest_vehicle_tick(3);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        assert_eq!(rider_position(&game, 3)[2], start.z + front);
         game.guest_move_vehicle(2, &move_to(start.x + 0.3));
         assert_eq!(
             game.boats[0].position, start,
@@ -1173,6 +1186,10 @@ mod controller_tests {
             "the driver moves the boat: {:?}",
             game.boats[0].position
         );
+        game.guest_vehicle_tick(2);
+        assert_eq!(rider_position(&game, 2)[0], start.x + 0.3);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        assert_eq!(rider_position(&game, 3)[2], start.z + front);
         // handleMoveVehicle's `vehicle.move` runs AbstractBoat.checkFallDamage:
         // a boat that lands on the ground (a fall loaded from its save, here)
         // has no fall left.
