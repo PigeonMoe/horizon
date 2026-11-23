@@ -575,10 +575,24 @@ impl Levels {
         self.parked.get(&dim).map(|level| &level.border)
     }
 
-    pub(super) fn parked_has_dragon(&self, dim: Dim) -> bool {
+    pub(super) fn parked_dragon_unavailable(&self, dim: Dim) -> bool {
         self.parked
             .get(&dim)
-            .is_some_and(|level| level.dragon.as_ref().is_some())
+            .is_some_and(|level| !level.dragon.can_install(None))
+    }
+
+    pub(super) fn parked_dragon_arrival_reserved(&self, dim: Dim) -> bool {
+        self.parked
+            .get(&dim)
+            .is_some_and(|level| level.dragon.has_reserved_arrival())
+    }
+
+    pub(super) fn reserve_parked_dragon(
+        &mut self,
+        dim: Dim,
+        source: u32,
+    ) -> Option<std::sync::Arc<u32>> {
+        self.parked.get_mut(&dim)?.dragon.reserve_arrival(source)
     }
 
     pub(super) fn install_profession_save_snapshots(

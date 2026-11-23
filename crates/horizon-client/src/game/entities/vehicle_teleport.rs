@@ -90,6 +90,51 @@ pub(in crate::game) enum TeleportMotion {
     Keep,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VehicleTransfer {
+    Command,
+    Mod,
+    Rollback,
+}
+
+/// Apply an absolute Paper rollback transition to the saved vehicle tree.
+/// The source still has its attempted pose until it is removed.
+fn set_rollback_destination(tag: &mut Tag, at: Vec3, rotation: [f32; 2]) {
+    use horizon_client::entity_nbt;
+
+    let from = entity_nbt::position(tag).unwrap_or(at);
+    let before = entity_nbt::rotation(tag);
+    let Tag::Compound(fields) = tag else {
+        return;
+    };
+    let doubles = |values: [f64; 3]| {
+        Tag::List(
+            values
+                .into_iter()
+                .map(|value| Tag::Double(value.to_bits()))
+                .collect(),
+        )
+    };
+    fields.insert("Pos".into(), doubles(at.components()));
+    fields.insert("Motion".into(), doubles(Vec3::ZERO.components()));
+    fields.insert(
+        "Rotation".into(),
+        Tag::List(vec![
+            Tag::Float(rotation[0].to_bits()),
+            Tag::Float(absolute_pitch(rotation[1]).unwrap_or(before[1]).to_bits()),
+        ]),
+    );
+    if let Some(Tag::List(passengers)) = fields.get_mut(&"Passengers".into()) {
+        for passenger in passengers {
+            let position = entity_nbt::position(passenger).unwrap_or(from);
+            let child_at = passenger_destination(from, at, position);
+            let child_rotation =
+                passenger_angles(before, rotation, entity_nbt::rotation(passenger));
+            set_rollback_destination(passenger, child_at, child_rotation);
+        }
+    }
+}
+
 /// `AbstractMinecart.getKnownMovement` with `OldMinecartBehavior`: the cart's
 /// motion clamped to 0.4 either way along x and z (or zero when any component
 /// is NaN), what a teleport's `PositionMoveRotation.of(this)` carries over.
@@ -570,6 +615,13 @@ impl Game<'_> {
             // Open the destination before removing the entity.
             game.enter_level(destination)?;
             game.enter_level(source)?;
+            // A rollback carrying a dragon already owns the empty destination
+            // slot. A nested command must keep its unrelated dragon in place.
+            if matches!(target, Target::Dragon(_))
+                && game.levels.parked_dragon_arrival_reserved(destination)
+            {
+                return Ok(Some(false));
+            }
             let cooldown = game.portals.entities.get(&id).map_or(0, |s| s.cooldown);
             let Some((mut tag, state)) = game.take_lone_traveller(id) else {
                 return Ok(Some(false));
@@ -625,6 +677,45 @@ impl Game<'_> {
         turn_riders: bool,
         motion: TeleportMotion,
     ) -> horizon_client::Result<bool> {
+        let transfer = match motion {
+            TeleportMotion::Stop => VehicleTransfer::Command,
+            TeleportMotion::Keep => VehicleTransfer::Mod,
+        };
+        self.transfer_vehicle(target, destination, at, rotation, turn_riders, transfer)
+    }
+
+    pub(in crate::game) fn teleport_vehicle_rollback_across(
+        &mut self,
+        target: Target,
+        destination: Dim,
+        at: [f64; 3],
+        rotation: [f32; 2],
+    ) -> bool {
+        match self.transfer_vehicle(
+            target,
+            destination,
+            at,
+            Some(rotation),
+            true,
+            VehicleTransfer::Rollback,
+        ) {
+            Ok(moved) => moved,
+            Err(error) => {
+                log::error!("vehicle rollback into {}: {error}", destination.id());
+                false
+            }
+        }
+    }
+
+    fn transfer_vehicle(
+        &mut self,
+        target: Target,
+        destination: Dim,
+        at: [f64; 3],
+        rotation: Option<[f32; 2]>,
+        turn_riders: bool,
+        transfer: VehicleTransfer,
+    ) -> horizon_client::Result<bool> {
         let Some(root) = vehicle_id(target) else {
             return Ok(false);
         };
@@ -638,16 +729,17 @@ impl Game<'_> {
             if game.entity_travel_hook_epoch().is_none() {
                 game.check_vehicle_dragon_slot(root, destination)?;
             }
-            let command = motion == TeleportMotion::Stop;
+            let check_player_landing = transfer != VehicleTransfer::Mod;
+            let rollback = transfer == VehicleTransfer::Rollback;
             // Refused structural branches stay in the source. Command-player
             // admissions also need the final position and the dismount pose.
-            let can_travel = if command {
+            let can_travel = if check_player_landing {
                 game.command_vehicle_entities_may_travel(root, destination)
             } else {
                 game.entity_may_travel(root, destination, TravelCause::Teleport)
             };
             if !can_travel {
-                return Ok(true);
+                return Ok(!rollback);
             }
             // Open the destination before placing or taking the source tree.
             game.enter_level(destination)?;
@@ -665,7 +757,7 @@ impl Game<'_> {
             game.prepare_vehicle_transition(root);
             let tree = game.passenger_tree(root);
             let mut players = Vec::new();
-            if command {
+            if check_player_landing {
                 let from = game.target_position(target);
                 if !game.prepare_command_riders(
                     root,
@@ -681,31 +773,55 @@ impl Game<'_> {
                             .any(|&(_, _, is_player)| is_player)
                     })
                 {
-                    return Ok(true);
+                    return Ok(!rollback);
                 }
             }
-            let kept = match motion {
-                TeleportMotion::Keep => game.transition_motion(target),
-                TeleportMotion::Stop => None,
-            };
-            let from = game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders);
-            if let Some(from) = from
-                && game.options.dedicated.is_some()
-            {
-                game.native_entity_teleport(game.dim.id(), root, from, at);
-            }
-            match kept {
-                Some(kept) => game.restore_transition_motion(target, kept),
-                None => game.teleport_stops(target),
+            if !rollback {
+                let kept = (transfer == VehicleTransfer::Mod)
+                    .then(|| game.transition_motion(target))
+                    .flatten();
+                let from =
+                    game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders);
+                if let Some(from) = from
+                    && game.options.dedicated.is_some()
+                {
+                    game.native_entity_teleport(game.dim.id(), root, from, at);
+                }
+                match kept {
+                    Some(kept) => game.restore_transition_motion(target, kept),
+                    None => game.teleport_stops(target),
+                }
             }
             let tree = game.passenger_tree(root);
+            // Source leave hooks can run commands in the destination before
+            // its join hooks. Reserve the singleton until the captured dragon
+            // has been restored, including across admission of saved riders.
+            let dragon_arrival = if rollback
+                && let Some(dragon) = game.dragon.as_ref().filter(|d| tree.contains(&d.id))
+            {
+                Some(
+                    game.levels
+                        .reserve_parked_dragon(destination, dragon.id)
+                        .ok_or("the destination ender dragon slot is occupied")?,
+                )
+            } else {
+                None
+            };
             // NBT and runtime ownership come from the same ordered object walk,
             // including off-level mobs and riders of every other live kind.
-            let (tag, state) = game
+            let (mut tag, state) = game
                 .take_vehicle_tree_transfer(root)
                 .ok_or("missing vehicle object tree")?;
+            if rollback {
+                let [x, y, z] = at;
+                set_rollback_destination(
+                    &mut tag,
+                    Vec3::new(x, y, z),
+                    rotation.expect("rollback rotation"),
+                );
+            }
             // A command runs with its source player swapped out of the hub.
-            if !command
+            if !check_player_landing
                 && game.riding.is_some_and(|id| tree.contains(&id))
                 && let (Some(conn), Some(player)) = (game.lan_acting, game.player.as_ref())
             {
@@ -717,7 +833,7 @@ impl Game<'_> {
                     origin: None,
                 });
             }
-            if !command && let Some(host) = game.lan.as_ref() {
+            if !check_player_landing && let Some(host) = game.lan.as_ref() {
                 for guest in &host.hub.guests {
                     if Some(guest.conn) != game.lan_acting
                         && guest.vehicle.is_some_and(|id| tree.contains(&id))
@@ -743,9 +859,9 @@ impl Game<'_> {
             game.enter_level(destination)?;
             // restoreFrom reloads saved state into fresh entities, rather than
             // retaining navigation paths or goals from the old level.
-            let restored_objects = game
-                .restore_vehicle_tree_state(tag, state)
-                .ok_or("could not restore vehicle tree")?;
+            let restored_objects = game.restore_vehicle_tree_state(tag, state);
+            drop(dragon_arrival);
+            let restored_objects = restored_objects.ok_or("could not restore vehicle tree")?;
             // AbstractHorse.addPassenger snaps a reattached passenger to the
             // new horse's getViewYRot(0) / getViewXRot(0). A fresh living
             // entity's previous head yaw is still zero, before its first tick.
@@ -799,7 +915,7 @@ impl Game<'_> {
         root: u32,
         destination: super::Dim,
     ) -> horizon_client::Result<()> {
-        if self.levels.parked_has_dragon(destination)
+        if self.levels.parked_dragon_unavailable(destination)
             && self
                 .dragon
                 .as_ref()

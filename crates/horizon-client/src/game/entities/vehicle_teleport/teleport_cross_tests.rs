@@ -333,20 +333,51 @@ fn a_conflicting_dragon_destination_still_accepts_the_root_after_rider_veto() {
 #[test]
 #[ignore = "daily"]
 fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
+    check_cross_dimension_vehicle(CrossDimensionVehicle::Command);
+}
+
+#[test]
+#[ignore = "daily"]
+fn cross_dimension_vehicle_rollback_moves_the_root_and_only_the_admitted_rider() {
+    check_cross_dimension_vehicle(CrossDimensionVehicle::Rollback);
+}
+
+#[test]
+#[ignore = "daily"]
+fn cross_dimension_vehicle_rollback_refusal_recovers_only_the_denied_rider() {
+    check_cross_dimension_vehicle(CrossDimensionVehicle::RefusedRollback);
+}
+
+#[test]
+#[ignore = "daily"]
+fn cross_dimension_vehicle_rollback_change_keeps_same_world_rewrites_local() {
+    check_cross_dimension_vehicle(CrossDimensionVehicle::LocalRollback);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossDimensionVehicle {
+    Command,
+    Rollback,
+    RefusedRollback,
+    LocalRollback,
+}
+
+fn check_cross_dimension_vehicle(route: CrossDimensionVehicle) {
     use crate::game::{
-        lan_actions::GuestCommand, native_entity_refs::tests::run_on_guest_stack,
+        commands::Target, lan_actions::GuestCommand, native_entity_refs::tests::run_on_guest_stack,
         native_guest_turn_tests::with_guests,
     };
     use horizon_core::geometry::Vec3;
     use mod_api::{
-        EntityMountEvent, EntityTravelToDimensionEvent, Flow, Hooks, ModEntry,
-        PlayerPositionCommittedEvent, PlayerTeleportPreEvent, ServerHost,
+        EntityMountEvent, EntityTeleportPreEvent, EntityTravelToDimensionEvent, Flow, Hooks, Host,
+        Identifier, ModEntry, PlayerPositionCommittedEvent, PlayerTeleportPreEvent, ServerHost,
     };
     use std::sync::Mutex;
 
     const DENIED: u128 = 12;
     const ACCEPTED: u128 = 13;
     const ARRIVAL: [f64; 3] = [10.5, 72.0, 10.5];
+    const RETURN: [f64; 3] = [3.5, 64.0, 3.5];
     const BOAT: u32 = 900;
     const CAMEL: u32 = 901;
 
@@ -361,15 +392,39 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
         dismounted: Vec<u32>,
         proposed: Vec<Move>,
         committed: Vec<Move>,
+        rollback_redirects: usize,
     }
-    struct Protection(Arc<Mutex<Seen>>);
+    struct Protection(Arc<Mutex<Seen>>, CrossDimensionVehicle);
     #[mod_api::__subscriptions]
     impl Hooks for Protection {
         fn entity_travel_to_dimension(
             &self,
             _: &mut dyn ServerHost,
-            _: &mut EntityTravelToDimensionEvent,
+            event: &mut EntityTravelToDimensionEvent,
         ) -> Flow {
+            if self.1 == CrossDimensionVehicle::RefusedRollback && event.entity.id() == BOAT {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn entity_teleport_pre(
+            &self,
+            _: &dyn Host,
+            event: &mut EntityTeleportPreEvent<'_>,
+        ) -> Flow {
+            assert_ne!(self.1, CrossDimensionVehicle::Command);
+            assert_eq!(event.entity, BOAT);
+            assert_eq!(event.dimension, Dim::Overworld.id());
+            assert_eq!(event.cause, "vehicle_rollback");
+            assert_eq!(*event.to, RETURN);
+            if self.1 != CrossDimensionVehicle::LocalRollback {
+                *event.to_dimension = Identifier::parse(Dim::Nether.id()).unwrap();
+            }
+            *event.to = ARRIVAL;
+            *event.to_rotation = [30.0, 0.0];
+            self.0.lock().unwrap().rollback_redirects += 1;
             Flow::Continue
         }
 
@@ -426,13 +481,13 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
         }
     }
 
-    run_on_guest_stack(|| {
+    run_on_guest_stack(move || {
         for nested in [false, true] {
             let seen = Arc::new(Mutex::new(Seen::default()));
             mod_platform::testing::with_mods(
                 vec![ModEntry::new(
                     "passenger_teleport_protection",
-                    Box::new(Protection(seen.clone())),
+                    Box::new(Protection(seen.clone(), route)),
                 )]
                 .into(),
                 || {
@@ -457,6 +512,7 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
                         let origin = Vec3::new(6.5, 64.0, 6.5);
                         let boat = crate::game::boats::Boat::new(BOAT, "oak".into(), origin, 0.0);
                         game.boats.push(boat);
+                        let hull_uuid = game.uuid_for(BOAT);
                         let hull = game.entity(BOAT).unwrap();
                         let mount = if nested {
                             let kind = game.res.mob_types().get("minecraft:camel").unwrap().clone();
@@ -504,14 +560,60 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
                             expected_move(uuid, from)
                         });
                         assert_ne!(expected[0].to, expected[1].to);
-                        assert!(game.run_guest_command(GuestCommand {
-                        conn: ACCEPTED as u32,
-                        command: "execute in minecraft:the_nether run tp @e[type=minecraft:oak_boat,limit=1] 10.5 72 10.5".into(),
-                        permission: 4,
-                        integrated: true,
-                        quiet: false,
-                    }));
+                        if route == CrossDimensionVehicle::Command {
+                            assert!(game.run_guest_command(GuestCommand {
+                                conn: ACCEPTED as u32,
+                                command: "execute in minecraft:the_nether run tp @e[type=minecraft:oak_boat,limit=1] 10.5 72 10.5".into(),
+                                permission: 4,
+                                integrated: true,
+                                quiet: false,
+                            }));
+                        } else {
+                            let [x, y, z] = RETURN;
+                            let recovery = game.edit_vehicle_rollback(
+                                BOAT,
+                                DENIED,
+                                (origin, [0.0; 2]),
+                                (Vec3::new(x, y, z), [0.0; 2]),
+                            );
+                            assert!(game.finish_vehicle_rollback(Target::Boat(BOAT), recovery));
+                        }
                         game.run_level_teleports();
+                        if route == CrossDimensionVehicle::LocalRollback {
+                            let denied = game.command_guest(DENIED as u32).unwrap();
+                            assert_eq!(denied.dimension, Dim::Overworld.id());
+                            assert_eq!(denied.vehicle, Some(BOAT));
+                            let accepted = game.command_guest(ACCEPTED as u32).unwrap();
+                            assert_eq!(accepted.dimension, Dim::Overworld.id());
+                            assert_eq!(
+                                accepted.vehicle,
+                                Some(mount.map_or(BOAT, |mount| mount.id()))
+                            );
+                            assert_eq!(game.boats[0].position.components(), ARRIVAL);
+                            assert_eq!(game.boats[0].yaw, 30.0);
+                            let seen = seen.lock().unwrap();
+                            assert_eq!(seen.rollback_redirects, 1);
+                            assert!(seen.proposed.is_empty() && seen.committed.is_empty());
+                            return;
+                        }
+                        if route == CrossDimensionVehicle::RefusedRollback {
+                            let denied = game.command_guest(DENIED as u32).unwrap();
+                            assert_eq!(denied.dimension, Dim::Overworld.id());
+                            assert_eq!((denied.position, denied.vehicle), (RETURN, None));
+                            let accepted = game.command_guest(ACCEPTED as u32).unwrap();
+                            assert_eq!(accepted.dimension, Dim::Overworld.id());
+                            assert_ne!(accepted.position, RETURN);
+                            if !nested {
+                                assert_eq!(accepted.vehicle, None);
+                            }
+                            assert_eq!(game.boats[0].position, origin);
+                            game.enter_level(Dim::Nether).unwrap();
+                            assert!(game.boats.is_empty());
+                            let seen = seen.lock().unwrap();
+                            assert_eq!(seen.rollback_redirects, 1);
+                            assert!(seen.proposed.is_empty() && seen.committed.is_empty());
+                            return;
+                        }
                         if nested {
                             let [x, y, z] = seen.lock().unwrap().proposed[1].from;
                             expected[1] = expected_move(ACCEPTED, Vec3::new(x, y, z));
@@ -526,8 +628,13 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
                         let new_mount = accepted.vehicle.unwrap();
                         assert!(game.boats.is_empty());
                         game.enter_level(Dim::Nether).unwrap();
+                        assert_eq!(game.boats.len(), 1);
                         let new_hull = game.boats[0].id;
+                        assert_eq!(game.uuid_for(new_hull), hull_uuid);
                         assert_eq!(game.boats[0].position.components(), ARRIVAL);
+                        if route == CrossDimensionVehicle::Rollback {
+                            assert_eq!(game.boats[0].yaw, 30.0);
+                        }
                         assert_eq!(game.seated_passengers(new_hull).len(), 1);
                         if nested {
                             assert_eq!(
@@ -548,6 +655,10 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
                             !game.run_command("execute if entity @a[name=guest12,distance=..128]")
                         );
                         let seen = seen.lock().unwrap();
+                        assert_eq!(
+                            seen.rollback_redirects,
+                            usize::from(route != CrossDimensionVehicle::Command)
+                        );
                         let dismounted = if nested {
                             [DENIED, ACCEPTED]
                         } else {
@@ -560,6 +671,163 @@ fn cross_dimension_vehicle_tp_vetoes_one_player_and_commits_the_other_once() {
                 },
             );
         }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn cross_dimension_vehicle_rollback_reserves_the_dragon_during_source_leave() {
+    use crate::game::{commands::Target, native_guest_turn_tests::with_guests};
+    use horizon_core::geometry::Vec3;
+    use horizon_guest_stack::run_on_guest_stack;
+    use mod_api::{
+        EntityJoinLevelEvent, EntityLeaveLevelEvent, EntityTeleportPreEvent, Flow, Hooks, Host,
+        Identifier, ModEntry, ServerHost,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Seen {
+        transitions: Vec<(bool, String)>,
+        summons: Vec<bool>,
+    }
+
+    struct Rival(Arc<Mutex<Seen>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Rival {
+        fn entity_teleport_pre(
+            &self,
+            _: &dyn Host,
+            event: &mut EntityTeleportPreEvent<'_>,
+        ) -> Flow {
+            if event.cause == "vehicle_rollback" {
+                *event.to_dimension = Identifier::parse(Dim::Nether.id()).unwrap();
+            }
+            Flow::Continue
+        }
+
+        fn entity_leave_level(
+            &self,
+            host: &mut dyn ServerHost,
+            event: &mut EntityLeaveLevelEvent<'_>,
+        ) {
+            if event.dimension != Dim::Overworld.id() {
+                return;
+            }
+            self.0
+                .lock()
+                .unwrap()
+                .transitions
+                .push((false, event.kind.into()));
+            if event.kind == "minecraft:oak_boat" {
+                let ordinary = host.commands().run_command(
+                    "execute in minecraft:the_nether run summon minecraft:ender_dragon 15 65 15",
+                );
+                let with_nbt = host.commands().run_command(
+                    "execute in minecraft:the_nether run summon minecraft:ender_dragon 15 65 15 {}",
+                );
+                let control = host.commands().run_command(
+                    "execute in minecraft:the_nether run summon minecraft:pig 15 65 15 {}",
+                );
+                self.0
+                    .lock()
+                    .unwrap()
+                    .summons
+                    .extend([ordinary, with_nbt, control]);
+            }
+        }
+
+        fn entity_join_level(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut EntityJoinLevelEvent<'_>,
+        ) -> Flow {
+            if event.dimension == Dim::Nether.id() {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .transitions
+                    .push((true, event.kind.into()));
+            }
+            Flow::Continue
+        }
+    }
+
+    run_on_guest_stack(|| {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new("dragon_rival", Box::new(Rival(seen.clone())))].into(),
+            || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    // The fixture inserts guests 12 and 13 without allocating their ids.
+                    game.next_entity = 1000;
+                    game.build_registries();
+                    game.set_allow_commands(true);
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                    game.block_ticks
+                        .add_empty_chunk(ChunkPos::new(0, 0))
+                        .unwrap();
+                    if game.ui.difficulty == 0 {
+                        assert!(game.run_command("difficulty normal"));
+                    }
+                    assert!(game.run_command(concat!(
+                    "summon minecraft:oak_boat 1 64 1 ",
+                    "{Passengers:[{id:\"minecraft:cow\",Passengers:[{id:\"minecraft:ender_dragon\"}]}]}"
+                )));
+                    let boat = game.boats[0].id;
+                    let boat_uuid = game.uuid_for(boat);
+                    let dragon = game.dragon.as_ref().unwrap().id;
+                    let dragon_uuid = game.uuid_for(dragon);
+                    let [cow] = game.ordered_live_passengers(boat).try_into().unwrap();
+                    assert_eq!(game.ordered_live_passengers(cow), [dragon]);
+
+                    let recovery = game.edit_vehicle_rollback(
+                        boat,
+                        0,
+                        (game.boats[0].position, [0.0; 2]),
+                        (Vec3::new(8.5, 72.0, 8.5), [0.0; 2]),
+                    );
+                    assert!(game.finish_vehicle_rollback(Target::Boat(boat), recovery));
+                    assert_eq!(game.dim, Dim::Overworld);
+                    assert!(game.boats.is_empty() && game.dragon.is_none());
+                    game.enter_level(Dim::Nether).unwrap();
+                    assert_eq!(game.boats.len(), 1);
+                    let boat = game.boats[0].id;
+                    assert_eq!(game.uuid_for(boat), boat_uuid);
+                    let [cow] = game.ordered_live_passengers(boat).try_into().unwrap();
+                    let dragon = game.dragon.as_ref().unwrap().id;
+                    assert_eq!(game.uuid_for(dragon), dragon_uuid);
+                    assert_eq!(game.ordered_live_passengers(cow), [dragon]);
+                    assert!(!game.dragon.has_reserved_arrival());
+                    {
+                        let seen = seen.lock().unwrap();
+                        assert_eq!(seen.summons, [false, false, true]);
+                        assert_eq!(
+                            seen.transitions
+                                .iter()
+                                .map(|(join, kind)| (*join, kind.as_str()))
+                                .collect::<Vec<_>>(),
+                            [
+                                (false, "minecraft:oak_boat"),
+                                (true, "minecraft:pig"),
+                                (false, "minecraft:cow"),
+                                (false, "minecraft:ender_dragon"),
+                                (true, "minecraft:ender_dragon"),
+                                (true, "minecraft:cow"),
+                                (true, "minecraft:oak_boat"),
+                            ],
+                        );
+                    }
+                    game.discard_resident_dragon();
+                    assert!(game.native_run_command(
+                    "execute in minecraft:the_nether run summon minecraft:ender_dragon 15 65 15 {}"
+                ));
+                })
+            },
+        );
     });
 }
 

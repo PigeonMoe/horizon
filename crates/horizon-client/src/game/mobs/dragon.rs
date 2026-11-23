@@ -4802,7 +4802,7 @@ impl Game<'_> {
     /// so it can be spawned in any dimension. Horizon keeps one dragon per level, as `/summon`
     /// and loading do: with one already there, nothing spawns and the egg stays.
     pub(super) fn spawn_dragon_spawned(&mut self, at: [f64; 3], site: SpawnSite) -> Option<u32> {
-        if self.dragon.is_some() {
+        if !self.dragon.can_install(None) {
             return None;
         }
         let position = Vec3::new(at[0], at[1], at[2]);

@@ -151,14 +151,19 @@ pub(super) struct TransferredEntityState {
     initialized: bool,
     accepted_hit: Option<std::sync::Arc<horizon_client::health::AcceptedHit>>,
     died: bool,
-    /// The source id whose attachment map a transaction open at the take kept: the
+    source: u32,
+    /// A transaction open at the take kept this object's attachment map: the
     /// arrival moves that keeping to the new id.
-    journaled: Option<u32>,
+    journaled: bool,
     /// Filled by an abort that comes before the arrival: the contents the arrival puts back.
     rollback: Option<super::transactions::ArrivalRollback>,
 }
 
 impl TransferredEntityState {
+    pub(super) fn source(&self) -> u32 {
+        self.source
+    }
+
     /// Move the single accepted-hit owner onto a reconstructed living body.
     pub(in crate::game) fn restore_mob(&mut self, mob: &mut horizon_client::mobs::Mob) {
         if mob.health > 0.0 {
@@ -178,13 +183,13 @@ impl Game<'_> {
     /// wherever the map is, and the source level's index keeps its rows until the root closes
     /// (`defer_departure`). Travel itself is not undone, so the map stays with the entity.
     pub(super) fn take_transferred_entity_state(&mut self, id: u32) -> TransferredEntityState {
-        let journaled = (!self.transactions.is_empty()).then(|| {
+        let journaled = !self.transactions.is_empty();
+        let rollback = journaled.then(|| {
             self.journal_attachments(Holder::Entity(id));
-            id
+            self.journal_in_flight(id)
         });
-        let rollback = journaled.map(|id| self.journal_in_flight(id));
         let mut attachments = self.entity_attachments.remove(&id);
-        if journaled.is_some() {
+        if journaled {
             self.defer_departure(id, attachments.as_mut());
         } else if let Some(map) = &mut attachments {
             map.unbind_index();
@@ -197,6 +202,7 @@ impl Game<'_> {
             attachments,
             accepted_hit,
             died,
+            source: id,
             journaled,
             rollback,
             initialized: self
@@ -214,8 +220,8 @@ impl Game<'_> {
         state: TransferredEntityState,
     ) {
         self.journal_arrival(id);
-        if let Some(source) = state.journaled {
-            self.journal_travel(source, id);
+        if state.journaled {
+            self.journal_travel(state.source, id);
         }
         if state.died {
             self.died.insert(id);

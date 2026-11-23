@@ -1548,7 +1548,11 @@ impl Game<'_> {
                 (c.position, [c.yaw, c.pitch]),
                 (c.previous, [c.previous_yaw, c.previous_pitch]),
             );
-            if !matches!(rider.rollback, Some(VehicleRollback::Eject { .. })) {
+            if !rider
+                .rollback
+                .as_ref()
+                .is_some_and(VehicleRollback::keeps_attempted_pose)
+            {
                 restore_pose(c);
             }
         }

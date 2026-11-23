@@ -962,7 +962,10 @@ impl Game<'_> {
                     (b.previous, [b.previous_yaw, b.pitch]),
                 );
             }
-            if !matches!(recovery, Some(VehicleRollback::Eject { .. })) {
+            if !recovery
+                .as_ref()
+                .is_some_and(VehicleRollback::keeps_attempted_pose)
+            {
                 b.position = b.previous;
                 b.yaw = b.previous_yaw;
             }
