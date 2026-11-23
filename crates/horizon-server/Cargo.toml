@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Host a Horizon server: server.toml, the CLI and the supervisor that runs the game headless (docs/server.md)"
 
+[features]
+pm-sync-mysql = ["horizon-platform/pm-sync-mysql"]
+
 [dependencies]
 horizon-platform = { path = "../horizon-platform", features = ["server-files", "world"] }
 # Shared server configuration and launch command used by the native-mod launcher.

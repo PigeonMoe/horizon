@@ -425,6 +425,27 @@ receipts. A destination reply with `already_committed` and `currently_placed: fa
 commit and leaves the current connection alone. The durable source fence survives restart and remains effective
 until the coordinator completes ownership recovery. The legacy freeze timer and `player-release` apply to version 1.
 
+**Released Paper PM-Sync snapshots.** A server supervisor built with the `pm-sync-mysql` Cargo feature
+can receive a released Paper snapshot through `horizon-server pm-sync-arrival prepare` and
+`horizon-server pm-sync-arrival commit`. Run these on the destination host using its ordinary `--dir`.
+Set `HORIZON_PM_SYNC_DATABASE_URL` to the Paper database URL and `HORIZON_PM_SYNC_TABLE_PREFIX` to the
+existing table prefix if it differs from `pmsync_`.
+
+The proxy adapter calls `prepare` after it receives the departure acknowledgement from the player's current
+Paper backend and holds the forwarded connection on Horizon with `player-expect`. It sends one JSON object
+through stdin containing `player` and `owner_token` as UUIDs, `handover` as a 32-digit lowercase hexadecimal
+id, `source` as the approved Paper server id, the positive SQL `revision`, the lowercase `snapshot_sha256`,
+and `compression` (`json` or `snappy`). Keep the owner token and hand-over id across retries. The SQL claim
+requires the exact released bytes and leaves the approved destination holding the lease. `prepare` puts the
+bytes in the world's private spool and returns the engine's `record_sha256` and `request_sha256`.
+
+Call `commit` with the same JSON plus `prepared`, an object containing those two digests. The supervisor
+checks the same live SQL lease while the game stages and confirms the arrival. The game writes the native
+player file and its receipt before placement. A lost commit acknowledgement is reconciled by retrying the
+same request. Use `currently_placed` to distinguish an active connection from a historical receipt. The
+proxy keeps the lease until placement is resolved. A control timeout alone cannot tell it whether the game
+committed the player file.
+
 **A server that stops.** From the `/stop` command (the console's, a player's or the control endpoint's) or a stop
 signal on, `player-expect`, `player-import` and `player-confirm` are refused `{"error": "the server is stopping"}`: a
 player must not arrive on a server that is about to close. The proxy drops the held player there and aborts on the

@@ -276,6 +276,7 @@ impl Game<'_> {
             "ok": true,
             "prepared": true,
             "placed": false,
+            "paper_snapshot_sha256": digest_hex(request.digest),
             "request": native,
                 "paper_health": {
                 "initial": projected.health.initial,
@@ -448,6 +449,7 @@ mod tests {
                 assert_eq!(prepared["prepared"], true, "{prepared}");
                 assert_eq!(prepared["placed"], false);
                 assert_eq!(prepared["authority_revision"], 9);
+                assert_eq!(prepared["paper_snapshot_sha256"], digest_hex(digest));
                 assert_eq!(prepared["paper_health"]["after_bridges"], 87.25);
                 assert!(prepared.get("request").is_none());
                 assert_eq!(

@@ -19,6 +19,8 @@ mod management_schema;
 mod management_tls;
 mod mcp;
 mod panel;
+#[cfg(feature = "pm-sync-mysql")]
+mod pm_sync;
 mod process;
 mod prune;
 mod query;
@@ -124,6 +126,8 @@ pub fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         None | Some("help" | "-h" | "--help") => {
             print!("{HELP}");
+            #[cfg(feature = "pm-sync-mysql")]
+            println!("PM-Sync: pm-sync-arrival prepare|commit reads a proxy request from stdin.");
             Ok(())
         }
         Some("version" | "-V" | "--version") => {
@@ -141,6 +145,8 @@ pub fn main() -> ExitCode {
         Some("restart") => cli::stop(&dir, true),
         Some("status") => cli::status(&dir, args[1..].iter().any(|a| a == "--json")),
         Some("cmd") => cli::command(&dir, &args[1..]),
+        #[cfg(feature = "pm-sync-mysql")]
+        Some("pm-sync-arrival") => pm_sync::command(&dir, &args[1..]),
         Some("report") => cli::report(&dir, &args[1..]),
         Some("logs") => logs(&dir, &args[1..]),
         Some("console") => console::run(&dir),

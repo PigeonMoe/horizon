@@ -282,6 +282,10 @@ fn paper_release_can_only_be_claimed_by_one_exact_route() {
         store.current_owner_revision(PLAYER, EAST, "east").unwrap(),
         None
     );
+    assert!(matches!(
+        store.with_released_claim(&east, || panic!("the release has not been claimed")),
+        Err(StoreError::Fenced)
+    ));
     let mut sql = connect();
     sql.query_drop(format!(
         "CREATE TRIGGER `{CLAIM_SCHEMA}fail_receipt` BEFORE INSERT ON `{CLAIM_SCHEMA}checkpoint_receipts` \
@@ -325,6 +329,29 @@ fn paper_release_can_only_be_claimed_by_one_exact_route() {
     assert_eq!(lease.revision, 1);
     assert_eq!(lease.snapshot.as_deref(), Some(snapshot.as_slice()));
     assert_eq!(open().claim_released_snapshot(winner).unwrap().revision, 1);
+    let mut contender = connect();
+    contender
+        .query_drop("SET SESSION innodb_lock_wait_timeout=1")
+        .unwrap();
+    let checkpoint_lock =
+        format!("SELECT revision FROM `{CLAIM_SCHEMA}state` WHERE player_uuid=? FOR UPDATE");
+    assert_eq!(
+        open()
+            .with_released_claim(winner, || {
+                let mut raced = contender
+                    .start_transaction(mysql::TxOpts::default())
+                    .unwrap();
+                let blocked: Result<Option<i64>, _> =
+                    raced.exec_first(&checkpoint_lock, (uuid_string(PLAYER),));
+                assert!(
+                    matches!(blocked, Err(mysql::Error::MySqlError(error)) if error.code == 1205)
+                );
+                raced.rollback().unwrap();
+                "engine receipt"
+            })
+            .unwrap(),
+        "engine receipt"
+    );
     assert!(matches!(
         open().claim_released_snapshot(&ReleasedClaim {
             source: "other-paper",
@@ -367,6 +394,10 @@ fn paper_release_can_only_be_claimed_by_one_exact_route() {
     );
     assert!(matches!(
         open().claim_released_snapshot(winner),
+        Err(StoreError::Fenced)
+    ));
+    assert!(matches!(
+        open().with_released_claim(winner, || panic!("the player has a newer revision")),
         Err(StoreError::Fenced)
     ));
     assert_eq!(

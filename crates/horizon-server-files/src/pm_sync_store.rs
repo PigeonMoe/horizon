@@ -3,7 +3,7 @@
 use std::fmt;
 
 use horizon_protocol::crypto::uuid_string;
-use mysql::{Conn, Transaction, TxOpts, prelude::Queryable};
+use mysql::{Conn, Opts, Transaction, TxOpts, prelude::Queryable};
 use sha2::{Digest, Sha256};
 
 use crate::{pm_sync_envelope::SnapshotEnvelope, transfer_routes::valid_backend_id};
@@ -105,6 +105,12 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn connect(url: &str, prefix: &str, max_snapshot_bytes: usize) -> Result<Self, StoreError> {
+        let options =
+            Opts::from_url(url).map_err(|_| StoreError::Invalid("invalid PM-Sync database URL"))?;
+        Self::open(Conn::new(options)?, prefix, max_snapshot_bytes)
+    }
+
     /// Open the existing Java schema on a connection supplied by the coordinator.
     /// Keeping all three tables transactional is part of the ownership contract.
     pub fn open(
@@ -194,18 +200,7 @@ impl Store {
         &mut self,
         claim: &ReleasedClaim<'_>,
     ) -> Result<Lease, StoreError> {
-        if claim.player == 0
-            || claim.request == 0
-            || claim.token == 0
-            || claim.revision < 1
-            || claim.source == claim.backend
-            || !valid_sql_backend(claim.source)
-            || !valid_sql_backend(claim.backend)
-        {
-            return Err(StoreError::Invalid(
-                "invalid PM-Sync released snapshot claim",
-            ));
-        }
+        check_claim_identity(claim)?;
         let digest = claim_digest(claim);
         let (player, request, token) = (
             uuid_string(claim.player),
@@ -261,6 +256,40 @@ impl Store {
             revision: claim.revision,
             snapshot: Some(snapshot),
         })
+    }
+
+    /// Run a destination operation only while the exact released claim still owns the row.
+    /// The callback must be bounded and must not call back into the store for this owner.
+    /// The transaction never changes the player's SQL state. If an external operation
+    /// loses its acknowledgement, reconcile its own receipt before releasing the lease.
+    pub fn with_released_claim<T>(
+        &mut self,
+        claim: &ReleasedClaim<'_>,
+        run: impl FnOnce() -> T,
+    ) -> Result<T, StoreError> {
+        check_claim_identity(claim)?;
+        let (player, request, token) = (
+            uuid_string(claim.player),
+            uuid_string(claim.request),
+            uuid_string(claim.token),
+        );
+        let mut transaction = self.connection.start_transaction(TxOpts::default())?;
+        let current = lock_head(&mut transaction, &self.state, &player)?;
+        if !current.matches(&token, claim.backend, claim.revision)
+            || !matches_receipt(
+                &mut transaction,
+                &self.receipts,
+                &player,
+                &request,
+                &claim_digest(claim),
+                claim.revision,
+            )?
+        {
+            return Err(StoreError::Fenced);
+        }
+        let result = run();
+        transaction.commit()?;
+        Ok(result)
     }
 
     /// Read the revision of an exact live lease without acquiring one. This
@@ -630,6 +659,22 @@ fn operation_digest(change: &Handover<'_>) -> String {
     }
     digest.update(Sha256::digest(change.snapshot));
     format!("{:x}", digest.finalize())
+}
+
+fn check_claim_identity(claim: &ReleasedClaim<'_>) -> Result<(), StoreError> {
+    if claim.player == 0
+        || claim.request == 0
+        || claim.token == 0
+        || claim.revision < 1
+        || claim.source == claim.backend
+        || !valid_sql_backend(claim.source)
+        || !valid_sql_backend(claim.backend)
+    {
+        return Err(StoreError::Invalid(
+            "invalid PM-Sync released snapshot claim",
+        ));
+    }
+    Ok(())
 }
 
 fn claim_digest(claim: &ReleasedClaim<'_>) -> String {
