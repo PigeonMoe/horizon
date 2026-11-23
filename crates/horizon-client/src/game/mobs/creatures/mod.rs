@@ -4277,6 +4277,13 @@ impl Game<'_> {
         };
         attack.projectile = self.combat.attack().projectile;
         attack.direct = self.combat.attack().direct;
+        // A spit has a direct projectile even though its damage type is
+        // outside #is_projectile. Keep its scoped policy when rebuilding the hit.
+        if damage_type == "minecraft:spit" && attack.projectile.is_some() {
+            attack
+                .policy_player
+                .clone_from(&self.combat.attack().policy_player);
+        }
         attack.position = from;
         attack.projectile_weapon = self.combat.attack().projectile_weapon.clone();
         if let Some(a) = attacker.or(owner) {
@@ -6388,10 +6395,12 @@ impl Game<'_> {
             (ProjectileKind::LlamaSpit, Hit::Entity { .. }) if p.owner.is_none() => {}
             (ProjectileKind::LlamaSpit, Hit::Entity { who, .. }) => match who {
                 Who::Player => {
-                    self.mob_hits_player(
+                    let attacker = self.combat.attack().attacker;
+                    self.mob_hits_player_caused(
                         1.0,
                         [p.previous.x, p.previous.y, p.previous.z],
                         "minecraft:spit",
+                        (attacker > 0).then_some(attacker as u32),
                     );
                 }
                 Who::Mob(id) => {

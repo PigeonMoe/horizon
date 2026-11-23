@@ -16,6 +16,7 @@ impl Game<'_> {
             ProjectileKind::SmallFireball | ProjectileKind::LargeFireball { .. } => {
                 DamageKind::Fireball
             }
+            ProjectileKind::LlamaSpit => DamageKind::Spit,
             _ => DamageKind::Thrown,
         }
     }
@@ -27,6 +28,11 @@ impl Game<'_> {
             Some(Who::Mob(entity)) => self.attack_of(entity as i32),
             None => Attack::default(),
         };
+        // Paper names the spit as the damager. A mob shooter does not
+        // inherit the permissions of its tamer.
+        if shot.kind == ProjectileKind::LlamaSpit && matches!(shot.owner, Some(Who::Mob(_))) {
+            attack.policy_player = None;
+        }
         Self::set_projectile_attack(&mut attack, shot);
         attack
     }
