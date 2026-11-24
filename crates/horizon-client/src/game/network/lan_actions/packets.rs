@@ -1146,7 +1146,7 @@ impl Game<'_> {
                         return None;
                     }
                     // The block's item, a part's in its place, then the block
-                    // entity's data on whichever won (addBlockDataToItem).
+                    // entity data unless a creative listener supplied a complete stack.
                     let include_data = g.creative && p.include_data;
                     let stack = g.clone_stack(p.pos, include_data);
                     let state = g.world.block(p.pos[0], p.pos[1], p.pos[2]);
@@ -1159,6 +1159,9 @@ impl Game<'_> {
                         include_data,
                         &mut replacement,
                     );
+                    if let Some(stack) = g.creative_block_pick_override(p.pos, state, include_data) {
+                        return Some(stack);
+                    }
                     let mut stack = replacement.or(stack)?;
                     if include_data {
                         g.add_block_data(p.pos, &mut stack);

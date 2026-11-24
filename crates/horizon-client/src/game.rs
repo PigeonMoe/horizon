@@ -4149,7 +4149,12 @@ impl Game<'_> {
         } else {
             self.loot_block_entity(pos, &facts.name)
         };
-        let live = self.live_block_entity(key, &facts.name);
+        let drop_hook = if self.creative {
+            mod_api::HookId::CreativeBlockDrops
+        } else {
+            mod_api::HookId::BlockDrops
+        };
+        let live = self.live_block_entity(key, &facts.name, drop_hook);
         if let Some((entity, _)) = &live {
             self.pending
                 .record_from(&self.world, pos, entity, &facts.name);
@@ -4167,7 +4172,14 @@ impl Game<'_> {
         // The block's parts first, then playerWillDestroy and Level.removeBlock.
         let (removed, state, harvest) =
             self.player_destroy_block_removal(pos, state, &facts, held.as_ref(), filled_hive);
-        if !creative {
+        if creative
+            && removed
+            && self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::CreativeBlockDrops)
+        {
+            let dropped = self.creative_player_block_dropped(pos, state, held.as_ref(), live);
+            self.deliver_player_block_drops(pos, dropped);
+        } else if !creative {
             // The stack as the removal left it: a listener may have swapped it.
             let held = self.held().cloned();
             if removed {
@@ -4193,14 +4205,7 @@ impl Game<'_> {
                 );
                 self.observe_player_block_drops(pos, state, &dropped);
                 let canceled = dropped.canceled;
-                if let Some(kept) = self.break_collect.as_mut() {
-                    kept.extend(dropped.items.into_iter().map(|item| item.stack));
-                    if dropped.experience > 0 {
-                        self.spawn_orbs(pos.map(|v| f64::from(v) + 0.5), dropped.experience);
-                    }
-                } else {
-                    self.spawn_block_drops(pos, dropped);
-                }
+                self.deliver_player_block_drops(pos, dropped);
                 // BeehiveBlock.playerDestroy: silk touch keeps the bees in, so
                 // the trigger counts them; otherwise they are out already.
                 if let Some((hive, (honey, facing))) = hive {
@@ -7277,7 +7282,11 @@ impl Game<'_> {
                 return Ok(UseResult::Fail);
             }
             let charge = item == "fire_charge";
-            let cause = if charge { "fireball" } else { "flint_and_steel" };
+            let cause = if charge {
+                "fireball"
+            } else {
+                "flint_and_steel"
+            };
             let name = self.res.facts().get(clicked).name.clone();
             if self.can_light(clicked, &name) {
                 if !self.player_block_ignite_allowed(hit.pos, cause) {

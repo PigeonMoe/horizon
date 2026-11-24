@@ -160,7 +160,7 @@ impl Game<'_> {
             .bool_at(horizon_client::gamerules::vanilla::BLOCK_DROPS);
         let key = (pos[0], pos[1], pos[2]);
         let live = block_drops
-            .then(|| self.live_block_entity(key, &facts.name))
+            .then(|| self.live_block_entity(key, &facts.name, mod_api::HookId::BlockDrops))
             .flatten();
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
         // Capture the loot context while the block and its entity are present.

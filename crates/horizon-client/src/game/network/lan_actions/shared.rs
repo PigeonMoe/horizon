@@ -1171,7 +1171,7 @@ mod tests {
         };
         use std::sync::{
             Arc, Mutex,
-            atomic::{AtomicI32, AtomicUsize},
+            atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
         };
 
         struct Picker(Arc<Mutex<Vec<bool>>>);
@@ -1258,6 +1258,8 @@ mod tests {
         struct Mod {
             picks: Arc<Mutex<Vec<bool>>>,
             user: User,
+            replace_creative_pick: Arc<AtomicBool>,
+            cancel_pick: Arc<AtomicBool>,
         }
         #[mod_api::__subscriptions]
         impl Hooks for Mod {
@@ -1289,8 +1291,35 @@ mod tests {
                 let item = r.item_key("minecraft:stone");
                 r.item_part(item, self.user.clone());
             }
+
+            fn creative_block_pick(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut mod_api::CreativeBlockPickEvent,
+            ) -> Option<ItemStack> {
+                if event.pos != [3, 64, 0] || !self.replace_creative_pick.load(Ordering::SeqCst) {
+                    return None;
+                }
+                assert_eq!(event.player.uuid(), 12);
+                assert!(event.include_data);
+                ItemStack::new(mod_api::__private::item_key("minecraft:emerald")?, 1)
+            }
+
+            fn player_pick_item(
+                &self,
+                _: &mut dyn ServerHost,
+                _: &mut mod_api::PlayerPickItemEvent<'_>,
+            ) -> mod_api::Flow {
+                if self.cancel_pick.load(Ordering::SeqCst) {
+                    mod_api::Flow::Cancel
+                } else {
+                    mod_api::Flow::Continue
+                }
+            }
         }
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let replace_creative_pick = Arc::new(AtomicBool::new(false));
+        let cancel_pick = Arc::new(AtomicBool::new(false));
         let user = User {
             answer: Arc::new(Mutex::new(Some(Answer::Success))),
             replace_with: Arc::new(Mutex::new(None)),
@@ -1305,6 +1334,8 @@ mod tests {
             Box::new(Mod {
                 picks: seen.clone(),
                 user: user.clone(),
+                replace_creative_pick: replace_creative_pick.clone(),
+                cancel_pick: cancel_pick.clone(),
             }),
         )]
         .into();
@@ -1816,6 +1847,29 @@ mod tests {
                 assert!(components.contains_key(&"minecraft:container".into()));
                 assert_eq!(*seen.lock().unwrap(), [true, false, true]);
 
+                // The creative replacement retains no container contents, and
+                // the ordinary pick cancellation can still preserve inventory.
+                let before = guest.inventory.clone();
+                let selected = guest.selected;
+                let pick = play::PickItemFromBlock {
+                    pos: [3, 64, 0],
+                    include_data: true,
+                };
+                replace_creative_pick.store(true, SeqCst);
+                cancel_pick.store(true, SeqCst);
+                game.lan_guest_packet(12, play::Serverbound::PickItemFromBlock(pick.clone()));
+                let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                assert_eq!(guest.inventory, before);
+                assert_eq!(guest.selected, selected);
+                cancel_pick.store(false, SeqCst);
+                game.lan_guest_packet(12, play::Serverbound::PickItemFromBlock(pick));
+                let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                let picked = guest.inventory[guest.selected].as_ref().unwrap();
+                assert_eq!(
+                    *picked,
+                    horizon_client::items::ItemStack::new("minecraft:emerald", 1)
+                );
+
                 let hive = game
                     .pack
                     .assets
@@ -1835,7 +1889,7 @@ mod tests {
                         .iter()
                         .any(|item| &*item.stack.item == "minecraft:beehive")
                 );
-                assert_eq!(*seen.lock().unwrap(), [true, false, true]);
+                assert_eq!(*seen.lock().unwrap(), [true, false, true, true, true]);
             })
         });
     }

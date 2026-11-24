@@ -2363,6 +2363,17 @@ impl Game<'_> {
     ) {
         self.fire_player_trade(player, name, entity_id);
     }
+    pub(in crate::game) fn native_merchant_slot_click_pre(
+        &mut self,
+        player: u128,
+        slot: i32,
+        merchant_slot: bool,
+        hotbar_swap: bool,
+        item: Option<&ItemStack>,
+        cancel: &mut bool,
+    ) {
+        self.fire_merchant_slot_click_pre(player, slot, merchant_slot, hotbar_swap, item, cancel);
+    }
     /// A server player traded with a villager or a wandering trader
     /// (NeoForge's `TradeWithVillagerEvent`, at vanilla's
     /// `MerchantResultSlot.onTake` once the offer is taken): `merchant` is

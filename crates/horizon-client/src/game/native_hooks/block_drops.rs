@@ -11,4 +11,34 @@ impl GameLevel<'_> {
     pub(in crate::game) fn native_block_drops(&self, call: super::fire::BlockDropsCall<'_>) {
         self.fire_block_drops(call);
     }
+
+    pub(in crate::game) fn native_creative_block_drops(
+        &self,
+        call: super::fire::CreativeBlockDropsCall<'_>,
+    ) {
+        self.fire_creative_block_drops(call);
+    }
+
+    pub(in crate::game) fn dispatch_block_drops(
+        &self,
+        call: super::fire::BlockDropsCall<'_>,
+        creative: bool,
+    ) {
+        if !creative {
+            self.native_block_drops(call);
+            return;
+        }
+        self.native_creative_block_drops(super::fire::CreativeBlockDropsCall {
+            dimension: call.dimension,
+            pos: call.pos,
+            state: call.state,
+            breaker: call.breaker,
+            breaker_entity: call.breaker_entity,
+            block_entity: call.block_entity,
+            tool: call.tool,
+            drops: call.drops,
+            experience: call.experience,
+            cancel: call.cancel,
+        });
+    }
 }

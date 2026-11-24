@@ -787,19 +787,51 @@ impl GameLevel<'_> {
         tool: Option<&ItemStack>,
         dropped: BlockDrops,
     ) -> BlockDrops {
+        self.edit_block_drops(pos, state, breaker, tool, dropped, false)
+    }
+
+    pub(super) fn creative_block_dropped(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        breaker: u128,
+        tool: Option<&ItemStack>,
+    ) -> BlockDrops {
+        let dropped = BlockDrops {
+            items: Vec::new(),
+            experience: 0,
+            canceled: false,
+        };
+        self.edit_block_drops(pos, state, Some(breaker), tool, dropped, true)
+    }
+
+    fn edit_block_drops(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        breaker: Option<u128>,
+        tool: Option<&ItemStack>,
+        dropped: BlockDrops,
+        creative: bool,
+    ) -> BlockDrops {
         let BlockDrops {
             mut items,
             mut experience,
             mut canceled,
         } = dropped;
+        let hook = if creative {
+            mod_api::HookId::CreativeBlockDrops
+        } else {
+            mod_api::HookId::BlockDrops
+        };
         if self.native_authoritative
-            && mod_api::__private::listened(mod_api::HookId::BlockDrops)
+            && mod_api::__private::listened(hook)
             && let Ok(mut snapshots) = items.try_into_api()
         {
             let (block_entity, breaker_entity) = self.drop_event_refs(pos, breaker);
             let mut next_experience = experience;
             let mut next_canceled = canceled;
-            self.native_block_drops(crate::game::native_hooks::BlockDropsCall {
+            let call = crate::game::native_hooks::BlockDropsCall {
                 dimension: self.dimension,
                 pos,
                 state,
@@ -810,7 +842,8 @@ impl GameLevel<'_> {
                 drops: &mut snapshots,
                 experience: &mut next_experience,
                 cancel: &mut next_canceled,
-            });
+            };
+            self.dispatch_block_drops(call, creative);
             if let Ok(mut next_items) = snapshots.try_into_engine(self.items) {
                 for (next, original) in next_items.iter_mut().zip(&items) {
                     next.random = original.random;
@@ -820,7 +853,7 @@ impl GameLevel<'_> {
                 canceled = next_canceled;
             }
         }
-        if canceled || !self.rules.block_drops {
+        if canceled || (!creative && !self.rules.block_drops) {
             items.clear();
             experience = 0;
         }
@@ -1150,6 +1183,17 @@ impl Game<'_> {
         }
         if dropped.experience > 0 {
             self.spawn_orbs(pos.map(|v| f64::from(v) + 0.5), dropped.experience);
+        }
+    }
+
+    pub(super) fn deliver_player_block_drops(&mut self, pos: [i32; 3], dropped: BlockDrops) {
+        if let Some(kept) = self.break_collect.as_mut() {
+            kept.extend(dropped.items.into_iter().map(|item| item.stack));
+            if dropped.experience > 0 {
+                self.spawn_orbs(pos.map(|v| f64::from(v) + 0.5), dropped.experience);
+            }
+        } else {
+            self.spawn_block_drops(pos, dropped);
         }
     }
     /// Adds a drop's item entity, with the state a drop hook set.

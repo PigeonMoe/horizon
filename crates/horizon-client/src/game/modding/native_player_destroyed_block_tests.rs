@@ -639,6 +639,142 @@ fn block_drops_reads_the_chest_a_players_break_removed_and_the_handle_goes_stale
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn creative_drops_are_opt_in_and_read_the_removed_block_entity() {
+    use crate::game::api_values::TryIntoApi;
+    use mod_api::{BlockDropsEvent, Compound, CreativeBlockDropsEvent, ItemDrop, LevelHost, Tag};
+
+    const DENIED: [i32; 3] = [8, 64, 4];
+    let marker = Compound::from([("value".into(), Tag::Int(42))]);
+    let handle = Arc::new(Mutex::new(None));
+    let cancel_drops = Arc::new(AtomicBool::new(false));
+    struct Probe {
+        marker: Compound,
+        handle: Arc<Mutex<Option<mod_api::BlockEntityRef>>>,
+        cancel_drops: Arc<AtomicBool>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn break_block(&self, _: &mut dyn ServerHost, event: &mut BreakBlockEvent<'_>) -> Flow {
+            if event.pos == DENIED {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn block_drops(&self, _: &dyn LevelHost, _: &mut BlockDropsEvent<'_>) -> Flow {
+            panic!("a creative break fired the survival drop hook");
+        }
+
+        fn creative_block_drops(
+            &self,
+            level: &dyn LevelHost,
+            event: &mut CreativeBlockDropsEvent<'_>,
+        ) -> Flow {
+            assert!(event.drops.is_empty());
+            assert_eq!(event.experience, 0);
+            assert_eq!(event.breaker, Some(123));
+            assert_eq!(event.breaker_entity.map(|entity| entity.id()), Some(20));
+            assert_eq!(
+                mod_api::__private::item_key_id(event.tool.expect("the breaking tool").item()),
+                Some("minecraft:diamond_axe"),
+            );
+            let entity = event.block_entity.expect("the removed block entity");
+            assert!(level.block_entity_at([7, 64, 4]).is_none());
+            assert_eq!(
+                level.block_entity_saved_attachment(entity, "creative-drops", "marker"),
+                Some(self.marker.clone()),
+            );
+            assert!(self.handle.lock().unwrap().replace(entity).is_none());
+            let output = ItemStack::new("minecraft:amethyst_shard", 2)
+                .try_into_api()
+                .unwrap();
+            event
+                .drops
+                .push(ItemDrop::new(output, [7.5, 64.0, 4.5], [0.0; 3], 10));
+            if self.cancel_drops.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+    let mods = vec![mod_api::ModEntry::new(
+        "creative-drops",
+        Box::new(Probe {
+            marker: marker.clone(),
+            handle: handle.clone(),
+            cancel_drops: cancel_drops.clone(),
+        }),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            let player = with_player(
+                game,
+                GameMode::Creative,
+                Some(ItemStack::new("minecraft:diamond_axe", 1)),
+            );
+            let pos = [7, 64, 4];
+            let install_chest = |game: &mut super::Game<'_>| {
+                put_chest(game, pos);
+                let saved = Compound::from([("value".into(), Tag::Compound(marker.clone()))]);
+                let namespace = Compound::from([("marker".into(), Tag::Compound(saved))]);
+                game.world.block_entities.restore_attachments(
+                    (pos[0], pos[1], pos[2]),
+                    mod_api::Attachments::from_nbt(Compound::from([(
+                        "creative-drops".into(),
+                        Tag::Compound(namespace),
+                    )])),
+                );
+            };
+            install_chest(game);
+            place(game, DENIED, "minecraft:stone");
+            assert!(!game.player_destroy_block(player, DENIED, false));
+            assert!(handle.lock().unwrap().is_none());
+            assert!(game.player_destroy_block(player, pos, false));
+            assert_eq!(block(game, pos), "minecraft:air");
+            assert!(game.dropped.iter().any(|item| {
+                &*item.stack.item == "minecraft:amethyst_shard" && item.stack.count == 2
+            }));
+            assert!(
+                game.dropped
+                    .iter()
+                    .all(|item| &*item.stack.item != "minecraft:chest")
+            );
+            let stale = handle.lock().unwrap().take().expect("the event's handle");
+            game.with_level(|_, level, _| {
+                assert!(mod_api::LevelHost::block_entity_data(level, stale).is_none());
+            });
+
+            install_chest(game);
+            game.dropped.clear();
+            let _ = game
+                .ui
+                .rules
+                .set("block_drops", horizon_client::gamerules::Value::Bool(false));
+            assert!(game.player_destroy_block(player, pos, false));
+            assert!(handle.lock().unwrap().take().is_some());
+            assert!(game.dropped.iter().any(|item| {
+                &*item.stack.item == "minecraft:amethyst_shard" && item.stack.count == 2
+            }));
+
+            install_chest(game);
+            game.dropped.clear();
+            cancel_drops.store(true, Ordering::Relaxed);
+            assert!(game.player_destroy_block(player, pos, false));
+            assert!(handle.lock().unwrap().is_some());
+            assert!(
+                game.dropped
+                    .iter()
+                    .all(|item| &*item.stack.item != "minecraft:amethyst_shard")
+            );
+        });
+    });
+}
+
 /// A ravager's break (a mob's, not a player's) names the ravager as `breaker_entity` and no
 /// `breaker` UUID; a break the level makes (no entity) names neither.
 #[test]

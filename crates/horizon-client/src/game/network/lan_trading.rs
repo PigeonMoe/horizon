@@ -5,13 +5,13 @@
 use super::{
     Game,
     lan_actions::guest_within_entity_range,
-    lan_crafting::{DropMenu, DropPose, GuestMenuClick},
+    lan_crafting::{DropMenu, DropPose, GuestMenuClick, input},
     stations::Kind as StationKind,
     trading::MerchantState,
 };
 use horizon_client::{
     items::ItemStack,
-    menu::{Env, Kind, Menu},
+    menu::{Env, Input, Kind, Menu},
     merchant,
 };
 use horizon_protocol::packets::play::{self, Clientbound as C};
@@ -27,6 +27,15 @@ pub(super) struct GuestMerchant {
     sent: Vec<merchant::MerchantOffer>,
     sent_level: i32,
     sent_xp: i32,
+}
+
+#[derive(PartialEq)]
+struct MerchantClickTarget {
+    player: u128,
+    merchant: Option<u32>,
+    generation: u64,
+    merchant_slot: bool,
+    item: Option<ItemStack>,
 }
 
 /// A guest's UUID as gossip targets it.
@@ -460,6 +469,30 @@ impl Game<'_> {
 
     /// A container click on the guest's trading window.
     pub(super) fn lan_merchant_click(&mut self, conn: u32, click: &mut GuestMenuClick<'_>) -> bool {
+        if !click.merchant_checked
+            && self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::MerchantSlotClickPre)
+            && input(click.packet.input) != Input::QuickCraft
+            && let Some(target) = self.merchant_click_target(conn, click.packet)
+        {
+            click.merchant_checked = true;
+            let mut cancel = false;
+            self.as_guest(conn, |game| {
+                game.native_merchant_slot_click_pre(
+                    target.player,
+                    i32::from(click.packet.slot),
+                    target.merchant_slot,
+                    input(click.packet.input) == Input::Swap,
+                    target.item.as_ref(),
+                    &mut cancel,
+                );
+            });
+            // A mutable hook may close the window or change its backing inventory.
+            if cancel || self.merchant_click_target(conn, click.packet).as_ref() != Some(&target) {
+                self.lan_resync_merchant(conn, click.packet.container);
+                return true;
+            }
+        }
         self.try_lan_merchant_op(
             conn,
             Some(click.packet.container),
@@ -467,6 +500,34 @@ impl Game<'_> {
             click.drop_pose,
             |menu, env| click.apply(menu, env, DropMenu::Merchant),
         )
+    }
+
+    fn merchant_click_target(
+        &self,
+        conn: u32,
+        packet: &play::ContainerClick,
+    ) -> Option<MerchantClickTarget> {
+        let host = self.lan.as_ref()?;
+        let guest = host.hub.guest(conn)?;
+        let merchant = host.play.get(&conn)?.merchant.as_ref()?;
+        if merchant.window != packet.container || guest.disconnect_pending || guest.spectator() {
+            return None;
+        }
+        let slot = usize::try_from(packet.slot).ok()?;
+        // Two inputs and the output are followed by the player's storage and hotbar.
+        let item = match slot {
+            0..=2 => &guest.carried,
+            3..=29 => &guest.inventory[slot + 6],
+            30..=38 => &guest.inventory[slot - 30],
+            _ => return None,
+        };
+        Some(MerchantClickTarget {
+            player: guest.uuid,
+            merchant: merchant.merchant.mob,
+            generation: guest.menu_generation,
+            merchant_slot: slot < 3,
+            item: item.clone(),
+        })
     }
 
     pub(super) fn lan_resync_merchant(&mut self, conn: u32, window: i32) {
@@ -1321,6 +1382,83 @@ mod tests {
     /// What the `trade_select` observer saw: the villager and offer index it
     /// was told, and what the merchant handle answered inside the hook.
     type Seen = Arc<std::sync::Mutex<Vec<(Option<u32>, usize, bool, bool)>>>;
+
+    #[test]
+    #[ignore = "daily"]
+    fn canceling_a_merchant_slot_click_preserves_the_correct_stack() {
+        use horizon_protocol::packets::play::Serverbound;
+        use mod_api::{Flow, Hooks, MerchantSlotClickPreEvent};
+
+        type Click = (i32, bool, bool, Option<u32>);
+        struct Policy(Arc<std::sync::Mutex<Vec<Click>>>);
+        #[mod_api::__subscriptions]
+        impl Hooks for Policy {
+            fn merchant_slot_click_pre(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut MerchantSlotClickPreEvent<'_>,
+            ) -> Flow {
+                assert_eq!(host.players().acting_player().unwrap().uuid(), 12);
+                self.0.lock().unwrap().push((
+                    event.slot,
+                    event.merchant_slot,
+                    event.hotbar_swap,
+                    event.item.map(mod_api::ItemStack::count),
+                ));
+                Flow::Cancel
+            }
+        }
+        let clicks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let policy = mod_api::ModEntry::new("merchant_policy", Box::new(Policy(clicks.clone())));
+        mod_platform::testing::with_mods(vec![policy].into(), || {
+            with_game(|game| {
+                game.build_registries();
+                let (_, _packets, _) = open_trade(game, 1);
+                game.mobs[0].position = horizon_core::geometry::Vec3::new(3.0, 64.0, 7.0);
+                let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                assert!(game.lan_merchant_valid(guest, 40));
+                let wheat = ItemStack::new("minecraft:wheat", 8);
+                let coal = ItemStack::new("minecraft:coal", 2);
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.loaded = true;
+                    guest.inventory[9] = Some(wheat.clone());
+                });
+                let click = |slot, input| {
+                    Serverbound::ContainerClick(play::ContainerClick {
+                        container: 3,
+                        state: 0,
+                        slot,
+                        button: 0,
+                        input,
+                        changed: Vec::new(),
+                        carried: None,
+                    })
+                };
+                game.lan_guest_packet(12, click(3, horizon_client::lan::menu::input::PICKUP));
+                assert!(
+                    game.lan
+                        .as_ref()
+                        .unwrap()
+                        .hub
+                        .guest(12)
+                        .unwrap()
+                        .carried
+                        .is_none()
+                );
+                game.lan.as_mut().unwrap().hub.guests.update(0, |guest| {
+                    guest.carried = Some(coal.clone());
+                });
+                game.lan_guest_packet(12, click(0, horizon_client::lan::menu::input::SWAP));
+                let guest = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                assert_eq!(guest.inventory[9].as_ref(), Some(&wheat));
+                assert_eq!(guest.carried.as_ref(), Some(&coal));
+                assert_eq!(
+                    *clicks.lock().unwrap(),
+                    vec![(3, false, false, Some(8)), (0, true, true, Some(2))]
+                );
+            });
+        });
+    }
 
     #[test]
     #[ignore = "daily"]
