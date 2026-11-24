@@ -2,9 +2,9 @@
 //! falling, `interactAt` equipment swaps by clicked height, the two-hit break
 //! of `hurtServer` (creative breaks at once), and `ArmorStandRenderer` with
 //! the default pose, the hit wobble and humanoid armor layers.
-use super::{entity::Entity, wardrobe_geometry};
 use super::{Game, InteractTarget};
-use horizon_assets::resource_source::ResourceSource;
+use super::{entity::Entity, wardrobe_geometry};
+use horizon_assets::{item_model, resource_source::ResourceSource};
 use horizon_client::{
     Result,
     cit::{Hand, Kind, Rule},
@@ -17,10 +17,11 @@ use horizon_client::{
 };
 use horizon_core::{
     geometry::{Aabb, Vec3},
+    identifier::Identifier,
     position::BlockPos,
     random::RandomSource,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 pub(super) const TYPE_ID: &str = "minecraft:armor_stand";
 /// Build the living-drops input at the loot-source boundary, before equipment pops.
 fn armor_stand_dying_drops<'a>(
@@ -168,6 +169,8 @@ pub(super) struct ArmorStandAssets {
     wardrobe_geometry: HashMap<String, HashMap<String, Part>>,
     /// asset id -> layer kind (humanoid / humanoid_leggings) -> each layer's (texture, undyed colour), in order.
     pub equipment: HashMap<String, HashMap<String, Vec<(String, Option<u32>)>>>,
+    /// Equipment assets opting into a baked item model in the head display context.
+    head_items: HashMap<String, String>,
     /// asset id -> `trim_overrides`.
     pub trim_overrides: HashMap<String, Vec<TrimOverride>>,
     pub trims: TrimRegistry,
@@ -201,6 +204,7 @@ impl ArmorStandAssets {
             }
         }
         let mut equipment = HashMap::new();
+        let mut head_items = HashMap::new();
         let mut trim_overrides = HashMap::new();
         // EquipmentAssetManager reads resolved resources in every namespace.
         for namespace in root.namespaces("assets") {
@@ -220,6 +224,9 @@ impl ArmorStandAssets {
                 };
                 let Ok(v) = v else { continue };
                 let id = format!("{namespace}:{name}");
+                if let Some(model) = load_equipment_head_item(root, &namespace, name, &v) {
+                    head_items.insert(id.clone(), model);
+                }
                 let mut kinds = HashMap::new();
                 for kind in ["humanoid", "humanoid_leggings", "wings"] {
                     // Every layer of the kind: leather's overlay is layer 1.
@@ -256,6 +263,7 @@ impl ArmorStandAssets {
             wardrobe_geometry: wardrobe_geometry::load(root, &player),
             player,
             equipment,
+            head_items,
             trim_overrides,
             trims: TrimRegistry::load(root),
             root: root.to_owned(),
@@ -264,6 +272,7 @@ impl ArmorStandAssets {
     /// Trim data of reloaded resources (the models stay).
     pub fn apply_resources(&mut self, fresh: Self) {
         self.equipment = fresh.equipment;
+        self.head_items = fresh.head_items;
         self.wardrobe_geometry = fresh.wardrobe_geometry;
         self.trim_overrides = fresh.trim_overrides;
         self.trims = fresh.trims;
@@ -281,6 +290,91 @@ impl ArmorStandAssets {
         TrimTexture::resolve(&self.trims, overrides, material, pattern, kind)
     }
 }
+
+fn load_equipment_head_item(
+    root: &ResourceSource,
+    namespace: &str,
+    name: &str,
+    equipment: &serde_json::Value,
+) -> Option<String> {
+    if let Some(declared) = equipment.get("horizon:head_item") {
+        return Identifier::parse_namespaced(declared.as_str()?).map(|model| model.to_string());
+    }
+    // Older packs declared a dedicated head case on the conventional helmet item.
+    // A plain icon (including the fallback of a select) must not replace the helmet.
+    let path = format!("assets/{namespace}/items/{name}_helmet.json");
+    let bytes = root.read_limited(&path, 32768).ok()?;
+    let item = item_model::ClientItem::from_json(std::str::from_utf8(&bytes).ok()?).ok()?;
+    let item_model::ItemModelNode::Select {
+        property: item_model::SelectProperty::DisplayContext,
+        cases,
+        ..
+    } = item.model
+    else {
+        return None;
+    };
+    cases
+        .iter()
+        .any(|case| {
+            case.values
+                .iter()
+                .any(|value| value.as_str() == Some("head"))
+        })
+        .then(|| format!("{namespace}:{name}_helmet"))
+}
+
+fn with_head_item_model(mut stack: ItemStack, model: &str) -> ItemStack {
+    stack.data_mut().set_other(
+        "minecraft:item_model",
+        Some(horizon_core::nbt::Tag::String(model.into())),
+    );
+    stack
+}
+
+#[cfg(test)]
+mod equipment_head_item_tests {
+    use super::*;
+    use horizon_assets::resource_source::Resource;
+    use serde_json::json;
+
+    #[test]
+    fn head_item_requires_metadata_or_an_explicit_legacy_head_case() {
+        let leaf = json!({"type": "minecraft:model", "model": "test:item/flat"});
+        let selector = json!({"type": "minecraft:select", "property": "minecraft:display_context",
+            "cases": [{"when": "head", "model": {"type": "minecraft:model", "model": "test:item/hat"}}],
+            "fallback": leaf});
+        let file = |name: &str, model: serde_json::Value| {
+            (
+                format!("assets/test/items/{name}_helmet.json"),
+                Resource::bytes(serde_json::to_vec(&json!({"model": model})).unwrap()),
+            )
+        };
+        let root = ResourceSource::indexed([file("legacy", selector), file("flat", leaf)].into());
+        let meta = json!({"horizon:head_item": "test:other_hat"});
+        assert_eq!(
+            load_equipment_head_item(&root, "test", "flat", &meta).as_deref(),
+            Some("test:other_hat")
+        );
+        assert_eq!(
+            load_equipment_head_item(&root, "test", "legacy", &json!({})).as_deref(),
+            Some("test:legacy_helmet")
+        );
+        assert_eq!(
+            load_equipment_head_item(&root, "test", "flat", &json!({})),
+            None
+        );
+        assert_eq!(
+            load_equipment_head_item(
+                &root,
+                "test",
+                "legacy",
+                &json!({"horizon:head_item": "test:"})
+            ),
+            None
+        );
+    }
+}
+
 impl Game<'_> {
     /// OptiFine CIT: the winning armour or elytra rule (`kind`) of the worn `stack`. No lookup
     /// without CIT rules.
@@ -331,15 +425,43 @@ impl Game<'_> {
         })
     }
 
-    pub(in crate::game) fn wardrobe_head_item(&self, asset: &str) -> Option<&'static str> {
-        let item_model = match asset {
-            "jianghu:qixiu" => "jianghu:qixiu_helmet",
-            "jianghu:qixiu_ceremonial" => "jianghu:qixiu_ceremonial_helmet",
-            "jianghu:mingjiao" => "jianghu:mingjiao_helmet",
-            "jianghu:mingjiao_ceremonial" => "jianghu:mingjiao_ceremonial_helmet",
-            _ => return None,
-        };
-        self.pack.item_renderer.models.definitions.contains_key(item_model).then_some(item_model)
+    pub(in crate::game) fn equipment_head_item(&self, asset: &str) -> Option<&str> {
+        let model = self.armor_stand_assets.head_items.get(asset)?.as_str();
+        self.pack
+            .item_renderer
+            .models
+            .definitions
+            .contains_key(model)
+            .then_some(model)
+    }
+
+    /// A head item drawn outside the ordinary helmet layer. A visible wardrobe
+    /// selection takes precedence, including when its equipment slot is empty.
+    /// Only paths that also draw equipment assets can replace their helmet layer.
+    pub(in crate::game) fn rendered_head_item<'a>(
+        &self,
+        worn: Option<&'a ItemStack>,
+        outfit: Option<&str>,
+        renders_equipment_assets: bool,
+    ) -> Option<Cow<'a, ItemStack>> {
+        if let Some(asset) = outfit {
+            return Some(Cow::Owned(with_head_item_model(
+                ItemStack::new("minecraft:leather_helmet", 1),
+                self.equipment_head_item(asset)?,
+            )));
+        }
+        let worn = worn?;
+        let asset = horizon_client::item_sync::equippable(worn, self.res.items())
+            .filter(|equip| equip.slot == "head")
+            .and_then(|equip| equip.asset_id);
+        match asset {
+            Some(asset) if renders_equipment_assets => Some(Cow::Owned(with_head_item_model(
+                worn.clone(),
+                self.equipment_head_item(&asset)?,
+            ))),
+            Some(_) => None,
+            None => Some(Cow::Borrowed(worn)),
+        }
     }
     /// The layers of the armour items `worn` (with their stacks when known,
     /// for trims and CIT armour rules), head to feet.
@@ -369,10 +491,8 @@ impl Game<'_> {
             };
             let (asset, item, stack) = if let Some(asset) = selected.filter(|asset| {
                 self.has_wardrobe_layer(asset, kind)
+                    || (slot == "head" && self.equipment_head_item(asset).is_some())
             }) {
-                if slot == "head" && self.wardrobe_head_item(asset).is_some() {
-                    continue;
-                }
                 (std::borrow::Cow::Borrowed(asset), None, None)
             } else {
                 let Some((item, stack)) = item else { continue; };
@@ -385,7 +505,14 @@ impl Game<'_> {
                 };
                 (std::borrow::Cow::Owned(asset), Some(item), stack)
             };
-            let Some(layers) = assets.equipment.get(asset.as_ref()).and_then(|k| k.get(kind)) else {
+            if slot == "head" && self.equipment_head_item(&asset).is_some() {
+                continue;
+            }
+            let Some(layers) = assets
+                .equipment
+                .get(asset.as_ref())
+                .and_then(|k| k.get(kind))
+            else {
                 continue;
             };
             let Some(part) = assets.wardrobe_geometry.get(asset.as_ref())
@@ -1832,6 +1959,9 @@ impl Game<'_> {
             else {
                 continue;
             };
+            if worn == "head" && self.equipment_head_item(&asset).is_some() {
+                continue;
+            }
             let kind = if layer == "leggings" {
                 "humanoid_leggings"
             } else {
@@ -2314,7 +2444,8 @@ impl Game<'_> {
             submit(&state, pose, out);
         }
         // `CustomHeadLayer`: a worn skull draws the skull model.
-        if let Some(stack) = &a.equipment[5]
+        let head_item = self.rendered_head_item(a.equipment[5].as_ref(), None, true);
+        if let Some(stack) = head_item.as_deref()
             && let Some(kind) = skull_kind(&stack.item)
             && let Some(head) = part_matrix(model, base, poses, "head", 0.0)
         {
@@ -2356,10 +2487,8 @@ impl Game<'_> {
             );
             return;
         }
-        // A head item that is not worn armour.
-        if let Some(stack) = &a.equipment[5]
-            && !horizon_client::item_sync::equippable(stack, self.res.items())
-                .is_some_and(|e| e.asset_id.is_some() && e.slot == "head")
+        // Ordinary head items and equipment assets with baked head models.
+        if let Some(stack) = head_item.as_deref()
             && let Some(head) = part_matrix(model, base, poses, "head", 0.0)
         {
             let pose = head

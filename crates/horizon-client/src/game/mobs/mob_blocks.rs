@@ -519,9 +519,7 @@ impl Game<'_> {
             }
         }
     }
-    /// `CustomHeadLayer`: non-armour items worn in the head slot (carved
-    /// pumpkins, mob skulls and player heads, or custom blocks) on players
-    /// and mobs.
+    /// `CustomHeadLayer`: head items and equipment assets with a baked head model.
     pub(super) fn head_item_geometry(
         &self,
         mob: &Mob,
@@ -544,37 +542,27 @@ impl Game<'_> {
             .player_model
             .as_ref()
             .is_some_and(|p| p.id == mob.id && p.kind.id == mob.kind.id);
-        let visual_head = (&*mob.kind.id == "minecraft:player")
+        let is_player = &*mob.kind.id == "minecraft:player";
+        let visual_head = is_player
             .then(|| self.wardrobe_loadout((!local_player).then_some(mob.id))[0])
             .flatten()
-            .filter(|asset| self.has_wardrobe_layer(asset, "humanoid"));
-        let mut stack = if let Some(asset) = visual_head {
-            let Some(model) = self.wardrobe_head_item(asset) else { return };
-            let mut sample = ItemStack::new("minecraft:leather_helmet", 1);
-            sample.data_mut().set_other(
-                "minecraft:item_model",
-                Some(horizon_core::nbt::Tag::String(model.into())),
-            );
-            sample
-        } else if local_player {
-            let Some(stack) = &self.armor[0] else { return };
-            stack.clone()
-        } else if let Some(stack) = mob.extra.slot_stack(horizon_items::equipment::HEAD) {
-            stack.clone()
+            .filter(|asset| {
+                self.has_wardrobe_layer(asset, "humanoid")
+                    || self.equipment_head_item(asset).is_some()
+            });
+        let worn = if local_player {
+            self.armor[0].as_ref()
         } else {
+            mob.extra.slot_stack(horizon_items::equipment::HEAD)
+        };
+        let Some(mut stack) = self.rendered_head_item(worn, visual_head, is_player) else {
             return;
         };
-        // Helmets are drawn by HumanoidArmorLayer, not CustomHeadLayer
-        // (LivingEntityRenderer.extractRenderState: HumanoidArmorLayer.shouldRender).
-        if visual_head.is_none() && horizon_client::item_sync::equippable(&stack, self.res.items())
-            .is_some_and(|e| e.asset_id.is_some() && e.slot == "head")
-        {
-            return;
-        }
-        if visual_head.is_none() && !local_player
+        if visual_head.is_none()
+            && !local_player
             && horizon_client::mobs::gear::enchanted(mob, horizon_client::mobs::gear::HEAD)
         {
-            stack.enchant("minecraft:unbreaking", 1);
+            stack.to_mut().enchant("minecraft:unbreaking", 1);
         }
         let Some(head) =
             render::part_transform(mob, alpha as f32, camera, self.res.mob_data(), "head")
