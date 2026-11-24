@@ -260,7 +260,11 @@ impl ArmorStandAssets {
             main: load("minecraft:armor_stand#main").map(Arc::new),
             small: load("minecraft:armor_stand_small#main").map(Arc::new),
             layers,
-            wardrobe_geometry: wardrobe_geometry::load(root, &player),
+            wardrobe_geometry: if player.is_empty() {
+                HashMap::new()
+            } else {
+                wardrobe_geometry::load(root, &player)
+            },
             player,
             equipment,
             head_items,
@@ -269,11 +273,15 @@ impl ArmorStandAssets {
             root: root.to_owned(),
         }
     }
-    /// Trim data of reloaded resources (the models stay).
+    /// Equipment appearance from a reloaded pack uses the resident vanilla models.
     pub fn apply_resources(&mut self, fresh: Self) {
         self.equipment = fresh.equipment;
         self.head_items = fresh.head_items;
-        self.wardrobe_geometry = fresh.wardrobe_geometry;
+        self.wardrobe_geometry = if fresh.player.is_empty() {
+            wardrobe_geometry::load(&fresh.root, &self.player)
+        } else {
+            fresh.wardrobe_geometry
+        };
         self.trim_overrides = fresh.trim_overrides;
         self.trims = fresh.trims;
         self.root = fresh.root;
@@ -332,10 +340,56 @@ fn with_head_item_model(mut stack: ItemStack, model: &str) -> ItemStack {
 }
 
 #[cfg(test)]
-mod equipment_head_item_tests {
+mod equipment_resource_tests {
     use super::*;
     use horizon_assets::resource_source::Resource;
     use serde_json::json;
+
+    #[test]
+    fn pack_reload_uses_the_resident_player_model_for_wardrobe_geometry() {
+        let empty = ResourceSource::indexed(Default::default());
+        let mut live = ArmorStandAssets::load(&empty, None);
+        let face = horizon_client::mobs::Polygon {
+            normal: [0.0, 0.0, 1.0],
+            vertices: [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0, 0.0, 1.0],
+            ],
+            cull_back: false,
+        };
+        let mut back = face.clone();
+        for vertex in &mut back.vertices {
+            vertex[2] = 1.0;
+        }
+        live.player.insert(
+            "chestplate",
+            Part {
+                name: "body".into(),
+                pose: [0.0; 9],
+                polygons: [face.clone(), face.clone(), face.clone(), face.clone(), face, back].into(),
+                children: Vec::new(),
+            },
+        );
+        let pack = ResourceSource::indexed(
+            [(
+                "assets/jianghu/wardrobe_geometry/example.json".into(),
+                Resource::bytes(
+                    br#"{"chestplate":{"body":[{"bounds":[0,0,0,1.5,1,1]}]}}"#.to_vec(),
+                ),
+            )]
+            .into(),
+        );
+        live.apply_resources(ArmorStandAssets::load(&pack, None));
+        let tailored = &live.wardrobe_geometry["jianghu:example"]["chestplate"];
+        assert_eq!(tailored.polygons.len(), 12);
+        assert_eq!(tailored.polygons[6].vertices[1][0], 1.5);
+
+        live.apply_resources(ArmorStandAssets::load(&empty, None));
+        assert!(live.wardrobe_geometry.is_empty());
+        assert_eq!(live.player["chestplate"].polygons.len(), 6);
+    }
 
     #[test]
     fn head_item_requires_metadata_or_an_explicit_legacy_head_case() {
