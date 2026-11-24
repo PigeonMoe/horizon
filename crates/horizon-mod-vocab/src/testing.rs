@@ -517,6 +517,13 @@ impl crate::prelude::LevelsBackend for FakeHost {
     fn level_in_place(&self, level: LevelRef) -> bool {
         level == self.level.level()
     }
+    fn level_world_uuid(&self, level: LevelRef) -> Option<u128> {
+        if level == self.level.level() {
+            self.level.world_uuid
+        } else {
+            None
+        }
+    }
     fn level_block(&self, level: LevelRef, pos: [i32; 3]) -> Option<crate::BlockKey> {
         self.level
             .block_at(level, pos)

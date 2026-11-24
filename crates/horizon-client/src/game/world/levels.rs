@@ -38,7 +38,7 @@ use horizon_client::{
     world::World,
 };
 use horizon_world::level::{LevelEvent, Ticks};
-use mod_api::DimensionKey;
+use mod_api::{DimensionKey, LevelRef};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -216,6 +216,26 @@ impl Parked {
 }
 
 impl Game<'_> {
+    /// The UUID of an open server level, including levels parked between their ticks.
+    pub(in crate::game) fn level_world_uuid(&self, level: LevelRef) -> Option<u128> {
+        if !self.is_logical_server() || !self.level_handle_current(level) {
+            return None;
+        }
+        let save = if level.dimension() == self.dim.key() {
+            &self.save
+        } else {
+            let (_, parked) = self
+                .levels
+                .parked
+                .iter()
+                .find(|(dim, _)| dim.id() == level.dimension_id())?;
+            &parked.save
+        };
+        let legacy_root =
+            (level.dimension() == DimensionKey::OVERWORLD).then_some(self.world_root.as_path());
+        save.world_uuid(legacy_root)
+    }
+
     /// Resolve through the exact owner, never by trying dimension swaps.
     pub(super) fn locate_server_resident_owner(
         &self,

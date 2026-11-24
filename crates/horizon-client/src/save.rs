@@ -22,6 +22,7 @@ mod block_entity_order;
 mod far_regions;
 pub mod level_mods;
 mod respawn;
+mod world_uuid;
 mod writes;
 use writes::{Outstanding, Writer};
 
@@ -2324,6 +2325,7 @@ pub struct SaveDir {
     lod_decoded: Mutex<LodDecoded>,
     /// What older chunks are upgraded with, found on the first one read.
     datafix_context: OnceLock<Option<DatafixContext>>,
+    world_uuid: OnceLock<Option<u128>>,
     /// The Overworld's old-world blending cache, read when a save is requested
     /// (installed where `SavedOldWorld` is made for this same folder).
     blending_lookup: OnceLock<BlendingLookup>,
@@ -2461,6 +2463,20 @@ impl SaveDir {
             .join("attachments.dat")
     }
 
+    /// This dimension's persistent UUID. `legacy_root` is the old Paper world folder for the
+    /// Overworld. Keep the answer with this save so live reads do no recurring disk work.
+    pub fn world_uuid(&self, legacy_root: Option<&Path>) -> Option<u128> {
+        *self.world_uuid.get_or_init(|| {
+            match world_uuid::load_or_create(&self.root, legacy_root) {
+                Ok(uuid) => Some(uuid),
+                Err(why) => {
+                    log::warn!("{}: world UUID unavailable: {why}", self.root.display());
+                    None
+                }
+            }
+        })
+    }
+
     /// The saves of a level of `shape` at `root` (its dimension folder).
     pub fn new(root: PathBuf, shape: LevelShape) -> Self {
         Self {
@@ -2479,6 +2495,7 @@ impl SaveDir {
             far_regions: Default::default(),
             lod_decoded: Default::default(),
             datafix_context: OnceLock::new(),
+            world_uuid: OnceLock::new(),
             blending_lookup: OnceLock::new(),
         }
     }

@@ -404,6 +404,12 @@ pub trait LevelsBackend {
     #[access(WorldOnly)]
     fn level_day_time(&self, level: LevelRef) -> Option<i64>;
     /// Side: server.
+    /// This dimension's persistent UUID, with the same bits as Paper's `World.getUID()` for an
+    /// imported Paper world. The UUID remains the same across closes and server restarts.
+    /// None for a client, a stale handle or a save whose UUID could not be read or persisted.
+    #[access(WorldOnly)]
+    fn level_world_uuid(&self, level: LevelRef) -> Option<u128>;
+    /// Side: server.
     /// The time of the level's own clock in ticks: the clock its dimension type names as
     /// `default_clock`, which its sky, spawning and beds go by and `/time` sets there. A mod's
     /// level with a `day_cycle` clock of its own counts it apart from the Overworld's; a level
