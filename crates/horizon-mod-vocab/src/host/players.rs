@@ -975,6 +975,20 @@ pub trait PlayersBackendMut {
         thrown_by_player: bool,
     ) -> Result<Option<ItemStack>, StackWriteError>;
     /// Side: server.
+    /// Drops a caller-owned stack at this player's feet as Paper's `World.dropItemNaturally`
+    /// does: it has no owner or thrower, uses random offsets and motion, and can be picked up
+    /// after 10 ticks. It accepts counts through 99 even when they exceed the item's slot limit.
+    /// True once accepted. A drop in another level during a transaction spawns on root commit,
+    /// subject to the normal entity join policy. False for an unavailable player or a drop
+    /// refused before it could be staged.
+    #[access(WorldOnly)]
+    #[preserve_stack_count]
+    fn player_drop_item_naturally(
+        &mut self,
+        player: PlayerRef,
+        stack: ItemStack,
+    ) -> Result<bool, StackWriteError>;
+    /// Side: server.
     /// Remove a fake without treating it as a disconnect or saving it.
     #[access(WorldOnly)]
     fn player_remove_fake(&mut self, player: PlayerRef) -> bool;
