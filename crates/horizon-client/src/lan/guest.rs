@@ -528,6 +528,8 @@ pub struct Guest {
     /// Root command names the mods took out of this player's command tree
     /// (`native_player_commands_sent`); their tree is sent without them.
     pub hidden_commands: Vec<String>,
+    /// Paths of literal branches that mods hid from this player's completions.
+    pub hidden_command_literals: Vec<String>,
     /// `Player.getAbilities`: set from the game mode when it changes, and
     /// written by server mods. Saved with the player.
     pub abilities: super::abilities::PlayerAbilities,
@@ -877,6 +879,7 @@ impl Guest {
             quiet_leave: false,
             released: false,
             hidden_commands: Vec::new(),
+            hidden_command_literals: Vec::new(),
             abilities: Default::default(),
             dimension: "minecraft:overworld".into(),
             menu: None,

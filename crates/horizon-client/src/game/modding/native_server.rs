@@ -1992,10 +1992,8 @@ impl Game<'_> {
         self.native_commands.refresh = true;
     }
 
-    /// Asks the mods what root commands each player's tree keeps
-    /// (`native_player_commands_sent`) and stores the answer in the hub,
-    /// which sends the trees without what the mods took out: for `only`, or
-    /// for every placed player.
+    /// Asks the mods which roots and literal branches to hide from each
+    /// player's command tree, for `only` or for every placed player.
     pub(super) fn native_filter_commands(&mut self, only: Option<u32>) {
         let Some(host) = self.lan.as_ref() else {
             return;
@@ -2011,22 +2009,31 @@ impl Game<'_> {
             let Some(host) = self.lan.as_ref() else {
                 return;
             };
+            let Some(guest) = host.hub.guest(conn) else {
+                continue;
+            };
+            let (permission, placed) = (guest.permission, guest.placed);
             let names = host.hub.command_names(conn);
             let mut kept = names.clone();
-            let placed = host.hub.guest(conn).is_some_and(|g| g.placed);
-            if !placed {
-                // A joining player has no world yet: nothing can be told them.
-                self.native_player_commands_sent(uuid, &name, &mut kept);
-            } else if self.lan_acting == Some(conn) {
-                self.native_player_commands_sent(uuid, &name, &mut kept);
+            let mut hidden_literals = Vec::new();
+            let mut filter = |game: &mut Game<'_>| {
+                game.native_player_commands_sent(uuid, &name, &mut kept);
+                game.native_player_command_literals_sent(
+                    uuid,
+                    &name,
+                    permission,
+                    &mut hidden_literals,
+                );
+            };
+            if !placed || self.lan_acting == Some(conn) {
+                filter(self);
             } else {
-                self.as_guest(conn, |g| {
-                    g.native_player_commands_sent(uuid, &name, &mut kept);
-                });
+                self.as_guest(conn, filter);
             }
             if let Some(host) = self.lan.as_mut() {
                 let _ = host.hub.update_guest(conn, |g| {
                     g.hidden_commands = names.into_iter().filter(|n| !kept.contains(n)).collect();
+                    g.hidden_command_literals = hidden_literals;
                 });
             }
         }

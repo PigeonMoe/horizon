@@ -329,6 +329,11 @@ impl Game<'_> {
         reg.banned_ips = own_banned_ips;
         reg.whitelisted = own_whitelisted;
         reg.trigger_objectives = own_triggers;
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        host.hub
+            .filter_command_suggestions(conn, command, &mut suggestions);
         // ServerCommandSuggestionsProvider.limitSuggestionCount.
         suggestions.truncate(1000);
         let utf16 = |byte: usize| command[..byte.min(command.len())].encode_utf16().count() as i32;
@@ -344,9 +349,6 @@ impl Game<'_> {
                 w.nbt(&literal(tip));
             }
         }
-        let Some(host) = self.lan.as_ref() else {
-            return;
-        };
         host.hub.send_to(
             conn,
             &C::Unknown(
