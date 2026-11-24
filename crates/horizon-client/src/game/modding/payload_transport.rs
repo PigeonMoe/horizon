@@ -88,6 +88,12 @@ impl Game<'_> {
         let Some(remote) = self.remote.as_ref() else {
             return Ok(true);
         };
+        if incoming.id.0 == super::remote::wardrobe::CHANNEL {
+            if incoming.epoch.active() && let Body::Payload(bytes) = &incoming.body {
+                self.receive_wardrobe_appearance(&bytes.0);
+            }
+            return Ok(true);
+        }
         let endpoint = remote.session.payload_endpoint();
         Ok(self.run_payload(endpoint, incoming))
     }

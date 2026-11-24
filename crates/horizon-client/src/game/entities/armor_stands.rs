@@ -2,7 +2,7 @@
 //! falling, `interactAt` equipment swaps by clicked height, the two-hit break
 //! of `hurtServer` (creative breaks at once), and `ArmorStandRenderer` with
 //! the default pose, the hit wobble and humanoid armor layers.
-use super::entity::Entity;
+use super::{entity::Entity, wardrobe_geometry};
 use super::{Game, InteractTarget};
 use horizon_assets::resource_source::ResourceSource;
 use horizon_client::{
@@ -165,6 +165,7 @@ pub(super) struct ArmorStandAssets {
     pub layers: HashMap<(&'static str, bool), Arc<Part>>,
     /// The player's armour models by slot (helmet, chestplate, leggings, boots).
     pub player: HashMap<&'static str, Part>,
+    wardrobe_geometry: HashMap<String, HashMap<String, Part>>,
     /// asset id -> layer kind (humanoid / humanoid_leggings) -> each layer's (texture, undyed colour), in order.
     pub equipment: HashMap<String, HashMap<String, Vec<(String, Option<u32>)>>>,
     /// asset id -> `trim_overrides`.
@@ -252,6 +253,7 @@ impl ArmorStandAssets {
             main: load("minecraft:armor_stand#main").map(Arc::new),
             small: load("minecraft:armor_stand_small#main").map(Arc::new),
             layers,
+            wardrobe_geometry: wardrobe_geometry::load(root, &player),
             player,
             equipment,
             trim_overrides,
@@ -262,6 +264,7 @@ impl ArmorStandAssets {
     /// Trim data of reloaded resources (the models stay).
     pub fn apply_resources(&mut self, fresh: Self) {
         self.equipment = fresh.equipment;
+        self.wardrobe_geometry = fresh.wardrobe_geometry;
         self.trim_overrides = fresh.trim_overrides;
         self.trims = fresh.trims;
         self.root = fresh.root;
@@ -303,17 +306,11 @@ impl Game<'_> {
     /// `HumanoidArmorLayer` for the player: (model, texture rect, colour,
     /// overlay) of each worn piece, head to feet.
     pub(super) fn player_armor_layers(&self) -> Vec<(&Part, [f32; 4], u32, u32, bool)> {
-        self.stack_armor_layers(&self.armor)
-    }
-    /// `HumanoidArmorLayer` for worn stacks (head to feet), trims included.
-    pub(super) fn stack_armor_layers(
-        &self,
-        armor: &[Option<ItemStack>; 4],
-    ) -> Vec<(&Part, [f32; 4], u32, u32, bool)> {
         self.armor_layers(
-            armor
+            self.armor
                 .each_ref()
                 .map(|s| s.as_ref().map(|s| (&*s.item, Some(s)))),
+            self.wardrobe_loadout(None),
         )
     }
     /// `HumanoidArmorLayer` for another player's model: the armour it wears
@@ -323,13 +320,33 @@ impl Game<'_> {
         self.armor_layers(
             horizon_items::equipment::ARMOR
                 .map(|slot| e.slot_stack(slot).map(|stack| (&*stack.item, Some(stack)))),
+            self.wardrobe_loadout(Some(m.id)),
         )
+    }
+    pub(in crate::game) fn has_wardrobe_layer(&self, asset: &str, kind: &str) -> bool {
+        self.armor_stand_assets.equipment.get(asset).is_some_and(|set| {
+            set.get(kind).is_some_and(|layers| layers.iter().any(|(sprite, _)| {
+                self.gui.atlas.sprites.contains_key(sprite)
+            }))
+        })
+    }
+
+    pub(in crate::game) fn wardrobe_head_item(&self, asset: &str) -> Option<&'static str> {
+        let item_model = match asset {
+            "jianghu:qixiu" => "jianghu:qixiu_helmet",
+            "jianghu:qixiu_ceremonial" => "jianghu:qixiu_ceremonial_helmet",
+            "jianghu:mingjiao" => "jianghu:mingjiao_helmet",
+            "jianghu:mingjiao_ceremonial" => "jianghu:mingjiao_ceremonial_helmet",
+            _ => return None,
+        };
+        self.pack.item_renderer.models.definitions.contains_key(item_model).then_some(item_model)
     }
     /// The layers of the armour items `worn` (with their stacks when known,
     /// for trims and CIT armour rules), head to feet.
     fn armor_layers(
         &self,
         worn: [Option<(&str, Option<&ItemStack>)>; 4],
+        wardrobe: [Option<&str>; 4],
     ) -> Vec<(&Part, [f32; 4], u32, u32, bool)> {
         let assets = &self.armor_stand_assets;
         let emissive = self
@@ -339,46 +356,45 @@ impl Game<'_> {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out = Vec::new();
-        for (item, (layer, slot)) in worn.into_iter().zip([
+        for ((item, selected), (layer, slot)) in worn.into_iter().zip(wardrobe).zip([
             ("helmet", "head"),
             ("chestplate", "chest"),
             ("leggings", "legs"),
             ("boots", "feet"),
         ]) {
-            let Some((item, stack)) = item else {
-                continue;
-            };
-            // HumanoidArmorLayer.renderArmorPiece: the stack's own
-            // `equippable`, drawn when it has an asset and is worn in its slot.
-            let equippable = match stack {
-                Some(s) => horizon_client::item_sync::equippable(s, self.res.items()),
-                None => horizon_client::item_sync::item_equippable(item, self.res.items()),
-            };
-            let Some(asset) = equippable
-                .filter(|e| e.slot == slot)
-                .and_then(|e| e.asset_id)
-            else {
-                continue;
-            };
             let kind = if layer == "leggings" {
                 "humanoid_leggings"
             } else {
                 "humanoid"
             };
-            let Some(layers) = assets.equipment.get(&asset).and_then(|k| k.get(kind)) else {
+            let (asset, item, stack) = if let Some(asset) = selected.filter(|asset| {
+                self.has_wardrobe_layer(asset, kind)
+            }) {
+                if slot == "head" && self.wardrobe_head_item(asset).is_some() {
+                    continue;
+                }
+                (std::borrow::Cow::Borrowed(asset), None, None)
+            } else {
+                let Some((item, stack)) = item else { continue; };
+                let equippable = match stack {
+                    Some(s) => horizon_client::item_sync::equippable(s, self.res.items()),
+                    None => horizon_client::item_sync::item_equippable(item, self.res.items()),
+                };
+                let Some(asset) = equippable.filter(|e| e.slot == slot).and_then(|e| e.asset_id) else {
+                    continue;
+                };
+                (std::borrow::Cow::Owned(asset), Some(item), stack)
+            };
+            let Some(layers) = assets.equipment.get(asset.as_ref()).and_then(|k| k.get(kind)) else {
                 continue;
             };
-            let Some(part) = assets.player.get(layer) else {
+            let Some(part) = assets.wardrobe_geometry.get(asset.as_ref())
+                .and_then(|pieces| pieces.get(layer)).or_else(|| assets.player.get(layer)) else {
                 continue;
             };
             // EquipmentLayerRenderer.renderLayers: NO_OVERLAY, the armour
             // glint on the first layer and on the trim when `stack.hasFoil()`.
-            let item_glint = self
-                .res
-                .items()
-                .enchantments
-                .props
-                .get(item)
+            let item_glint = item.and_then(|item| self.res.items().enchantments.props.get(item))
                 .and_then(|p| p.glint);
             let overlay = if stack.is_some_and(|s| s.has_foil(item_glint)) {
                 horizon_client::mobs::render::ARMOR_GLINT

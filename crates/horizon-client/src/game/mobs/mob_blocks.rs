@@ -544,7 +544,19 @@ impl Game<'_> {
             .player_model
             .as_ref()
             .is_some_and(|p| p.id == mob.id && p.kind.id == mob.kind.id);
-        let mut stack = if local_player {
+        let visual_head = (&*mob.kind.id == "minecraft:player")
+            .then(|| self.wardrobe_loadout((!local_player).then_some(mob.id))[0])
+            .flatten()
+            .filter(|asset| self.has_wardrobe_layer(asset, "humanoid"));
+        let mut stack = if let Some(asset) = visual_head {
+            let Some(model) = self.wardrobe_head_item(asset) else { return };
+            let mut sample = ItemStack::new("minecraft:leather_helmet", 1);
+            sample.data_mut().set_other(
+                "minecraft:item_model",
+                Some(horizon_core::nbt::Tag::String(model.into())),
+            );
+            sample
+        } else if local_player {
             let Some(stack) = &self.armor[0] else { return };
             stack.clone()
         } else if let Some(stack) = mob.extra.slot_stack(horizon_items::equipment::HEAD) {
@@ -554,12 +566,12 @@ impl Game<'_> {
         };
         // Helmets are drawn by HumanoidArmorLayer, not CustomHeadLayer
         // (LivingEntityRenderer.extractRenderState: HumanoidArmorLayer.shouldRender).
-        if horizon_client::item_sync::equippable(&stack, self.res.items())
+        if visual_head.is_none() && horizon_client::item_sync::equippable(&stack, self.res.items())
             .is_some_and(|e| e.asset_id.is_some() && e.slot == "head")
         {
             return;
         }
-        if !local_player
+        if visual_head.is_none() && !local_player
             && horizon_client::mobs::gear::enchanted(mob, horizon_client::mobs::gear::HEAD)
         {
             stack.enchant("minecraft:unbreaking", 1);

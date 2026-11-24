@@ -17,6 +17,7 @@ mod level_format;
 mod raw_ingress;
 mod recipe_properties;
 mod use_item;
+pub(in crate::game) mod wardrobe;
 
 mod block_entity_data;
 #[cfg(test)]
@@ -487,6 +488,7 @@ pub(super) struct Remote {
     pub custom_books: bool,
     /// The synced attachments the server sent, by holder.
     pub attachments: HashMap<Holder, ResidentAttachments>,
+    wardrobe: wardrobe::Wardrobe,
     /// The server samples far terrain for us, this far at most (`lod_net`).
     pub far_terrain: Option<horizon_client::lod_net::Offer>,
     pub(super) builtin: Arc<Builtin>,
@@ -1130,6 +1132,7 @@ impl Game<'_> {
             custom_books: false,
             logged_out: false,
             attachments: HashMap::new(),
+            wardrobe: Default::default(),
             far_terrain: None,
             builtin,
             status: lang
@@ -1374,6 +1377,7 @@ impl Game<'_> {
             quiet_commands: false,
             custom_books: false,
             attachments: HashMap::new(),
+            wardrobe: Default::default(),
             far_terrain: None,
             builtin,
             status: "Playing Studio Replay".into(),
@@ -5083,6 +5087,7 @@ impl Game<'_> {
                         r.skin_textures.remove(&u);
                         r.listed.remove(&u);
                         r.attachments.remove(&Holder::Player(u));
+                        r.wardrobe.forget(u);
                     }
                 }
             }
