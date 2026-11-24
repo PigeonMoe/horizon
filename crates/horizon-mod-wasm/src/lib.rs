@@ -906,7 +906,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line == expected)
+                .any(|(_, line)| line == expected)
         );
     }
 

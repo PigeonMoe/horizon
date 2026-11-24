@@ -372,38 +372,47 @@ fn imports_inherit_the_root_borrow_token_and_expire_with_the_call() {
 }
 
 #[test]
-fn guest_panic_text_is_logged_with_mod_id_and_no_reply() {
+fn guest_log_messages_use_their_level_and_mod_id_without_a_reply() {
     crate::test_stack::on_guest_stack(|| {
         capture_logs();
-        for trailing in [false, true] {
-            let module = module(&format!(
-                "i32.const {} local.get 1 local.get 2 i32.const -1 i32.const 0 call $host i32.const 0 i32.ne if unreachable end i64.const 0",
-                mod_api::wire::HOST_LOG
-            ));
-            let answer = module.call(
-                CallClass::Hook,
-                Frame::default(),
-                0,
-                None,
-                |w| {
-                    w.put(&"guest panic at register");
-                    if trailing {
-                        w.put(&1u8);
-                    }
-                },
-                |r| r.take::<()>(),
-            );
-            assert_eq!(answer, if trailing { None } else { Some(()) });
-            assert_eq!(module.is_stopped(), trailing);
+        for (import, level, message) in [
+            (
+                mod_api::wire::HOST_LOG,
+                log::Level::Error,
+                "guest panic at register",
+            ),
+            (
+                mod_api::wire::HOST_LOG_INFO,
+                log::Level::Info,
+                "guest diagnostics enabled",
+            ),
+        ] {
+            for trailing in [false, true] {
+                let module = module(&format!(
+                    "i32.const {import} local.get 1 local.get 2 i32.const -1 i32.const 0 call $host i32.const 0 i32.ne if unreachable end i64.const 0"
+                ));
+                let answer = module.call(
+                    CallClass::Hook,
+                    Frame::default(),
+                    0,
+                    None,
+                    |w| {
+                        w.put(&message);
+                        if trailing {
+                            w.put(&1u8);
+                        }
+                    },
+                    |r| r.take::<()>(),
+                );
+                assert_eq!(answer, if trailing { None } else { Some(()) });
+                assert_eq!(module.is_stopped(), trailing);
+            }
+            let expected = format!("wasm mod test: {message}");
+            let logs = CAPTURE.0.lock().unwrap();
+            let mut matches = logs.iter().filter(|(_, text)| *text == expected);
+            assert_eq!(matches.next().map(|(level, _)| *level), Some(level));
+            assert!(matches.next().is_none());
         }
-        let messages = CAPTURE.0.lock().unwrap();
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.as_str() == "wasm mod test: guest panic at register")
-                .count(),
-            1
-        );
     })
 }
 
@@ -1727,7 +1736,7 @@ fn refusal_replies_survive_and_report_once() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .filter(|m| m.starts_with(&prefix))
+                    .filter(|(_, message)| message.starts_with(&prefix))
                     .count(),
                 1
             );
@@ -1755,9 +1764,11 @@ fn depth_refusal_survives() {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|m| m.starts_with("wasm depth refusal:")
-                    && m.contains("depth_refusal_case")
-                    && m.contains("limit 64"))
+                .filter(|(_, message)| {
+                    message.starts_with("wasm depth refusal:")
+                        && message.contains("depth_refusal_case")
+                        && message.contains("limit 64")
+                })
                 .count(),
             1
         );
@@ -1911,7 +1922,9 @@ fn refusal_log_names_each_member_and_hook_once() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .filter(|m| **m == format!("wasm refusal: hook_log_case hook {hook}: "))
+                    .filter(|(_, message)| {
+                        *message == format!("wasm refusal: hook_log_case hook {hook}: ")
+                    })
                     .count(),
                 1,
                 "hook {hook} logs exactly once"
@@ -2007,7 +2020,9 @@ fn deep_guest_stack_and_overflow_attribution() {
             .lock()
             .unwrap()
             .iter()
-            .any(|line| line.contains("wasm mod test stopped its group") && line.contains("stack"))
+            .any(|(_, line)| {
+                line.contains("wasm mod test stopped its group") && line.contains("stack")
+            })
     );
 }
 
@@ -2102,7 +2117,7 @@ fn small_calling_thread_refuses_without_poisoning_the_mod() {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.contains("wasm mod test: GuestStackUnavailable"))
+                .any(|(_, line)| line.contains("wasm mod test: GuestStackUnavailable"))
         );
     })
 }

@@ -806,7 +806,7 @@ fn host(
             .remove(id)
             .map(|_| ())
             .map_err(|e| wasmtime::Error::msg(format!("{e:?}")))
-    } else if id == mod_api::wire::HOST_LOG {
+    } else if matches!(id, mod_api::wire::HOST_LOG | mod_api::wire::HOST_LOG_INFO) {
         let mut reader = Reader::new(&input);
         let message: String = reader.take()?;
         if !reader.rest().is_empty() {
@@ -815,7 +815,12 @@ fn host(
         // Release the Cx borrow before entering a possibly reentrant logger.
         let module = unsafe { (&*cx).module.as_ref().map(|module| module.id.clone()) }
             .ok_or_else(|| wasmtime::Error::msg("no calling module"))?;
-        log::error!("wasm mod {module}: {message}");
+        let level = if id == mod_api::wire::HOST_LOG_INFO {
+            log::Level::Info
+        } else {
+            log::Level::Error
+        };
+        log::log!(level, "wasm mod {module}: {message}");
         Ok(())
     } else {
         // SAFETY: Cx is boxed and stable; serve must release its frame borrows before
