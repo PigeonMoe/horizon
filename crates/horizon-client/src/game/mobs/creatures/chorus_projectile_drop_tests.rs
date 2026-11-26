@@ -227,6 +227,221 @@ fn a_guarded_projectile_keeps_the_flower_and_pot_while_other_impact_types_still_
         });
     });
 }
+const SHOOTER: u128 = 177;
+const SHOOTER_CONN: u32 = 12;
+const SHOOTER_ENTITY: u32 = 101;
+
+fn bind_guest_shooter(game: &mut Game<'_>) {
+    use crate::game::native_entity_refs::tests::{bind_acting_guest, bind_local_player};
+
+    game.lan_acting = Some(SHOOTER_CONN);
+    game.lan_acting_entity = Some(SHOOTER_ENTITY);
+    game.lan_acting_uuid = Some(SHOOTER);
+    game.lan_acting_name = Some("Shooter".into());
+    bind_acting_guest(game);
+    game.lan
+        .as_mut()
+        .unwrap()
+        .hub
+        .update_guest(SHOOTER_CONN, |guest| guest.permission = 2)
+        .unwrap();
+    game.lan_acting = None;
+    bind_local_player(game, 100, 188);
+    game.lan_acting_name = Some("Host".into());
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_flaming_arrow_checks_ignition_with_its_resolved_player_owner() {
+    use mod_api::{BlockIgniteEvent, LevelHost, PlayerBlockIgnitePreEvent};
+
+    #[derive(Clone, Default)]
+    struct GuardIgnition {
+        generic: Arc<Mutex<Vec<(i32, Option<u128>, String)>>>,
+        player: Arc<Mutex<Vec<i32>>>,
+    }
+
+    #[mod_api::__subscriptions]
+    impl Hooks for GuardIgnition {
+        fn block_ignite(&self, _: &dyn LevelHost, event: &mut BlockIgniteEvent<'_>) -> Flow {
+            let x = event.pos.x;
+            self.generic
+                .lock()
+                .unwrap()
+                .push((x, event.player, event.cause.to_owned()));
+            if x == 4 && event.player.is_none() {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn player_block_ignite_pre(
+            &self,
+            _: &dyn LevelHost,
+            event: &mut PlayerBlockIgnitePreEvent<'_>,
+        ) -> Flow {
+            assert_eq!(event.player, SHOOTER);
+            assert_eq!(event.name, "Shooter");
+            assert_eq!(event.permission_level, 2);
+            self.player.lock().unwrap().push(event.pos.x);
+            if event.pos.x == 8 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    with_game(|game| {
+        bind_guest_shooter(game);
+        assert!(game.run_command("gamerule mob_griefing false"));
+
+        let guard = GuardIgnition::default();
+        let mods = vec![ModEntry::new("guarded-ignition", Box::new(guard.clone()))].into();
+        with_mods(mods, || {
+            for (x, z, block, arrow, owner, lit) in [
+                (4, 4, "candle", "arrow", "", false),
+                (8, 4, "candle_cake", "arrow", ",Owner:[I;0,0,0,177]", false),
+                (
+                    12,
+                    4,
+                    "campfire",
+                    "spectral_arrow",
+                    ",Owner:[I;0,0,0,177]",
+                    true,
+                ),
+                (12, 8, "candle", "arrow", ",Owner:[I;0,0,0,199]", true),
+            ] {
+                source(game, x, z, &format!("{block}[lit=false]"));
+                assert!(game.run_command(&format!(
+                    "summon minecraft:{arrow} {x}.5 202.5 {z}.5 {{NoGravity:1b,Motion:[0d,-3d,0d],Fire:80s{owner}}}"
+                )));
+                game.tick_projectiles().unwrap();
+                assert!(
+                    game.run_command(&format!("execute if block {x} 200 {z} {block}[lit={lit}]"))
+                );
+            }
+            assert_eq!(*guard.player.lock().unwrap(), [8, 12]);
+            assert_eq!(
+                *guard.generic.lock().unwrap(),
+                [
+                    (4, None, "arrow".into()),
+                    (8, Some(SHOOTER), "arrow".into()),
+                    (12, Some(SHOOTER), "flint_and_steel".into()),
+                    (12, None, "arrow".into()),
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guests_flaming_arrow_preserves_the_tnt_blast_owner() {
+    use horizon_core::nbt::Tag;
+
+    with_game(|game| {
+        bind_guest_shooter(game);
+        assert!(game.run_command("gamerule tnt_explodes true"));
+        assert!(game.run_command("gamerule mob_griefing false"));
+        source(game, 8, 4, "tnt");
+        source(game, 12, 4, "tnt");
+        assert!(game.run_command(
+            "summon minecraft:skeleton 12.5 205 8.5 {UUID:[I;0,0,0,178],NoAI:1b,NoGravity:1b}"
+        ));
+        let skeleton = game
+            .mobs
+            .iter()
+            .find(|mob| game.persist.uuid_of(mob.id) == Some([0, 0, 0, 178]))
+            .unwrap()
+            .id;
+        assert!(game.run_command(
+            "summon minecraft:arrow 8.5 202.5 4.5 {NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s,Owner:[I;0,0,0,177]}"
+        ));
+        assert!(game.run_command(
+            "summon minecraft:arrow 12.5 202.5 4.5 {NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s,Owner:[I;0,0,0,178]}"
+        ));
+        assert!(
+            game.creatures
+                .projectiles
+                .iter()
+                .any(|p| p.owner == Some(Who::Mob(skeleton)))
+        );
+        game.tick_projectiles().unwrap();
+
+        assert!(game.run_command("execute if block 8 200 4 air"));
+        assert!(game.run_command("execute if block 12 200 4 tnt"));
+        assert_eq!(game.tnts.len(), 1);
+        assert_eq!(
+            game.tnt_nbt(0).get("owner").cloned(),
+            Some(Tag::IntArray(
+                horizon_client::lan::playerdata::uuid_ints(SHOOTER).to_vec()
+            ))
+        );
+        game.set_tnt_blast_owner(game.tnts[0].id);
+        assert!(game.combat.blast_owner_player);
+        assert_eq!(game.combat.blast_guest, Some(SHOOTER_CONN));
+        assert_eq!(
+            game.combat.blast_owner.as_ref().map(|(id, _)| *id),
+            Some(SHOOTER_ENTITY)
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guarded_flaming_arrow_hit_keeps_the_tnt_and_still_sticks() {
+    with_game(|game| {
+        let guard = GuardedHit(Arc::default());
+        let mods = vec![ModEntry::new("guarded-impact", Box::new(guard.clone()))].into();
+        with_mods(mods, || {
+            assert!(game.run_command("gamerule tnt_explodes true"));
+            let mut hits = Vec::new();
+            for (x, kind) in [(4, "arrow"), (8, "spectral_arrow")] {
+                source(game, x, 4, "tnt");
+                assert!(game.run_command(&format!(
+                    "summon minecraft:{kind} {x}.5 202.5 4.5 {{UUID:[I;116,0,0,{x}],NoGravity:1b,Motion:[0d,-2d,0d],Fire:80s}}"
+                )));
+                let projectile = game
+                    .creatures
+                    .projectiles
+                    .iter()
+                    .find(|p| game.persist.uuid_of(p.id) == Some([116, 0, 0, x]))
+                    .unwrap();
+                assert_eq!(
+                    projectile.position,
+                    Vec3::new(f64::from(x) + 0.5, 202.5, 4.5)
+                );
+                assert_eq!(projectile.velocity, Vec3::new(0.0, -2.0, 0.0));
+                assert!(projectile.no_gravity && projectile.arrow.as_ref().unwrap().on_fire());
+                let id = projectile.id;
+                game.tick_projectiles().unwrap();
+                assert!(
+                    game.creatures
+                        .projectiles
+                        .iter()
+                        .find(|p| p.id == id)
+                        .unwrap()
+                        .arrow
+                        .as_ref()
+                        .unwrap()
+                        .in_ground
+                );
+                hits.push((id, format!("minecraft:{kind}"), [x, 200, 4]));
+                if x == 4 {
+                    assert!(game.run_command("execute if block 4 200 4 tnt"));
+                    assert!(game.tnts.is_empty());
+                } else {
+                    assert!(game.run_command("execute if block 8 200 4 air"));
+                    assert_eq!(game.tnts.len(), 1);
+                }
+            }
+            assert_eq!(*guard.0.lock().unwrap(), hits);
+        });
+    });
+}
+
 #[test]
 #[ignore = "daily"]
 fn denied_hits_other_blocks_and_direct_destroy_keep_their_drop_contracts() {

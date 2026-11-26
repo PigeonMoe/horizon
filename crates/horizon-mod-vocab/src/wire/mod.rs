@@ -42,6 +42,10 @@ pub const HOST_RELEASE: u32 = 0xFFFF_FF02;
 // hidden: transport plumbing used by generated boundary code.
 #[doc(hidden)]
 pub const HOST_LOG: u32 = 0xFFFF_FF03;
+/// The game's import taking an informational message from the mod.
+// hidden: transport plumbing used by the mod API's logging helper.
+#[doc(hidden)]
+pub const HOST_LOG_INFO: u32 = 0xFFFF_FF04;
 
 /// The layout of every value and call that crosses, a hash the generator writes: a mod built
 /// for another one is refused when it loads.

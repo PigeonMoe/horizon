@@ -1,12 +1,15 @@
 //! Whole stacks for server mods: one given to a player as `/give` gives it
-//! (`player_give_stack`), and one read from SNBT as a saved item is (`item_from_snbt`).
+//! (`player_give_stack`), and saved item stack codecs.
 use super::Game;
 use horizon_client::{items::ItemStack, lan::playerdata};
-use horizon_core::nbt::{Compound, Tag};
+use horizon_core::nbt::{self, Compound, Limits, Tag};
 use mod_api::{PlayerDataRefusal, PlayerRef};
+use std::io::{Read, Write};
 
 /// The most SNBT text `item_from_snbt` reads: `NbtAccounter`'s default quota, 2 MiB.
 const MAX_SNBT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SAVED_GZIP_BYTES: usize = 1024 * 1024;
+const MAX_SAVED_NBT_BYTES: usize = 16 * 1024 * 1024;
 
 impl Game<'_> {
     /// `GiveCommand.giveItem` for one stack: `Inventory.add`, the rest thrown for the player
@@ -92,9 +95,100 @@ impl Game<'_> {
         if !patch.is_empty() {
             input.insert("components".into(), Tag::Compound(patch));
         }
-        let fixed = datafix::upgrade_item_stack(data_version, input).ok()?;
+        self.upgraded_saved_stack(data_version, input, count)
+    }
+
+    pub(super) fn item_from_saved_gzip_nbt(&self, bytes: Vec<u8>) -> Option<ItemStack> {
+        if bytes.len() > MAX_SAVED_GZIP_BYTES {
+            return None;
+        }
+        let mut gzip = flate2::bufread::GzDecoder::new(bytes.as_slice());
+        let mut raw = Vec::new();
+        gzip.by_ref()
+            .take((MAX_SAVED_NBT_BYTES + 1) as u64)
+            .read_to_end(&mut raw)
+            .ok()?;
+        if raw.len() > MAX_SAVED_NBT_BYTES || !gzip.get_ref().is_empty() {
+            return None;
+        }
+        let (root, consumed) = nbt::read_named(&raw, saved_nbt_limits()).ok()?;
+        let Tag::Compound(mut input) = root.tag else {
+            return None;
+        };
+        if consumed != raw.len() {
+            return None;
+        }
+        let Tag::Int(data_version) = input.remove(&"DataVersion".into())? else {
+            return None;
+        };
+        let count = match input
+            .get(&"count".into())
+            .or_else(|| input.get(&"Count".into()))
+        {
+            None => 1,
+            Some(Tag::Byte(n)) => i32::from(*n),
+            Some(Tag::Short(n)) => i32::from(*n),
+            Some(Tag::Int(n)) => *n,
+            _ => return None,
+        };
+        if !(1..=99).contains(&count) {
+            return None;
+        }
+        self.upgraded_saved_stack(data_version, input, count as u32)
+    }
+
+    pub(super) fn item_to_saved_gzip_nbt(&self, stack: &ItemStack) -> Option<Vec<u8>> {
+        if !(1..=99).contains(&stack.count)
+            || stack.item.as_ref() == "minecraft:air"
+            || self.items().get(&stack.item).is_none()
+        {
+            return None;
+        }
+        let Tag::Compound(mut item) =
+            horizon_items::item_nbt::item_to_nbt_with_items(stack, self.items())
+        else {
+            return None;
+        };
+        item.insert(
+            "DataVersion".into(),
+            Tag::Int(horizon_core::version::DATA_VERSION),
+        );
+        let bytes = nbt::write_named_strict(
+            &nbt::NamedTag {
+                name: Default::default(),
+                tag: Tag::Compound(item),
+            },
+            saved_nbt_limits(),
+        )
+        .ok()?;
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&bytes).ok()?;
+        let compressed = gzip.finish().ok()?;
+        (compressed.len() <= MAX_SAVED_GZIP_BYTES).then_some(compressed)
+    }
+
+    fn upgraded_saved_stack(
+        &self,
+        data_version: i32,
+        input: Compound,
+        count: u32,
+    ) -> Option<ItemStack> {
+        let fixed = horizon_world::datafix::upgrade_item_stack(data_version, input).ok()?;
+        if fixed
+            .get(&"components".into())
+            .is_some_and(|tag| !matches!(tag, Tag::Compound(_)))
+        {
+            return None;
+        }
         let fixed = Tag::Compound(fixed);
         let stack = horizon_items::item_nbt::item_from_nbt(&fixed)?;
         (stack.count == count && self.items().get(&stack.item).is_some()).then_some(stack)
+    }
+}
+
+fn saved_nbt_limits() -> Limits {
+    Limits {
+        max_bytes: MAX_SAVED_NBT_BYTES,
+        ..Limits::default()
     }
 }

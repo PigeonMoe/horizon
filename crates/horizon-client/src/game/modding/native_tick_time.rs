@@ -1,14 +1,23 @@
 //! The tick's spare time, as mods read it (`MinecraftServer.haveTime`).
 use super::Game;
 use chrono::{Datelike, Local, Timelike};
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
+
+fn monotonic_elapsed() -> Duration {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed()
+}
 
 impl Game<'_> {
     pub(super) fn server_monotonic_millis(&self) -> u64 {
-        static ORIGIN: OnceLock<Instant> = OnceLock::new();
-        let millis = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
-        u64::try_from(millis).unwrap_or(u64::MAX)
+        u64::try_from(monotonic_elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    pub(super) fn server_monotonic_nanos(&self) -> u64 {
+        u64::try_from(monotonic_elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
     pub(super) fn server_local_minute(&self) -> [i32; 5] {
@@ -47,9 +56,13 @@ mod tests {
     fn a_server_has_time_until_its_tick_deadline_passes() {
         with_game(|game| {
             let before = game.server_monotonic_millis();
+            let before_nanos = game.server_monotonic_nanos();
             let game_tick = game.world.game_time;
             std::thread::sleep(Duration::from_millis(4));
+            let after_nanos = game.server_monotonic_nanos();
             assert!(game.server_monotonic_millis() >= before + 4);
+            assert!(after_nanos >= before_nanos + 4_000_000);
+            assert!(before_nanos / 1_000_000 >= before);
             assert_eq!(game.world.game_time, game_tick);
             game.server_tick_deadline = None;
             assert!(game.server_has_time());

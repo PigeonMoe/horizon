@@ -206,9 +206,20 @@ player is frozen, the reply also gives `"freeze_ticks_left"` beside the record: 
 by itself, so that a proxy does not commit on the target too late for its release to come in time.
 
 How a server reads a record (the target's `player-import`):
-- A record of another `version`, or of another `data_version` than the server's own, is refused.
+- The target refuses a record version it cannot receive or a `data_version` different from its own.
 - The NBT in `player` wins over the plain fields: they are copies of its values, for a proxy.
 - Fields the reader does not know are ignored, so a later version 1 record may carry more.
+
+The reserved `profiles` field is for version 2 records. It lists 1 to 16 required plugin sections,
+each with a unique namespaced `id`, a positive integer schema `version`, and a nonempty padded base64
+`payload`. Section data can contain up to 8 MiB total after decoding. The complete request must fit
+the game control socket's 16 MiB line limit. A target needs a durable receiver for every section
+before placing the held player or acknowledging an import retry. Servers opt into receiving by
+setting the exact section IDs and schema versions under `[transfer.required_profiles]`, for example
+`"slimefun:profile" = 1`. The package owning each namespace must validate its complete section.
+With a required roster, the login must have a live proxy expectation and its import must include
+the exact roster. The target confirms only after the player file activates the durable sections.
+Profile-free servers continue to export and import version 1. Required profiles are receive-only.
 
 **The hand-over.** `freeze` starts one: the record gets a `handover` id, which the later requests name, and the
 player's own inputs (moves, clicks, chat, commands) stop being acted on, while what answers the server (teleport
@@ -223,6 +234,10 @@ player who is not connected, is held, has not finished joining, is leaving, is r
 While frozen, the player takes no damage (as vanilla's `Abilities.invulnerable`: the void and `/kill` still kill)
 and picks nothing up (items, arrows, experience orbs), so its record stays what it is until the release. A player
 who dies while frozen all the same ends the hand-over, with a warning in the log.
+Mods can still read that player. `PlayerRef` inventory, ender chest and persistent-data writes, and
+transactional `ItemPlace` writes to their slots and hands, refuse while the hand-over is frozen.
+`ServerHost::player_frozen_handover` lets a mod check that same source freeze for owner-keyed data
+another player can reach, such as a borrowed backpack.
 
 `player-release <uuid> <hand-over> moved [announce]` and `player-release <uuid> <hand-over> abort` end the
 hand-over, on the source server. Both name the hand-over the export returned. `moved` takes the player out of the
@@ -378,6 +393,63 @@ with `[transfer]` on and behind the proxy's Velocity forwarding:
 Every step that is not taken in time is undone by itself: an expectation after `expect_seconds`, a held player after
 `max_hold_seconds`, a freeze after `max_freeze_seconds`, each with a warning in the log. A `moved` that comes after
 the freeze ran out is refused, so the proxy must confirm and release within `max_freeze_seconds` of the export.
+
+**Durable plugin profiles.** Configure a stable backend ID and the complete profile roster on both servers.
+The destination lists approved source backend IDs. For example, the `east` destination can accept records from `west`.
+
+```toml
+[transfer]
+enabled = true
+backend_id = "east"
+allowed_sources = ["west"]
+
+[transfer.required_profiles]
+"slimefun:profile" = 1
+```
+
+The proxy uses the backends' administrative control endpoints and keeps the same hand-over ID on retries.
+
+1. Reserve the arrival on `east` with `player-expect <uuid>`.
+2. Choose a nonzero 32-digit hexadecimal hand-over ID. On `west`, call `player-profile-export <uuid> <hand-over> east`.
+   The response contains the portable `record`, its `record_sha256` and the `pending` phase. The source keeps its
+   connection available for the proxy while the player's gameplay is frozen.
+3. Connect to `east`. Call `player-import <uuid> <json>` with the complete `record` and `"place": false`.
+   Save the `source`, `destination`, `record_sha256` and `request_sha256` from the staged reply.
+4. On `west`, call `player-profile-retire <uuid> <hand-over> east <record_sha256>` and wait for the `retired` phase.
+5. On `east`, call `player-confirm <uuid> <hand-over> west east <record_sha256> <request_sha256>`. The destination
+   saves the profile and its receipt before activating the player.
+
+On a lost reply, `player-profile-status <uuid> <hand-over> <destination>` recovers the source phase.
+An identical export returns the same record, and identical retirement and confirmation requests reuse their
+receipts. A destination reply with `already_committed` and `currently_placed: false` acknowledges a historical
+commit and leaves the current connection alone. The durable source fence survives restart and remains effective
+until the coordinator completes ownership recovery. The legacy freeze timer and `player-release` apply to version 1.
+
+**Released Paper PM-Sync snapshots.** Build both `horizon-server` and the dedicated engine with the
+optional `pm-sync-mysql` Cargo feature. For a native SDK use `tools/prebuilt_game.py build OUT --server
+--pm-sync-mysql`. Run `horizon-server pm-sync-arrival prepare`, `commit` and `resume` on the destination
+host using its ordinary `--dir`. Set `HORIZON_PM_SYNC_DATABASE_URL` in the dedicated daemon and the
+prepare process to the same database URL. Set `HORIZON_PM_SYNC_TABLE_PREFIX` in both if the existing
+table prefix differs from `pmsync_`.
+
+The proxy adapter calls `prepare` after it receives the departure acknowledgement from the player's current
+Paper backend and holds the forwarded connection on Horizon with `player-expect`. It sends one JSON object
+through stdin containing `player` and `owner_token` as UUIDs, `handover` as a 32-digit lowercase hexadecimal
+id, `source` as the approved Paper server id, the positive SQL `revision`, the lowercase `snapshot_sha256`,
+and `compression` (`json` or `snappy`). Keep the owner token and hand-over id across retries. The SQL claim
+requires the exact released bytes and leaves the approved destination holding the lease. `prepare` puts the
+bytes in the world's private spool and returns the engine's `record_sha256` and `request_sha256`.
+
+Call `commit` with the same JSON plus `prepared`, an object containing those two digests. When the
+dedicated engine handles the command it checks the exact SQL owner in the background. The original
+connection stays held until the database acknowledges the check. The engine writes the native player file and receipt
+before placement. Retry the same request after a lost acknowledgement. Use `currently_placed` to
+distinguish an active connection from a historical receipt. After restart, hold a new expected connection
+and call `resume` with the same JSON to restore the current native file under the exact same SQL claim.
+
+The proxy keeps the lease token private and retains the same SQL owner while resolving placement, including
+after a control timeout or disconnect. Before using the token to release or advance the lease, fence the
+current player on their owning backend. Losing a database connection does not release the persisted token.
 
 **A server that stops.** From the `/stop` command (the console's, a player's or the control endpoint's) or a stop
 signal on, `player-expect`, `player-import` and `player-confirm` are refused `{"error": "the server is stopping"}`: a

@@ -1440,7 +1440,12 @@ impl Game<'_> {
     /// into the level (`/data`) and both its files (`playerdata::save_owner`),
     /// anyone else into their own file.
     pub(super) fn save_guest(&mut self, guest: &mut horizon_client::lan::guest::Guest) {
-        if !guest.participates_in_player_simulation() {
+        if !guest.participates_in_player_simulation()
+            || self
+                .lan
+                .as_ref()
+                .is_some_and(|host| host.hub.source_frozen_handover(guest.uuid).is_some())
+        {
             return;
         }
         // A proxy released this record to another server, which now owns saving it.
@@ -1607,7 +1612,10 @@ impl Game<'_> {
     /// live record, independently of the dirty entries sent to their client.
     pub(super) fn save_connected_guest_statistics(&self, host: &LanHost) {
         for guest in &host.hub.guests {
-            if !guest.placed || guest.released {
+            if !guest.placed
+                || guest.released
+                || host.hub.source_frozen_handover(guest.uuid).is_some()
+            {
                 continue;
             }
             let Some(uuid) = self.records_uuid(host, guest.uuid) else {
@@ -1654,7 +1662,7 @@ impl Game<'_> {
     /// `PlayerAdvancements.load` and `ServerStatsCounter.parseLocal` of a
     /// network player who joined; every statistic goes out on the first
     /// request (`PlayerList.placeNewPlayer`'s `markAllDirty`).
-    fn load_guest_records(&mut self, conn: u32) {
+    pub(in crate::game) fn load_guest_records(&mut self, conn: u32) {
         let Some(host) = self.lan.as_ref() else {
             return;
         };
@@ -2376,7 +2384,11 @@ impl Game<'_> {
                     }
                 }
                 HostEvent::PlayerMove(conn) => self.lan_player_move(conn),
-                HostEvent::Input { conn, flags, loaded } => self.lan_player_input(conn, flags, loaded),
+                HostEvent::Input {
+                    conn,
+                    flags,
+                    loaded,
+                } => self.lan_player_input(conn, flags, loaded),
                 HostEvent::ClientInformation(conn, old, new) => {
                     if let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) {
                         let (uuid, entity_id, name) = (g.uuid, g.entity_id, g.name.clone());
@@ -2949,14 +2961,30 @@ impl Game<'_> {
         let root = self.world_root.clone();
         let in_place = host.hub.config.dimension.clone();
         let levels = host.hub.config.levels;
+        let returning = host.hub.pending_profile_return(conn);
+        // An already committed return needs the saved level in its first Login packet.
+        // Leave the profile itself unloaded until the coordinator authorizes this connection.
+        let committed_level = returning
+            .and_then(|authorization| {
+                horizon_client::lan::source_handover::CurrentReturn::read_matching_player(
+                    &root,
+                    authorization,
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|(_, tag)| playerdata::saved_player(tag).dimension)
+            .filter(|dimension| levels.has(dimension));
+        let returning = returning.is_some();
         let owner = host.owner.as_mut();
         let Some((known, uuid, name)) = host.hub.update_guest(conn, |g| {
             // PlayerList.loadPlayerData: the owner gets the world's player file,
-            // everyone else their own.
-            let known = match owner.filter(|o| o.uuid == g.uuid) {
-                Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref()),
-                None => playerdata::load(g, &root),
-            };
+            // everyone else their own. A return starts without the retired profile.
+            let known = !returning
+                && match owner.filter(|o| o.uuid == g.uuid) {
+                    Some(o) => playerdata::load_owner(g, &root, o.saved.take().as_deref()),
+                    None => playerdata::load(g, &root),
+                };
             // `PlayerList.placeNewPlayer`: a saved level the world no longer has is the Overworld.
             if !levels.has(&g.dimension) {
                 g.dimension = "minecraft:overworld".to_owned();
@@ -2968,7 +2996,9 @@ impl Game<'_> {
             return false;
         };
         self.initialize_server_player(uuid, conn);
-        self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
+        if !returning {
+            self.native_player_load_from_file(uuid, &name, &playerdata::directory(&root));
+        }
         let Some(host) = self.lan.as_mut() else {
             return false;
         };
@@ -3011,7 +3041,8 @@ impl Game<'_> {
                     g.head_yaw = g.yaw;
                     g.health = 20.0;
                     g.food = 20;
-                    g.dimension = super::Dim::Overworld.id().to_owned();
+                    g.dimension =
+                        committed_level.unwrap_or_else(|| super::Dim::Overworld.id().to_owned());
                 })
                 .is_none()
             {
@@ -3033,7 +3064,9 @@ impl Game<'_> {
         }) else {
             return false;
         };
-        self.load_guest_records(conn);
+        if !returning {
+            self.load_guest_records(conn);
+        }
         // Collect the recipient's recipe types and filter their command tree.
         self.prepare_recipe_join(conn);
         // A level that will not open, its generator gone with a mod, is one the
@@ -3086,7 +3119,7 @@ impl Game<'_> {
         if elsewhere && let Err(e) = self.enter_level(back) {
             log::error!("could not reopen {}: {e}", back.id());
         }
-        !known
+        !known && !returning
     }
 
     /// Level events the game queued, for the guests (`process_level_events`).
@@ -3178,6 +3211,7 @@ impl Game<'_> {
     pub(super) fn player_equipment_broke(
         &mut self,
         slot: horizon_core::equipment_slot::EquipmentSlot,
+        inventory_slot: usize,
         stack: &horizon_client::items::ItemStack,
     ) {
         use horizon_core::equipment_slot::EquipmentSlot;
@@ -3197,6 +3231,18 @@ impl Game<'_> {
             && let (Some(uuid), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone())
         {
             self.native_player_destroy_item(uuid, &name, &stack.item, equipment_slot_name(slot));
+            if stack.count == 1
+                && mod_api::__private::listened(mod_api::HookId::PlayerItemBreakSnapshot)
+                && let Ok(stack) = stack.try_into_api()
+            {
+                self.native_player_item_break_snapshot(
+                    mod_api::__private::PlayerItemBreakSnapshotCall {
+                        player: uuid,
+                        inventory_slot: inventory_slot as u32,
+                        stack: &stack,
+                    },
+                );
+            }
         }
         let Some(at) = self
             .player

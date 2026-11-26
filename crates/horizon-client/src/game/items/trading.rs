@@ -37,6 +37,25 @@ pub(super) struct MerchantState {
     /// style, else nothing (the profession's name is the default).
     pub(super) name: Option<Text>,
 }
+impl MerchantState {
+    pub(super) fn reset_villager_career(&mut self, random: &mut RandomSequences) {
+        let session = &mut self.session;
+        session.profession = "minecraft:none".into();
+        session.level = 1;
+        session.xp = 0;
+        session.offers.clear();
+        session.selection_hint = 0;
+        session.active = None;
+        session.future_xp = 0;
+        for (id, sequence) in std::mem::take(&mut session.sequences) {
+            random.give_back(id, sequence);
+        }
+        self.scroll = 0;
+        self.dragging = false;
+        self.focused = None;
+    }
+}
+
 /// `Merchant.getDisplayName`: the merchant's custom name (style and all), else
 /// the profession's or the wandering trader's.
 pub(super) fn merchant_display_name(

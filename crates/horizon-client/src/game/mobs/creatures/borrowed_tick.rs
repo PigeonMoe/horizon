@@ -560,14 +560,15 @@ impl Game<'_> {
                             vehicle.previous,
                             vehicle.position,
                             |mut seat| {
-                                for _ in 0..=mobs.len() {
+                                for _ in 0..=mobs.len()
+                                    + self.persist.off_level.len()
+                                    + self.persist.passenger_slots.len()
+                                {
                                     if seat == vehicle.id {
                                         return true;
                                     }
-                                    let Some(parent) = mobs
-                                        .iter()
-                                        .find(|mob| mob.id == seat && !mob.removed)
-                                        .and_then(|mob| mob.extra.mount)
+                                    let Some(parent) =
+                                        self.passenger_object_vehicle_with_mobs(seat, &mobs)
                                     else {
                                         return false;
                                     };

@@ -1,1 +1,1 @@
-pub use entity::player_data::{PlayerDataRefusal, PlayerFlagReadError};
+pub use entity::player_data::{PlayerDataRefusal, PlayerFlagReadError, TransferProfileReadError};

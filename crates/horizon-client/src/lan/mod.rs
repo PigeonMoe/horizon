@@ -44,11 +44,15 @@ mod payload_bounds_tests;
 pub mod pigeon_auth;
 pub mod player_shown;
 pub mod playerdata;
+pub mod pm_sync_paper;
 pub mod prediction;
+mod profile_sections;
+mod profile_storage;
 pub mod recipes;
 mod registry_names;
 pub mod scoreboard;
 mod sound_order;
+pub mod source_handover;
 pub mod tracking;
 pub mod viewed_levels;
 pub mod waypoints;
@@ -283,6 +287,8 @@ pub struct NetConfig {
     /// (`arrivals::Transfers`), shared with the hub. A login uses its
     /// expectation up as it starts, once the bans and the whitelist let it in.
     pub arrivals: Option<Arc<std::sync::Mutex<arrivals::Expectations>>>,
+    /// Source ownership outlives transfer settings and the connection.
+    pub source_handovers: Option<Arc<source_handover::Journal>>,
     pub log: Option<NetLog>,
     /// server.properties `resource-pack`: offered to every player during
     /// configuration (a dedicated server's; MinecraftServer.getServerResourcePack).
@@ -359,6 +365,7 @@ impl NetConfig {
             pigeon_auth: None,
             forwarding_secret: None,
             arrivals: None,
+            source_handovers: None,
             log: None,
             resource_pack: None,
             code_of_conducts: Vec::new(),
@@ -493,6 +500,13 @@ pub struct Shared {
     shutting_down: AtomicBool,
 }
 impl Shared {
+    pub fn source_frozen_handover(&self, owner: u128) -> Option<u128> {
+        self.config
+            .source_handovers
+            .as_ref()?
+            .fenced_handover(owner)
+    }
+
     /// The registries and tags a new connection is sent.
     pub fn sync(&self) -> Arc<data::SyncData> {
         self.sync.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -524,6 +538,27 @@ impl Shared {
         address: SocketAddr,
         uuid: u128,
         name: &str,
+    ) -> Option<horizon_core::nbt::Tag> {
+        self.try_admit_with_replacement(address, uuid, name, true)
+    }
+
+    /// A return may hold a vacant place, never evict an active or still
+    /// configuring connection. The vacancy check and reservation are atomic.
+    pub(super) fn try_admit_return(
+        &self,
+        address: SocketAddr,
+        uuid: u128,
+        name: &str,
+    ) -> Option<horizon_core::nbt::Tag> {
+        self.try_admit_with_replacement(address, uuid, name, false)
+    }
+
+    fn try_admit_with_replacement(
+        &self,
+        address: SocketAddr,
+        uuid: u128,
+        name: &str,
+        replace: bool,
     ) -> Option<horizon_core::nbt::Tag> {
         if self.shutting_down.load(Ordering::Relaxed) {
             return Some(translatable("multiplayer.disconnect.server_shutdown", &[]));
@@ -566,6 +601,9 @@ impl Shared {
             if !online.iter().any(|(active, _, _)| *active == uuid) {
                 online.push((uuid, name.to_owned(), true));
                 return None;
+            }
+            if !replace {
+                return Some(translatable("multiplayer.disconnect.duplicate_login", &[]));
             }
             drop(online);
             let deadline = deadline.get_or_insert_with(|| {

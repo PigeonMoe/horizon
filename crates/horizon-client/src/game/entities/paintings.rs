@@ -91,6 +91,13 @@ impl PaintingVariants {
 fn overlaps(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
     (0..3).all(|i| a.0[i] < b.1[i] && b.0[i] < a.1[i])
 }
+
+/// `HangingEntity.recalculateBoundingBox` puts the entity at the bounding box's centre.
+fn centre(painting: &Painting) -> [f64; 3] {
+    let (lo, hi) = painting.bounds();
+    std::array::from_fn(|axis| (lo[axis] + hi[axis]) / 2.0)
+}
+
 /// `HangingEntity.canCoexist(true)` for an item frame.
 pub(super) fn frame_coexists(f: &ItemFrame, frames: &[ItemFrame], paintings: &[Painting]) -> bool {
     !frames
@@ -297,16 +304,12 @@ impl Game<'_> {
         if let horizon_core::nbt::Tag::Compound(map) = &mut raw {
             map.remove(&"UUID".into());
         }
-        if self.hanging_place_cancelled("minecraft:painting", pos) {
+        let at = centre(&candidate);
+        if self.hanging_place_cancelled("minecraft:painting", at.map(|v| v.floor() as i32)) {
+            self.use_failed = true;
             return true;
         }
         self.persist.raw.insert(candidate.id, raw);
-        let (lo, hi) = candidate.bounds();
-        let at = [
-            (lo[0] + hi[0]) / 2.0,
-            (lo[1] + hi[1]) / 2.0,
-            (lo[2] + hi[2]) / 2.0,
-        ];
         self.audio
             .play("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
         // HangingEntityItem.useOn: ENTITY_PLACE at the painting, by the player, before it is
@@ -366,12 +369,23 @@ impl Game<'_> {
         by_player: bool,
         source: Option<super::commands::Target>,
     ) -> bool {
-        let actor = source.and_then(|source| self.hanging_damage_player(source));
+        self.break_painting_with_attacker(index, by_player, source.into())
+    }
+
+    pub(super) fn break_painting_with_attacker(
+        &mut self,
+        index: usize,
+        by_player: bool,
+        attribution: super::nonliving_hurt::DamageAttribution,
+    ) -> bool {
+        let actor = attribution
+            .attacker
+            .and_then(|source| self.hanging_damage_player(source));
         let Some((p, at)) = self.remove_painting(index, by_player, actor) else {
             return false;
         };
         // BlockAttachedEntity.kill, before dropItem.
-        self.entity_killed_event_by(at, source);
+        self.entity_killed_event_by(at, attribution.credit);
         self.drop_painting(p, at, by_player);
         true
     }
@@ -392,7 +406,9 @@ impl Game<'_> {
         by_player: bool,
         actor: Option<u128>,
     ) -> Option<(Painting, [f64; 3])> {
-        let (id, pos) = (self.paintings[index].id, self.paintings[index].pos);
+        let painting = &self.paintings[index];
+        let id = painting.id;
+        let pos = centre(painting).map(|v| v.floor() as i32);
         let canceled = if actor.is_some() {
             self.hanging_break_cancelled_by("minecraft:painting", pos, actor)
         } else {
@@ -404,12 +420,7 @@ impl Game<'_> {
         // The hook had `&mut self`: find the painting again by id.
         let index = self.paintings.iter().position(|p| p.id == id)?;
         let p = self.paintings.remove(index);
-        let (lo, hi) = p.bounds();
-        let at = [
-            (lo[0] + hi[0]) / 2.0,
-            (lo[1] + hi[1]) / 2.0,
-            (lo[2] + hi[2]) / 2.0,
-        ];
+        let at = centre(&p);
         self.world.modified.insert((p.pos[0] >> 4, p.pos[2] >> 4));
         Some((p, at))
     }

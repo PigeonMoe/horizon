@@ -29,6 +29,7 @@ horizon-client game::creatures::mob_pearl_hook_tests::gliding_impact_wears_the_r
 horizon-client game::creatures::snow_golem_form_tests::snow_trail_uses_formation_and_vibrates_only_after_writing lib daily resources
 horizon-client game::dedicated::tests::console_logging_survives_closed_stdout lib daily child-process
 horizon-client game::dispenser::decision_tests::crown_is_prepared_once_for_three_and_eight_dispenser_candidates lib daily resources
+horizon-client game::dragon::crystal::tests::end_crystal_fire_checks_ignition_before_placing_and_retries_when_denied lib daily resources
 horizon-client game::dragon::walls_tests::a_protected_dragon_wall_preserves_its_batch_without_stopping_the_other_parts lib daily resources
 horizon-client game::enchant_effects::frost_walker_tests::frost_walker_leaves_refused_source_water_and_places_the_neighbor lib daily resources
 horizon-client game::entity_inside_tests::a_boat_breaks_a_lily_pad_only_when_its_block_change_is_allowed lib daily resources
@@ -87,6 +88,7 @@ horizon-client game::mods::tests::native_content_follows_the_build_and_misplaced
 horizon-client game::lan_actions::guest_body::tests::accepted_fall_dispatches_one_reaction_at_the_actual_landing lib daily resources
 horizon-client game::lan_actions::guest_body::tests::fall_contact::fall_reaction_reads_the_real_barefoot_guest_after_protection_and_equipment lib daily resources
 horizon-client game::lan_actions::guest_body::tests::fire_contact::fire_contact_reacts_after_admission_and_consumes_authoritative_storage lib daily resources
+horizon-client game::lan_actions::guest_body::tests::liquid_contact::lava_and_drowning_observe_admitted_guest_damage_and_preserve_contact lib daily resources
 horizon-client game::lan_actions::guest_body::tests::sprint_attempt::repeated_sprint_commands_are_admitted_in_order_before_state_changes lib daily resources
 horizon-client game::lan_actions::guest_body::tests::starvation::starvation_runs_the_guest_environment_hook_only_for_an_admitted_hit lib daily resources
 horizon-client game::mounts::tests::a_camel_husk_keeps_itself_once_clicked lib daily game-boot
@@ -165,6 +167,7 @@ horizon-client game::native_guest_turn_tests::a_guest_turn_reports_the_latest_se
 horizon-client game::native_guest_turn_tests::an_arrow_contact_sends_the_shooters_explicit_velocity_after_its_checked_teleport lib daily resources
 horizon-client game::native_hooks::death_source_tests::mob_death_and_handle_preserve_namespaced_types lib daily resources
 horizon-client game::native_hooks::death_source_tests::player_drops_expose_recent_resolved_credit_separate_from_the_fatal_fall lib daily resources
+horizon-client game::native_hooks::on_block_placed_by_tests::placement_part_sees_the_replaced_cell_and_vetoes_before_global_placement lib daily resources
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::a_listener_waking_the_player_again_is_told_once lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::acting_missing_bed_death_and_generic_stop_are_immediate_before_clear lib daily game-boot
 horizon-client game::native_hooks::player_bed_leave::player_bed_leave_tests::bed_leave_carries_the_wake_flags_before_the_sleep_clears lib daily game-boot
@@ -174,6 +177,7 @@ horizon-client game::native_hooks::player_drop_pre::tests::cancelled_manual_drop
 horizon-client game::native_hooks::player_drop_pre::tests::specialized_windows_check_drop_permission_before_a_slot_or_cursor_changes lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::redstone_activation_checks_real_players_and_other_entities_per_trigger lib daily resources
 horizon-client game::native_hooks::block_trigger_entity_pre::tests::a_denied_standing_entity_does_not_tilt_or_hide_an_allowed_one lib daily resources
+horizon-client game::native_hooks::entity_item_place_pre::tests::item_placement_veto_uses_the_final_entity_position_and_keeps_the_stack lib daily resources
 horizon-client game::native_hooks::player_leash_change_pre::tests::knot_ties_and_cuts_respect_each_mob_and_boat_without_detaching_denied_leads lib daily resources
 horizon-client game::native_hooks::runtime_environment::server_data_version_tests::host_data_version_matches_a_freshly_saved_chunk lib daily resources
 horizon-client game::native_level_events::tests::native_and_wasm_break_effects_use_the_supplied_state_without_breaking_a_block lib daily resources
@@ -197,6 +201,7 @@ horizon-client game::native_mob_refs::tests::mod_breeding_timers_keep_exact_tick
 horizon-client game::native_passage_cross::tests::a_crossing_into_another_level_is_refused_far_level lib daily resources
 horizon-client game::native_passages::tests::a_destination_level_must_be_open_and_another_level lib daily resources
 horizon-client game::native_passages::tests::a_passage_into_another_level_is_not_sent_to_the_clients lib daily resources
+horizon-client game::native_player_attack_at_tests::location_pvp_checks_pvp_and_dispatches_only_loaded_targets_for_the_live_player lib daily resources
 horizon-client game::native_player_death::tests::a_death_hook_keeps_exact_inventory_slots_without_copying_or_bypassing_vanishing lib daily resources
 horizon-client game::native_player_ender_chest_tests::a_write_while_the_local_ender_chest_is_open_survives_closing_it lib daily resources
 horizon-client game::native_player_ender_chest_tests::a_written_slot_is_what_the_open_ender_chest_menu_shows_and_clicks lib daily resources

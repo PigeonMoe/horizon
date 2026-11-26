@@ -307,7 +307,7 @@ impl Game<'_> {
         destination: [i32; 3],
         stack: &ItemStack,
     ) -> bool {
-        if level.dimension() != self.dim.key() || source == destination {
+        if level.dimension() != self.dim.key() {
             return false;
         }
         let Some(world) = self.native_level_world(level) else {
@@ -1013,11 +1013,16 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn mod_inventory_transfer_uses_the_vanilla_move_policy_for_both_endpoints() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
         const SOURCE: [i32; 3] = [2, 70, 3];
         const DENIED: [i32; 3] = [3, 70, 3];
         const ALLOWED: [i32; 3] = [4, 70, 3];
 
-        struct Policy;
+        struct Policy(Arc<AtomicUsize>);
         #[mod_api::__subscriptions]
         impl mod_api::Hooks for Policy {
             fn inventory_move_item(
@@ -1026,8 +1031,11 @@ mod tests {
                 event: &mut mod_api::InventoryMoveItemEvent<'_>,
             ) -> mod_api::Flow {
                 assert_eq!(host.dimension(), "minecraft:overworld");
-                assert_eq!(event.source, SOURCE);
+                assert!(event.source == SOURCE || event.source == DENIED);
                 assert_eq!(event.item, "minecraft:stone");
+                if event.source == event.destination {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
                 if event.destination == DENIED {
                     mod_api::Flow::Cancel
                 } else {
@@ -1036,7 +1044,12 @@ mod tests {
             }
         }
 
-        let mods = vec![mod_api::ModEntry::new("inventory-transfer-policy", Box::new(Policy))].into();
+        let local_moves = Arc::new(AtomicUsize::new(0));
+        let mods = vec![mod_api::ModEntry::new(
+            "inventory-transfer-policy",
+            Box::new(Policy(Arc::clone(&local_moves))),
+        )]
+        .into();
         mod_platform::testing::with_mods(mods, || {
             with_game(|game| {
                 use super::super::native_entity_refs::tests::prepare_entity_ticking_neighborhood;
@@ -1045,6 +1058,9 @@ mod tests {
                 let stone = super::ItemStack::new("minecraft:stone", 3).try_into_api().unwrap();
                 assert!(!level.allow_inventory_transfer(game, SOURCE, DENIED, &stone));
                 assert!(level.allow_inventory_transfer(game, SOURCE, ALLOWED, &stone));
+                assert!(level.allow_inventory_transfer(game, SOURCE, SOURCE, &stone));
+                assert!(!level.allow_inventory_transfer(game, DENIED, DENIED, &stone));
+                assert_eq!(local_moves.load(Ordering::Relaxed), 2);
                 assert!(!level.allow_inventory_transfer(game, SOURCE, [9999, 70, 0], &stone));
             });
         });

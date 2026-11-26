@@ -39,6 +39,23 @@ pub trait ProjectilesServerHost {
         power: f32,
         inaccuracy: f32,
     ) -> Option<ProjectileRef>;
+    /// Side: server. Whether the admitted entity damage currently firing
+    /// `player_entity_damage_pre` for this player has a live projectile that
+    /// may be returned. Tridents, thrown potions, fireworks and explosions
+    /// are excluded. False outside that player's admitted damage callback.
+    #[access(WorldOnly)]
+    fn can_return_player_damage_projectile(&self, player: PlayerRef) -> bool;
+    /// Side: server. Replaces the projectile in this player's admitted damage
+    /// callback with a new one of the same type, two blocks in front of the
+    /// player's eyes, moving two blocks per tick along their view. Preserves
+    /// the original shooter and an arrow's base damage, pickup and piercing.
+    /// A successful replacement cancels this direct damage. The impact's
+    /// independent effects, such as a fireball's explosion, follow their usual
+    /// continuation. False leaves the original hit intact; this includes
+    /// failure to spawn the new entity, stale or already returned shots, and
+    /// calls inside a transaction where the join may still be vetoed.
+    #[access(WorldOnly)]
+    fn return_player_damage_projectile(&mut self, player: PlayerRef) -> bool;
     /// Side: server.
     /// Narrows an entity to a projectile: one in the projectile list, a trident
     /// a player threw or a firework rocket. None for another kind, a stale

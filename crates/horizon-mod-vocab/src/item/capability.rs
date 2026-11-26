@@ -53,6 +53,14 @@ impl<T: ?Sized> Deref for Capability<T> {
 }
 
 impl<T: ?Sized> Capability<T> {
+    /// Run a handler callback as the mod whose registered provider returned it.
+    pub(crate) fn with_handler<R>(&self, call: impl FnOnce(&T) -> R) -> R {
+        let _scope = self
+            .owner
+            .map(|owner| crate::mark_mod(owner, "capability_handler"));
+        call(&*self.handler)
+    }
+
     /// The id of the mod whose provider answered, or "the game", for warnings.
     pub fn owner(&self) -> String {
         self.owner.unwrap_or("the game").to_owned()

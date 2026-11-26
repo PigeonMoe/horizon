@@ -21,7 +21,10 @@ use horizon_core::{
     position::BlockPos,
     random::{EntityRandom, RandomSource},
 };
-use horizon_world::level::{LevelAccess, Ticks};
+use horizon_world::{
+    level::{LevelAccess, LevelEvent, LightningCopperWorld, Ticks, flags},
+    registry::BlockStateId,
+};
 
 pub(super) struct Bolt {
     /// The entity id a server's players know it by (0 until it has one).
@@ -412,7 +415,7 @@ impl Game<'_> {
                 // a client's copy of a server bolt (spawn_remote_bolt) only
                 // flashes.
                 if self.remote.is_none() {
-                    self.bolt_clear_copper(b.at);
+                    self.bolt_clear_copper(b);
                 }
             }
             b.life -= 1;
@@ -499,13 +502,27 @@ impl Game<'_> {
         }
     }
     /// `LightningBolt.clearCopperOnLightningStrike` at the block the bolt struck.
-    fn bolt_clear_copper(&mut self, at: [f64; 3]) {
+    fn bolt_clear_copper(&mut self, bolt: &Bolt) {
+        let at = bolt.at;
         let p = BlockPos::new(
             at[0].floor() as i32,
             (at[1] - 1.0e-6).floor() as i32,
             at[2].floor() as i32,
         );
-        self.with_level(|b, level, ticks| b.lightning_clear_copper(level, ticks, p));
+        if self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::EntityChangeBlockPre)
+        {
+            let resources = self.res.clone();
+            resources.behaviours().lightning_clear_copper_with(
+                &mut BoltCopperWorld {
+                    game: self,
+                    bolt: bolt.id,
+                },
+                p,
+            );
+        } else {
+            self.with_level(|b, level, ticks| b.lightning_clear_copper(level, ticks, p));
+        }
         let _ = self.process_level_events();
     }
     /// `LightningStrikeTrigger` at the bolt's discard: every player within 256
@@ -857,6 +874,46 @@ impl Game<'_> {
     }
 }
 
+/// Keep the full server host available for each Paper-style copper change veto.
+struct BoltCopperWorld<'a, 'g> {
+    game: &'a mut Game<'g>,
+    bolt: u32,
+}
+
+impl LightningCopperWorld for BoltCopperWorld<'_, '_> {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.game.world.block(pos.x, pos.y, pos.z)
+    }
+
+    fn random_index(&mut self, bound: i32) -> i32 {
+        self.game.world.random.next_int_bound(bound).unwrap_or(0)
+    }
+
+    fn clean_copper(&mut self, pos: BlockPos, from: BlockStateId, to: BlockStateId) {
+        let mut cancel = false;
+        self.game.native_entity_change_block_pre(
+            crate::game::native_hooks::EntityChangeBlockPreCall {
+                player: None,
+                entity: Some(self.bolt),
+                kind: "minecraft:lightning_bolt",
+                pos: [pos.x, pos.y, pos.z],
+                from,
+                to,
+                cancel: &mut cancel,
+            },
+        );
+        if !cancel {
+            self.game.with_level(|blocks, level, ticks| {
+                blocks.set_block(level, ticks, pos, to, flags::UPDATE_ALL)
+            });
+        }
+    }
+
+    fn emit_event(&mut self, event: LevelEvent) {
+        self.game.level_events.push(event);
+    }
+}
+
 impl Game<'_> {
     /// `EntityStruckByLightningEvent`, before `thunderHit` on entity `entity`
     /// from bolt `bolt`: false when a mod cancelled the hit. The entity still
@@ -941,6 +998,106 @@ mod tests {
                     assert_eq!(game.world.random.next_long(), before.next_long());
                 }
             }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_bolt_preserves_claimed_copper_without_changing_its_walk() {
+        use crate::game::dispense_fixture;
+        use horizon_client::chunk::Chunk;
+        use mod_api::{EntityChangeBlockPreEvent, Flow, Hooks, ModEntry};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        const DIRECT: [i32; 3] = [8, 64, 8];
+        const NEIGHBOUR: [i32; 3] = [9, 64, 8];
+        const BOLT: u32 = 47;
+
+        #[derive(Default)]
+        struct Claim {
+            protected: AtomicBool,
+            checked: Mutex<Vec<[i32; 3]>>,
+        }
+
+        struct Listener(Arc<Claim>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Listener {
+            fn entity_change_block_pre(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut EntityChangeBlockPreEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.player, None);
+                assert_eq!(event.entity, Some(BOLT));
+                assert_eq!(event.kind, "minecraft:lightning_bolt");
+                assert_eq!(
+                    Some(event.from),
+                    host.block_state_id("minecraft:oxidized_copper")
+                );
+                let expected = match event.pos {
+                    DIRECT => "minecraft:copper_block",
+                    NEIGHBOUR => "minecraft:weathered_copper",
+                    _ => panic!("unexpected copper change at {:?}", event.pos),
+                };
+                assert_eq!(Some(event.to), host.block_state_id(expected));
+                self.0.checked.lock().unwrap().push(event.pos);
+                if self.0.protected.load(Ordering::Relaxed) {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        let claim = Arc::new(Claim::default());
+        let mods = [ModEntry::new(
+            "copper_protection",
+            Box::new(Listener(claim.clone())),
+        )];
+        mod_platform::testing::with_mods(mods.into(), || {
+            super::super::native_entity_refs::tests::with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let registry = game.pack.assets.registry;
+                let raw = registry.default_state("minecraft:copper_block").unwrap();
+                let weathered = registry
+                    .default_state("minecraft:weathered_copper")
+                    .unwrap();
+                let oxidized = registry.default_state("minecraft:oxidized_copper").unwrap();
+                let mut bolt = Bolt::struck_at(BOLT, [8.5, 65.0, 8.5]);
+                // Paper names the bolt even if a player channeled it.
+                bolt.cause = Some(Some(12));
+
+                let mut strike = |protected| {
+                    claim.protected.store(protected, Ordering::Relaxed);
+                    for [x, y, z] in [DIRECT, NEIGHBOUR] {
+                        game.world.set(x, y, z, oxidized).unwrap();
+                    }
+                    // This seed visits the neighbour once during the walks.
+                    game.world.random.set_seed(0);
+                    dispense_fixture::start_recording();
+                    game.bolt_clear_copper(&bolt);
+                    let events = dispense_fixture::stop_recording();
+                    assert_eq!(events, ["L 3002 9,64,8 -1"]);
+                    assert_eq!(*claim.checked.lock().unwrap(), [DIRECT, NEIGHBOUR]);
+                    claim.checked.lock().unwrap().clear();
+                    let expected = if protected {
+                        [oxidized; 2]
+                    } else {
+                        [raw, weathered]
+                    };
+                    let states = [DIRECT, NEIGHBOUR].map(|[x, y, z]| game.world.block(x, y, z));
+                    assert_eq!(states, expected);
+                    game.world.random.next_long()
+                };
+                assert_eq!(strike(true), strike(false));
+            });
         });
     }
 

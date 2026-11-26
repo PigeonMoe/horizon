@@ -185,6 +185,9 @@ pub struct Guest {
     /// to (position, `[yaw, pitch]`): what `player_move` compares reports with and reports as `from`.
     /// It is kept apart from the accepted position and may differ from it.
     pub last_reported: ([f64; 3], [f32; 2]),
+    /// Paper's last qualifying PlayerMoveEvent pose, shared with vehicle driver packets.
+    /// This baseline changes only when a move meets the distance or rotation threshold.
+    paper_move_pose: Option<([f64; 3], [f32; 2])>,
     /// The chunk cache centre placeNewPlayer already sent.
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
@@ -487,6 +490,7 @@ pub struct Guest {
     /// acknowledgements is not acted on, and every export answers with the
     /// same record. It ends after `[transfer]`'s `max_freeze_seconds`.
     pub handover: Option<super::arrivals::Handover>,
+    pub(super) profile_source_parked: bool,
     /// Its login started while a proxy said it would arrive from another
     /// server, and used that expectation up (`player-expect`).
     pub expected: bool,
@@ -507,6 +511,10 @@ pub struct Guest {
     /// The hand-over its record came with (`player-import`): `player-confirm` and
     /// `player-drop` name it, and another hand-over's record is not taken.
     pub arrival_handover: Option<u128>,
+    /// Checked required sections for a held arrival. Cleared only by the successful
+    /// durable player-file commit, or discarded when the guest leaves while held.
+    pub(super) arrival_profiles: Option<super::profile_storage::PreparedProfiles>,
+    pub(super) arrival_profile_fingerprint: Option<[u8; 32]>,
     /// The import of that hand-over moved the view to another chunk (`recentered` in its reply),
     /// kept so a retried import or a confirm after it answers the same.
     pub arrival_recentered: bool,
@@ -520,6 +528,8 @@ pub struct Guest {
     /// Root command names the mods took out of this player's command tree
     /// (`native_player_commands_sent`); their tree is sent without them.
     pub hidden_commands: Vec<String>,
+    /// Paths of literal branches that mods hid from this player's completions.
+    pub hidden_command_literals: Vec<String>,
     /// `Player.getAbilities`: set from the game mode when it changes, and
     /// written by server mods. Saved with the player.
     pub abilities: super::abilities::PlayerAbilities,
@@ -652,7 +662,12 @@ impl Guest {
         self.kind == GuestKind::Network
     }
     pub fn participates_in_player_simulation(&self) -> bool {
-        self.kind == GuestKind::Network
+        self.kind == GuestKind::Network && !self.profile_source_parked()
+    }
+    /// A strict source keeps its transport and chunk view for the proxy. Its
+    /// actual record lives in the source journal rather than in this marker.
+    pub fn profile_source_parked(&self) -> bool {
+        self.profile_source_parked
     }
     /// A connectionless player a mod made (`Host::fake_player`): what `PlayerRef::is_fake`
     /// answers, and what may `perform_action`.
@@ -662,7 +677,7 @@ impl Guest {
     /// Whether the guest is online and placed in level `dimension`: one of the
     /// level's players (`ServerLevel.players`).
     pub fn placed_in(&self, dimension: &str) -> bool {
-        self.participates_online() && self.placed && self.dimension == dimension
+        self.participates_in_player_simulation() && self.placed && self.dimension == dimension
     }
     /// Whether the guest is sent level `dimension`: placed in it, or held, which
     /// looks at it without being part of it.
@@ -708,6 +723,7 @@ impl Guest {
             placed_at: 0,
             level_entered: 0,
             last_reported: (position, [0.0, 0.0]),
+            paper_move_pose: None,
             center_sent: None,
             left_reason: String::new(),
             pending_move: None,
@@ -849,6 +865,7 @@ impl Guest {
             death_time: 0,
             placed: false,
             handover: None,
+            profile_source_parked: false,
             expected: j.expected,
             held: false,
             viewed: Default::default(),
@@ -856,10 +873,13 @@ impl Guest {
             imported: false,
             arrival_announce: true,
             arrival_handover: None,
+            arrival_profiles: None,
+            arrival_profile_fingerprint: None,
             arrival_recentered: false,
             quiet_leave: false,
             released: false,
             hidden_commands: Vec::new(),
+            hidden_command_literals: Vec::new(),
             abilities: Default::default(),
             dimension: "minecraft:overworld".into(),
             menu: None,
@@ -1009,6 +1029,35 @@ impl Guest {
             self.previous_position,
             self.held_ticket_chunk,
         ) = (at, at, None);
+        self.reset_paper_move_pose(at, [self.yaw, self.pitch]);
+    }
+
+    /// `ServerGamePacketListenerImpl`'s distance and angle checks for `PlayerMoveEvent`.
+    pub fn record_paper_move(
+        &mut self,
+        to: [f64; 3],
+        rotation: [f32; 2],
+    ) -> Option<([f64; 3], [f32; 2])> {
+        let (from, previous_rotation) = *self
+            .paper_move_pose
+            .get_or_insert((self.position, [self.yaw, self.pitch]));
+        let distance_squared: f64 = from
+            .into_iter()
+            .zip(to)
+            .map(|(from, to)| (from - to).powi(2))
+            .sum();
+        let angle =
+            (previous_rotation[0] - rotation[0]).abs() + (previous_rotation[1] - rotation[1]).abs();
+        if distance_squared <= 1.0 / 256.0 && angle <= 10.0 {
+            return None;
+        }
+        self.reset_paper_move_pose(to, rotation);
+        Some((from, previous_rotation))
+    }
+
+    /// An internal player teleport or movement correction is the new event origin.
+    pub fn reset_paper_move_pose(&mut self, at: [f64; 3], rotation: [f32; 2]) {
+        self.paper_move_pose = Some((at, rotation));
     }
     /// `ServerChunkCache.move` after an accepted move: the tickets follow.
     pub fn accept_move(&mut self, to: [f64; 3]) {
@@ -2660,7 +2709,7 @@ mod tests {
     use super::*;
     use horizon_core::nbt::Tag;
     use horizon_protocol::buf::{Codec, Reader, Writer};
-    use horizon_protocol::item::{Component, component};
+    use horizon_protocol::item::{Component, Slot, component};
 
     #[test]
     fn a_saved_player_head_keeps_its_texture_property_on_the_wire() {
@@ -2673,8 +2722,8 @@ mod tests {
         head.data_mut().set_other("minecraft:profile", Some(profile));
         let stack = network_stack(&|_| 1, &|_, _| None, &head);
         let mut writer = Writer::new();
-        stack.write(&mut writer);
-        let decoded = Stack::read(&mut Reader::new(&writer.data)).unwrap();
+        Slot::write(&Some(stack), &mut writer);
+        let decoded = Slot::read(&mut Reader::new(&writer.data)).unwrap().unwrap();
         let Some(Component::Profile(profile)) = decoded.component(component::PROFILE) else {
             panic!("missing profile component");
         };
@@ -3268,6 +3317,34 @@ mod tests {
             position,
             10,
         )
+    }
+
+    #[test]
+    fn paper_move_event_uses_the_last_emitted_pose_and_strict_thresholds() {
+        let start = [15.984375, 64.0, 0.5];
+        let mut guest = guest_at([0.5, 50.0, 0.5]);
+        guest.position = start;
+        guest.yaw = 20.0;
+        let edge = [start[0] + 0.03125, start[1], start[2]];
+        let limit = [start[0] + 0.0625, start[1], start[2]];
+        let beyond = [start[0] + 0.078125, start[1], start[2]];
+        assert_eq!(guest.record_paper_move(edge, [20.0, 0.0]), None);
+        assert_eq!(guest.record_paper_move(limit, [20.0, 0.0]), None);
+        assert_eq!(
+            guest.record_paper_move(beyond, [20.0, 0.0]),
+            Some((start, [20.0, 0.0]))
+        );
+        assert_eq!(guest.record_paper_move(beyond, [26.0, 4.0]), None);
+        assert_eq!(
+            guest.record_paper_move(beyond, [27.0, 4.0]),
+            Some((beyond, [20.0, 0.0]))
+        );
+        guest.reset_paper_move_pose(start, [40.0, 0.0]);
+        assert_eq!(guest.record_paper_move(edge, [40.0, 0.0]), None);
+        assert_eq!(
+            guest.record_paper_move(edge, [51.0, 0.0]),
+            Some((start, [40.0, 0.0]))
+        );
     }
 
     #[test]

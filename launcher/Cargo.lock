@@ -3214,6 +3214,8 @@ name = "horizon-server-files"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cap-fs-ext",
+ "cap-std",
  "getrandom 0.3.4",
  "horizon-core",
  "horizon-java-properties",
@@ -3221,6 +3223,7 @@ dependencies = [
  "horizon-world",
  "log",
  "serde",
+ "sha2",
  "ureq",
  "windows-sys 0.61.2",
 ]
@@ -3238,6 +3241,7 @@ dependencies = [
  "serde",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "url",
  "windows-sys 0.61.2",
 ]
 

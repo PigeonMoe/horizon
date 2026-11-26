@@ -39,7 +39,13 @@ fn a_furnace_cart_is_capped_at_half_the_rule_speed_under_the_new_physics() {
             let mut cart = Minecart::new(1, kind, at);
             cart.velocity = Vec3::new(0.0, 0.0, 1.0);
             cart.first_tick = false;
-            game.tick_cart(&mut cart, [0.0; 2], 0, &mut CartIndex::default(), &mut None);
+            game.tick_cart(
+                &mut cart,
+                [0.0; 2],
+                0,
+                &mut CartIndex::default(),
+                &mut CartRiderTick::default(),
+            );
             cart.velocity.horizontal_distance()
         };
         // On a rail, the first iteration's cap.

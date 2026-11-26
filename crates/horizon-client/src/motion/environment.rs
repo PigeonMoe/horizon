@@ -58,6 +58,17 @@ impl MotionWorld<'_, '_, '_> {
     }
     /// `LivingEntity.baseTick`'s air supply and drowning, then lava.
     pub fn tick_environment_damage(&mut self) -> Result<()> {
+        if let Some(damage) = self.prepare_drowning_damage()? {
+            self.environment_hurt("minecraft:drown", damage)?;
+        }
+        if let Some(damage) = self.prepare_lava_contact()? {
+            self.environment_hurt("minecraft:lava", damage)?;
+        }
+        Ok(())
+    }
+
+    /// Advance air supply and bubbles even when the subsequent hit is refused.
+    pub fn prepare_drowning_damage(&mut self) -> Result<Option<f32>> {
         let eye = BlockPos::containing(self.player.position.add_vector(Vec3::new(
             0.0,
             f64::from(self.player.dimensions.eye_height),
@@ -131,14 +142,19 @@ impl MotionWorld<'_, '_, '_> {
                 self.player.events.push(MotionEvent::Health(
                     crate::health::HealthEvent::DrownDamage(damage),
                 ));
-                self.environment_hurt("minecraft:drown", damage)?;
             }
+            return Ok(drowning.damage);
         }
+        Ok(None)
+    }
+
+    /// Lava contact ignites independently of whether the damage is admitted.
+    pub fn prepare_lava_contact(&mut self) -> Result<Option<f32>> {
         if self.player.is_in_lava() {
             self.player.ignite_for_ticks(300)?;
-            self.environment_hurt("minecraft:lava", 4.0)?;
+            return Ok(Some(4.0));
         }
-        Ok(())
+        Ok(None)
     }
     /// What a server's `LivingEntity.baseTick` adds for a player it hosts:
     /// the void (`Entity.checkBelowWorld`, 4 a tick, which creative players
@@ -206,8 +222,9 @@ impl MotionWorld<'_, '_, '_> {
         Ok(None)
     }
 
-    pub fn start_fire_contact_hurt(
+    pub fn start_environment_hurt(
         &mut self,
+        damage_type: &str,
         damage: f32,
     ) -> Result<Option<(crate::health::PausedHurt, Option<f32>)>> {
         if self.player.invulnerable || self.player.spectator {
@@ -216,7 +233,7 @@ impl MotionWorld<'_, '_, '_> {
         let source = self
             .health
             .damage
-            .id("minecraft:in_fire")
+            .id(damage_type)
             .ok_or("missing environment damage type")?;
         let rules = self.scene.health_rules;
         let mut level = crate::health::DamageLevel::of(
@@ -239,6 +256,7 @@ impl MotionWorld<'_, '_, '_> {
             false,
             true,
             None,
+            false,
         )?;
         let admitted =
             self.player
@@ -246,7 +264,7 @@ impl MotionWorld<'_, '_, '_> {
         Ok(Some((hit, admitted)))
     }
 
-    pub fn finish_fire_contact_hurt(&mut self, hit: crate::health::PausedHurt) -> Result<()> {
+    pub fn finish_environment_hurt(&mut self, hit: crate::health::PausedHurt) -> Result<()> {
         let rules = self.scene.health_rules;
         self.player.finish_hurt(
             &mut crate::health::DamageLevel::of(

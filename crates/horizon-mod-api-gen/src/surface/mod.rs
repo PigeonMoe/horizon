@@ -1478,6 +1478,7 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
                 host: hook.host.map(|host| {
                     match host {
                         catalog::HostAccess::Read => "read",
+                        catalog::HostAccess::ServerRead => "server_read",
                         catalog::HostAccess::Level => "level",
                     }
                     .to_owned()

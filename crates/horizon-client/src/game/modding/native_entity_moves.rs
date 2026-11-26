@@ -87,6 +87,7 @@ impl Game<'_> {
             dim: destination,
             at: pos,
             rotation,
+            notify_position: true,
             vehicle: None,
         });
         Ok(PlayerTeleportStatus::Queued)

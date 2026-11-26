@@ -53,11 +53,12 @@ fn fixture() -> Option<&'static Fixture> {
 struct Level {
     blocks: HashMap<BlockPos, BlockStateId>,
     air: BlockStateId,
+    spawner: BlockStateId,
     random: LegacyRandom,
     events: Vec<LevelEvent>,
     biome: &'static str,
     day: i64,
-    block_entities: Vec<(BlockPos, horizon_core::nbt::Compound)>,
+    block_entities: Vec<(BlockPos, BlockStateId, horizon_core::nbt::Compound)>,
     /// What a mod's `BlockGrowFeatureEvent` grows when vanilla has no feature.
     supplied: Option<&'static str>,
     /// A mod's `CropGrowEvent.Pre` answer (`None`: `DEFAULT`).
@@ -105,7 +106,14 @@ impl LevelAccess for Level {
         Some(self.biome)
     }
     fn load_block_entity(&mut self, pos: BlockPos, nbt: horizon_core::nbt::Compound) {
-        self.block_entities.push((pos, nbt));
+        self.block_entities.push((pos, self.block_state(pos), nbt));
+    }
+    fn create_feature_spawner(&mut self, pos: BlockPos, nbt: horizon_core::nbt::Compound) {
+        if self.block_state(pos) == self.spawner
+            && !self.block_entities.iter().any(|(at, ..)| *at == pos)
+        {
+            self.load_block_entity(pos, nbt);
+        }
     }
     fn block_grow_feature<'a>(
         &mut self,
@@ -162,6 +170,7 @@ impl World {
             level: Level {
                 blocks: HashMap::new(),
                 air: f.behaviours.air(),
+                spawner: f.registry.default_state("minecraft:spawner").unwrap(),
                 random: LegacyRandom::new(seed),
                 events: Vec::new(),
                 biome: "minecraft:plains",
@@ -262,21 +271,28 @@ fn oak_sapling_grows_with_bone_meal() {
 #[test]
 fn a_tree_with_bees_fills_its_nest() {
     let Some(f) = fixture() else { return };
-    let mut w = World::new(f, 3);
-    w.floor("grass_block", 12);
-    let origin = BlockPos::new(0, 64, 0);
-    let placed = f.behaviours.place_feature(
-        &mut w.level,
-        &mut w.ticks,
-        "minecraft:fancy_oak_bees",
-        origin,
-    );
-    assert_eq!(placed, Some(true));
+    let grow = |denials| {
+        let mut w = World::new(f, 3);
+        w.floor("grass_block", 12);
+        w.level.growth_denials = denials;
+        let origin = BlockPos::new(0, 64, 0);
+        assert!(
+            f.behaviours
+                .sim(&mut w.level, &mut w.ticks)
+                .capture_structure(origin, |sim| {
+                    sim.place_configured_feature("minecraft:fancy_oak_bees", origin)
+                })
+        );
+        assert_eq!(w.name(origin), "minecraft:oak_log");
+        w
+    };
+    let w = grow(None);
     assert_eq!(w.count("bee_nest"), 1);
-    let [(at, nbt)] = &w.level.block_entities[..] else {
+    let [(at, state, nbt)] = &w.level.block_entities[..] else {
         panic!("one block entity: {:?}", w.level.block_entities);
     };
     assert_eq!(w.name(*at), "minecraft:bee_nest");
+    assert_eq!(*state, w.level.block_state(*at));
     let Some(horizon_core::nbt::Tag::List(bees)) = nbt.get(&"bees".into()) else {
         panic!("bees: {nbt:?}");
     };
@@ -284,7 +300,196 @@ fn a_tree_with_bees_fills_its_nest() {
         (2..=3).contains(&bees.len()),
         "BeehiveDecorator stores 2 or 3 bees"
     );
+
+    let allowed = grow(Some(HashSet::new()));
+    assert_eq!(allowed.level.block_entities, w.level.block_entities);
+    assert_eq!(allowed.level.block_state(*at), *state);
+
+    let denied = grow(Some(HashSet::from([*at])));
+    assert_eq!(denied.count("bee_nest"), 0);
+    assert!(denied.level.block_entities.is_empty());
 }
+
+#[test]
+fn a_growth_feature_configures_only_the_accepted_spawner() {
+    use horizon_core::nbt::Tag;
+    let Some(f) = fixture() else { return };
+    let origin = BlockPos::new(0, 64, 0);
+    let grower = super::growth::grower("dark_oak").unwrap();
+    let grow = |denials| {
+        let mut w = World::new(f, 173);
+        let stone = w.id("stone", &[]);
+        for x in -5i32..=5 {
+            for y in -2..=4 {
+                for z in -5i32..=5 {
+                    let room = (0..=3).contains(&y) && x.abs() <= 2 && z.abs() <= 2;
+                    let doorway = (0..=1).contains(&y) && (3..=5).contains(&x) && z == 0;
+                    if !room && !doorway {
+                        w.put(origin.offset(x, y, z), stone);
+                    }
+                }
+            }
+        }
+        let sapling = w.id("dark_oak_sapling", &[("stage", "1")]);
+        w.put(origin.offset(0, -1, 0), w.id("dirt", &[]));
+        w.put(origin, sapling);
+        w.level.supplied = Some("minecraft:monster_room");
+        w.level.growth_denials = denials;
+        assert!(
+            f.behaviours
+                .sim(&mut w.level, &mut w.ticks)
+                .grow_tree(grower, origin, sapling)
+        );
+        w
+    };
+
+    let ordinary = grow(None);
+    assert_eq!(ordinary.name(origin), "minecraft:spawner");
+    let [(at, state, tag)] = &ordinary.level.block_entities[..] else {
+        panic!("the room configures exactly one spawner");
+    };
+    assert_eq!(*at, origin);
+    assert_eq!(*state, ordinary.level.spawner);
+    let nbt = Tag::Compound(tag.clone());
+    let Some(Tag::String(kind)) = nbt
+        .get("SpawnData")
+        .and_then(|data| data.get("entity"))
+        .and_then(|entity| entity.get("id"))
+    else {
+        panic!("the spawner contains its selected mob");
+    };
+    assert!(matches!(
+        kind.to_string().as_deref(),
+        Ok("minecraft:skeleton" | "minecraft:zombie" | "minecraft:spider")
+    ));
+
+    let allowed = grow(Some(HashSet::new()));
+    assert_eq!(allowed.name(origin), "minecraft:spawner");
+    assert_eq!(allowed.level.block_entities, ordinary.level.block_entities);
+
+    let denied = grow(Some(HashSet::from([origin])));
+    assert_ne!(denied.name(origin), "minecraft:spawner");
+    assert!(
+        denied
+            .level
+            .growth_candidates
+            .borrow()
+            .iter()
+            .any(|candidate| { candidate.pos == origin && candidate.structure })
+    );
+    assert!(denied.level.block_entities.is_empty());
+}
+
+#[test]
+fn growth_waterlogging_preserves_chest_contents_until_the_block_is_replaced() {
+    use crate::worldgen::structure::processor::{PlaceSettings, place_in_world};
+    use crate::worldgen::structure::{BlockInfo, Rotation, StructureTemplate, save_nbt};
+    use horizon_core::nbt::{Compound, Tag};
+
+    let Some(f) = fixture() else { return };
+    let features = f.behaviours.live_features().unwrap();
+    let resources = features.structure_resources().unwrap();
+    let kept = BlockPos::new(0, 64, 0);
+    let replaced = kept.offset(4, 0, 0);
+    let rebuilt = kept.offset(8, 0, 0);
+    let grow = |capture| {
+        let mut w = World::new(f, 3);
+        let dry_chest = w.id("chest", &[("waterlogged", "false")]);
+        let wet_chest = w.id("chest", &[("waterlogged", "true")]);
+        let water = w.id("water", &[("level", "0")]);
+        let stone = w.id("stone", &[]);
+        let nbt = Compound::from([
+            ("id".into(), Tag::String("minecraft:chest".into())),
+            (
+                "Items".into(),
+                Tag::List(vec![Tag::compound([
+                    ("Slot", Tag::Byte(7)),
+                    ("id", Tag::String("minecraft:diamond".into())),
+                    ("count", Tag::Int(3)),
+                ])]),
+            ),
+        ]);
+        let tag = save_nbt(
+            f.registry,
+            &resources.transforms,
+            [1; 3],
+            vec![BlockInfo {
+                pos: [0; 3],
+                state: dry_chest,
+                nbt: Some(Box::new(nbt)),
+            }],
+            &[],
+            horizon_core::version::DATA_VERSION,
+        );
+        let template = StructureTemplate::from_nbt(&tag, f.registry, &resources.transforms);
+        let all_positions = [kept, replaced, rebuilt];
+        let kept_only = [kept];
+        let positions = if capture {
+            &all_positions[..]
+        } else {
+            &kept_only[..]
+        };
+        for &pos in positions {
+            w.put(pos.offset(0, -1, 0), stone);
+            w.put(pos, water);
+        }
+        if capture {
+            w.level.growth_denials = Some(HashSet::new());
+        }
+        assert!(
+            f.behaviours
+                .sim(&mut w.level, &mut w.ticks)
+                .capture_structure(kept, |sim| {
+                    for pos in positions {
+                        let at = [pos.x, pos.y, pos.z];
+                        let mut world = super::feature_world::LevelFeatureWorld {
+                            sim,
+                            features: &features,
+                            entities: Vec::new(),
+                        };
+                        assert!(
+                            place_in_world(
+                                &mut world,
+                                &resources,
+                                &template,
+                                at,
+                                at,
+                                &mut PlaceSettings::new(Rotation::None),
+                                None,
+                                flags::UPDATE_CLIENTS,
+                            )
+                            .unwrap()
+                        );
+                        assert_eq!(sim.state(*pos), wet_chest);
+                    }
+                    if capture {
+                        assert!(sim.set_block(replaced, stone, flags::UPDATE_NONE));
+                        assert!(sim.set_block(rebuilt, stone, flags::UPDATE_NONE));
+                        assert!(sim.set_block(rebuilt, wet_chest, flags::UPDATE_NONE));
+                    }
+                    true
+                })
+        );
+        assert_eq!(w.level.block_state(kept), wet_chest);
+        if capture {
+            assert_eq!(w.level.block_state(replaced), stone);
+            assert_eq!(w.level.block_state(rebuilt), wet_chest);
+        }
+        w
+    };
+
+    let ordinary = grow(false);
+    let [(pos, _, expected)] = &ordinary.level.block_entities[..] else {
+        panic!("ordinary placement installs the template chest contents");
+    };
+    assert_eq!(*pos, kept);
+    let staged = grow(true);
+    assert_eq!(
+        staged.level.block_entities,
+        [(kept, staged.level.block_state(kept), expected.clone())]
+    );
+}
+
 #[test]
 fn single_saplings_grow() {
     grow("birch_sapling", "dirt", &[(0, 0)], "birch_log");

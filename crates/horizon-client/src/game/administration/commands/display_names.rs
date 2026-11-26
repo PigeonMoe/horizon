@@ -2,9 +2,9 @@
 //! the mobs command replies (the name as its team shows it, with the
 //! `show_entity` hover and the UUID insertion) and `Nameable.getPlainTextName`
 //! for the selector's `name=`.
-use super::super::Game;
+use super::super::{Game, persist::OffLevel};
 use super::Target;
-use horizon_client::text::Text;
+use horizon_client::{mobs::Mob, text::Text};
 
 impl Game<'_> {
     /// `Nameable.getPlainTextName`: `getName().getString()`, the name without
@@ -32,12 +32,16 @@ impl Game<'_> {
         let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
             return Text::translate("entity.", &[]);
         };
+        self.mob_command_display_name(m)
+    }
+
+    fn mob_command_display_name(&self, m: &Mob) -> Text {
         let name = m.command_name();
         let shown = match self.mob_team_of(m) {
             Some(team) => team.formatted_name(name.clone()),
             None => name.clone(),
         };
-        let Some(uuid) = self.persist.uuid_of(id) else {
+        let Some(uuid) = self.persist.uuid_of(m.id) else {
             return shown;
         };
         let uuid = horizon_client::save::uuid_text(uuid);
@@ -50,5 +54,23 @@ impl Game<'_> {
             ),
             ("insertion".into(), uuid.into()),
         ])
+    }
+
+    /// The display name of a rider's retained mount for `/ride dismount`.
+    pub(super) fn retained_vehicle_name(&self, id: u32) -> Option<Text> {
+        let kind = match self.persist.off_level.get(&id)? {
+            OffLevel::Mob(mob) => return Some(self.mob_command_display_name(mob)),
+            OffLevel::Boat(boat) => boat.entity_type(),
+            OffLevel::Cart(cart) => cart.kind.id().into(),
+        };
+        if let Some(custom) = self.persist_raw(id).and_then(|r| r.get("CustomName")) {
+            return Some(horizon_client::scoreboard::comp_text(
+                &horizon_client::scoreboard::tag_to_json(custom),
+            ));
+        }
+        Some(Text::translate(
+            &format!("entity.{}", kind.replace(':', ".")),
+            &[],
+        ))
     }
 }

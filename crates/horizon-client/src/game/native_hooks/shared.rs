@@ -34,6 +34,12 @@ enum ScreenDecision {
     ModScreen(&'static str),
 }
 
+pub(super) enum PlayerPlacement {
+    Proceed,
+    RefusePlacement,
+    RefuseItemUse,
+}
+
 fn observed_overlay_id(overlays: &[(bool, &'static str)]) -> Option<&'static str> {
     overlays.iter().find_map(|(open, id)| open.then_some(*id))
 }
@@ -1085,7 +1091,8 @@ impl Game<'_> {
     /// box's edit: what the listeners leave of `field` goes back to the box
     /// before the character does. Whether they cancelled the character.
     fn screen_char_canceled(&mut self, c: char) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre)
+        if self.dialog_password_input()
+            || !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre)
             || !self.screen_hooks_open()
         {
             return false;
@@ -2468,29 +2475,46 @@ impl Game<'_> {
         self.native_entity_place(placer, pos, state, placed_against, placement, &mut canceled);
         canceled
     }
-    /// Whether a mod canceled the block the player's `ctx` would place
-    /// (`entity_place`): nothing is previewed unless a mod listens.
-    pub(super) fn player_place_canceled(&mut self, ctx: &PlaceContext) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::EntityPlace) {
-            return false;
+    /// Whether a mod canceled the block the player's `ctx` would place. Both
+    /// hooks share the preview. The item's veto precedes global placement.
+    pub(super) fn player_place_decision(
+        &mut self,
+        ctx: &PlaceContext,
+        stack: &ItemStack,
+    ) -> PlayerPlacement {
+        let item_hook = self.native_authoritative()
+            && mod_api::__private::item_listens(mod_api::HookId::BlockItemPlacePre, &stack.item);
+        let entity_hook = mod_api::__private::listened(mod_api::HookId::EntityPlace);
+        if !item_hook && !entity_hook {
+            return PlayerPlacement::Proceed;
         }
         let Some(preview) =
             self.with_level(|b, level, ticks| b.placement_preview(level, ticks, ctx))
         else {
-            return false;
+            return PlayerPlacement::Proceed;
         };
+        if item_hook && self.block_item_place_refused(stack, preview, ctx) {
+            return PlayerPlacement::RefuseItemUse;
+        }
+        if !entity_hook {
+            return PlayerPlacement::Proceed;
+        }
         let against_pos = ctx.placed_against_pos(preview.pos);
         let against = self
             .world
             .block(against_pos.x, against_pos.y, against_pos.z);
         let (_, entity) = self.native_clicker();
-        self.place_canceled(
+        if self.place_canceled(
             entity.cast_unsigned(),
             preview.pos,
             preview.state,
             against,
             preview.companion,
-        )
+        ) {
+            PlayerPlacement::RefusePlacement
+        } else {
+            PlayerPlacement::Proceed
+        }
     }
     /// `MobEvent::PlaceBlock`: a mob sets `state` at `pos` unless a mod
     /// cancels `entity_place`. Enderman attempts use `enderman_place_block`.

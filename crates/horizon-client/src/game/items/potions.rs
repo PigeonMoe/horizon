@@ -424,7 +424,7 @@ fn splash_distance_sqr(at: Vec3, age: u32, bounds: Aabb) -> Option<f64> {
 impl Game<'_> {
     /// `LivingEntity.triggerOnDeathMobEffects` (`onMobRemoved` with the reason
     /// KILLED) for what Oozing, Weaving and Wind Charged do when their bearer
-    /// dies. `bearer` is the dying mob's id, none when a player dies; `silent`
+    /// dies. `bearer` identifies the dying mob, none when a player dies; `silent`
     /// whether that source is heard, and `random` the dying mob's own
     /// (`mob.getRandom()`; the world's for the player).
     pub(super) fn effects_on_death(
@@ -432,10 +432,11 @@ impl Game<'_> {
         effects: &[&str],
         bounds: Aabb,
         silent: bool,
-        bearer: Option<u32>,
+        bearer: Option<(u32, &str)>,
         mut random: Option<&mut LegacyRandom>,
     ) {
         let player = bearer.is_none();
+        let entity = bearer.map(|(id, _)| id);
         let feet = bounds.bottom_center();
         if effects.contains(&"oozing") {
             // OozingMobEffect.numberOfSlimesToSpawn: two, fewer when the
@@ -452,7 +453,7 @@ impl Game<'_> {
                     .iter()
                     .filter(|m| {
                         m.species() == horizon_client::mobs::Species::Slime
-                            && Some(m.id) != bearer
+                            && Some(m.id) != entity
                             && m.bounds().intersects(near)
                     })
                     .count()
@@ -473,13 +474,14 @@ impl Game<'_> {
             }
         }
         // `WeavingMobEffect.onMobRemoved`: `canEntityGrief` for the dying mob.
-        if effects.contains(&"weaving") && (player || self.can_entity_grief(bearer)) {
+        if effects.contains(&"weaving") && (player || self.can_entity_grief(entity)) {
             self.spawn_cobwebs_around(
                 [
                     feet.x.floor() as i32,
                     feet.y.floor() as i32,
                     feet.z.floor() as i32,
                 ],
+                bearer,
                 random.as_deref_mut(),
             );
         }
@@ -492,7 +494,7 @@ impl Game<'_> {
             let bearer = if player {
                 Some(self.own_entity_id() as u32)
             } else {
-                bearer
+                entity
             };
             let cause = super::wind::BurstCause {
                 source: bearer,
@@ -509,7 +511,15 @@ impl Game<'_> {
     /// `WeavingMobEffect.spawnCobwebsRandomlyAround`: two or three cobwebs in
     /// free spaces with a solid floor, picked among 15 random blocks within one
     /// block of `pos`.
-    fn spawn_cobwebs_around(&mut self, pos: [i32; 3], mut random: Option<&mut LegacyRandom>) {
+    fn spawn_cobwebs_around(
+        &mut self,
+        pos: [i32; 3],
+        bearer: Option<(u32, &str)>,
+        mut random: Option<&mut LegacyRandom>,
+    ) {
+        let Some(cobweb) = self.pack.assets.registry.default_state("minecraft:cobweb") else {
+            return;
+        };
         let r = random.as_deref_mut().unwrap_or(&mut self.world.random);
         let wanted = 2 + r.next_int_bound(2).unwrap_or(0) as usize;
         let mut chosen: Vec<[i32; 3]> = Vec::new();
@@ -533,9 +543,26 @@ impl Game<'_> {
                 }
             }
         }
-        for at in chosen {
-            if self.set_state_named(at, "minecraft:cobweb", &[]).is_ok() {
-                self.level_event_at(3018, at, 0);
+        let (player, entity, kind) = match bearer {
+            Some((entity, kind)) => (None, Some(entity), kind),
+            None => (Some(self.native_acting_id()), None, "minecraft:player"),
+        };
+        for pos in chosen {
+            let from = self.world.block(pos[0], pos[1], pos[2]);
+            let mut cancel = false;
+            self.native_entity_change_block_pre(
+                crate::game::native_hooks::EntityChangeBlockPreCall {
+                    player,
+                    entity,
+                    kind,
+                    pos,
+                    from,
+                    to: cobweb,
+                    cancel: &mut cancel,
+                },
+            );
+            if !cancel && self.level_set(pos, cobweb).is_ok() {
+                self.level_event_at(3018, pos, 0);
             }
         }
     }
@@ -3029,6 +3056,93 @@ mod tests {
                     .map(|c| (c.id, c.age))
                     .collect::<Vec<_>>(),
                 [(next + 1, 0), (next + 2, 0), (first, 1), (second, 1)]
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn weaving_respects_block_permissions_for_both_bearers() {
+        use crate::game::native_entity_refs::tests::{run_on_guest_stack, with_game};
+        use mod_api::{EntityChangeBlockPreEvent, Flow, Hooks, ModEntry, ServerHost};
+        use std::sync::{Arc, Mutex};
+
+        const PLAYER: u128 = 31;
+        const ZOMBIE: u32 = 47;
+
+        struct Claims(Arc<Mutex<Vec<[i32; 3]>>>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Claims {
+            fn entity_change_block_pre(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut EntityChangeBlockPreEvent<'_>,
+            ) -> Flow {
+                match event.kind {
+                    "minecraft:player" => {
+                        assert_eq!(event.player, Some(PLAYER));
+                        assert_eq!(event.entity, None);
+                    }
+                    "minecraft:zombie" => {
+                        assert_eq!(event.player, None);
+                        assert_eq!(event.entity, Some(ZOMBIE));
+                    }
+                    other => panic!("unexpected Weaving bearer {other}"),
+                }
+                assert_eq!(Some(event.from), host.block_state_id("minecraft:air"));
+                assert_eq!(Some(event.to), host.block_state_id("minecraft:cobweb"));
+                let mut changes = self.0.lock().unwrap();
+                changes.push(event.pos);
+                if changes.len() == 1 {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
+
+        run_on_guest_stack(|| {
+            let changes = Arc::new(Mutex::new(Vec::new()));
+            mod_platform::testing::with_mods(
+                [ModEntry::new(
+                    "weaving-protection",
+                    Box::new(Claims(changes.clone())),
+                )]
+                .into(),
+                || {
+                    with_game(|game| {
+                        game.load_ticking_neighbourhood(0, 0);
+                        game.lan_acting_uuid = Some(PLAYER);
+                        let registry = game.pack.assets.registry;
+                        let stone = registry.default_state("minecraft:stone").unwrap();
+                        let cobweb = registry.default_state("minecraft:cobweb").unwrap();
+                        let air = game.world.air;
+                        for (x, bearer) in [(4, None), (11, Some((ZOMBIE, "minecraft:zombie")))] {
+                            for px in x - 1..=x + 1 {
+                                for z in 7..=9 {
+                                    game.world.set(px, 63, z, stone).unwrap();
+                                    for y in 64..=65 {
+                                        game.world.set(px, y, z, air).unwrap();
+                                    }
+                                }
+                            }
+                            game.world.random.set_seed(0);
+                            game.spawn_cobwebs_around([x, 64, 8], bearer, None);
+                            let mut changes = changes.lock().unwrap();
+                            assert!(
+                                changes.len() >= 2,
+                                "each bearer selects multiple cobweb spots"
+                            );
+                            for (i, [x, y, z]) in changes.drain(..).enumerate() {
+                                assert_eq!(
+                                    game.world.block(x, y, z),
+                                    if i == 0 { air } else { cobweb }
+                                );
+                            }
+                        }
+                    })
+                },
             );
         });
     }

@@ -16,6 +16,7 @@ impl Game<'_> {
             ProjectileKind::SmallFireball | ProjectileKind::LargeFireball { .. } => {
                 DamageKind::Fireball
             }
+            ProjectileKind::LlamaSpit => DamageKind::Spit,
             _ => DamageKind::Thrown,
         }
     }
@@ -27,6 +28,11 @@ impl Game<'_> {
             Some(Who::Mob(entity)) => self.attack_of(entity as i32),
             None => Attack::default(),
         };
+        // Paper names the spit as the damager. A mob shooter does not
+        // inherit the permissions of its tamer.
+        if shot.kind == ProjectileKind::LlamaSpit && matches!(shot.owner, Some(Who::Mob(_))) {
+            attack.policy_player = None;
+        }
         Self::set_projectile_attack(&mut attack, shot);
         attack
     }
@@ -279,6 +285,12 @@ impl Game<'_> {
             .as_ref()
             .filter(|_| mod_api::__private::listened(mod_api::HookId::EnchantedEntityLoot))
             .zip(self.effect_living_ref(Some(m.id as i32)));
+        // Paper leaves a chested horse's chest visible to its death
+        // listeners until after the collected drops have been reported.
+        let bonus_listener = mod_api::__private::listened(mod_api::HookId::MobDeathBonusDrops);
+        let had_chest = bonus_listener
+            && m.extra.chested
+            && horizon_client::mobs::equine::is_chested(m.species());
         let (items, skulls) = horizon_world::loot::with_native_loot_place(place, || {
             let rolled = match enchanted_loot {
                 Some((source, entity)) => {
@@ -428,7 +440,13 @@ impl Game<'_> {
             recently_hit: player_killed,
             credited_player: player_uuid,
         };
-        self.drop_death_items(&dying, stacks, 10, |_| None);
+        self.drop_death_items_with_mob(
+            &dying,
+            stacks,
+            10,
+            |_| None,
+            bonus_listener.then_some((m, had_chest)),
+        );
         if let Some(reward) = experience {
             let amount = self.living_experience_drop(m.id, &kind, player_uuid, reward);
             self.spawn_orbs(pos, amount as u32);

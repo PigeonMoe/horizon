@@ -40,6 +40,52 @@ impl Game<'_> {
     ) {
         self.fire_living_drops(call);
     }
+    pub(in crate::game) fn collect_mob_death_bonus_drops(
+        &mut self,
+        kind: &str,
+        credited_player: Option<u128>,
+        mob: &horizon_client::mobs::Mob,
+        had_chest: bool,
+        collected: impl Iterator<Item = horizon_client::items::ItemStack>,
+    ) -> Vec<horizon_client::items::ItemStack> {
+        let mut protected = Vec::new();
+        if had_chest {
+            protected.push(ItemStack::new("minecraft:chest", 1));
+            protected.extend(mob.extra.items.iter().flatten().cloned());
+        }
+        protected.extend(mob.equipment_stacks().iter().take(6).flatten().cloned());
+        let drops: Vec<_> = collected.collect();
+        let mut bonus = Vec::new();
+        self.native_mob_death_bonus_drops(
+            kind,
+            credited_player,
+            mob.can_pick_up_loot(),
+            &protected,
+            &drops,
+            &mut bonus,
+        );
+        bonus
+    }
+
+    pub(in crate::game) fn native_mob_death_bonus_drops(
+        &mut self,
+        kind: &str,
+        credited_player: Option<u128>,
+        can_pick_up_loot: bool,
+        protected_drops: &[ItemStack],
+        drops: &[ItemStack],
+        bonus_drops: &mut Vec<ItemStack>,
+    ) {
+        self.fire_mob_death_bonus_drops(
+            kind,
+            credited_player,
+            can_pick_up_loot,
+            protected_drops,
+            drops,
+            bonus_drops,
+        );
+    }
+
     /// A dying mob `entity` of `kind` is about to roll its drop chance for
     /// the item `stack` in `slot` (`Mob.dropCustomDeathLoot`, NeoForge's
     /// `GetEquipmentDropChanceEvent`). `original_chance` is

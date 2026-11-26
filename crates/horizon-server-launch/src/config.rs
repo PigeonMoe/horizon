@@ -12,7 +12,10 @@ use horizon_platform::server_files::properties::{
     DIFFICULTIES, GAME_MODES, ServerProperties, SystemEntropy,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 pub const FILE: &str = "server.toml";
 pub const PANEL_ACCESS_KEY_ENV: &str = "HORIZON_PANEL_ACCESS_KEY";
@@ -87,6 +90,8 @@ max_expected = 64            # players waited for at once
 max_freeze_seconds = 30      # the longest a player stays frozen while it is handed over
 max_hold_seconds = 60        # the longest a player arriving from another server is held before it is dropped
 stop_wait_seconds = 10       # a stop with players on waits this long for the proxy to move them out (0 to 60; 0: no wait)
+# backend_id = "west"        # stable backend identity for strict transfers; omit to use ordinary transfers
+# allowed_sources = ["east"] # backend IDs allowed to originate strict transfers to this backend
 
 # Post the chat, joins, leaves and deaths to a Discord channel, drawn like the in-game chat (docs/hosting.md)
 [discord]
@@ -556,6 +561,12 @@ pub struct Transfer {
     pub max_freeze_seconds: u32,
     pub max_hold_seconds: u32,
     pub stop_wait_seconds: u32,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub required_profiles: BTreeMap<String, u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub allowed_sources: BTreeSet<String>,
 }
 
 impl Default for Transfer {
@@ -568,12 +579,38 @@ impl Default for Transfer {
             max_freeze_seconds: 30,
             max_hold_seconds: 60,
             stop_wait_seconds: 10,
+            required_profiles: BTreeMap::new(),
+            backend_id: None,
+            allowed_sources: BTreeSet::new(),
         }
     }
 }
 
 impl Transfer {
     fn check(&self) -> Result<(), String> {
+        if !self.required_profiles.is_empty() && !self.enabled {
+            return Err("transfer.required_profiles needs transfer.enabled".into());
+        }
+        if !self.enabled && (self.backend_id.is_some() || !self.allowed_sources.is_empty()) {
+            return Err("transfer backend routes need transfer.enabled".into());
+        }
+        horizon_server_files::transfer_routes::validate(
+            self.backend_id.as_deref(),
+            &self.allowed_sources,
+        )?;
+        if self.required_profiles.len() > 16 {
+            return Err("transfer.required_profiles may contain up to 16 sections".into());
+        }
+        for (id, &schema) in &self.required_profiles {
+            if schema == 0
+                || id.len() > 128
+                || horizon_core::identifier::Identifier::parse_namespaced(id).is_none()
+            {
+                return Err(format!(
+                    "invalid transfer.required_profiles section {id:?} or schema"
+                ));
+            }
+        }
         for (name, n) in [
             ("expect_seconds", self.expect_seconds),
             ("max_expect_seconds", self.max_expect_seconds),
@@ -608,7 +645,7 @@ impl Transfer {
     /// The game's `--transfers` value, when the section turns transfers on.
     pub fn engine_arg(&self) -> Option<String> {
         self.enabled.then(|| {
-            format!(
+            let mut options = format!(
                 "expect_seconds={},max_expect_seconds={},max_expected={},max_freeze_seconds={},max_hold_seconds={},stop_wait_seconds={}",
                 self.expect_seconds,
                 self.max_expect_seconds,
@@ -616,7 +653,22 @@ impl Transfer {
                 self.max_freeze_seconds,
                 self.max_hold_seconds,
                 self.stop_wait_seconds
-            )
+            );
+            if !self.required_profiles.is_empty() {
+                let required = self.required_profiles.iter().map(|(id, schema)| format!("{id}@{schema}")).collect::<Vec<_>>();
+                options.push_str(",required_profiles=");
+                options.push_str(&required.join(";"));
+            }
+            if let Some(id) = &self.backend_id {
+                options.push_str(",backend_id=");
+                options.push_str(id);
+            }
+            if !self.allowed_sources.is_empty() {
+                options.push_str(",allowed_sources=");
+                let sources = self.allowed_sources.iter().map(String::as_str).collect::<Vec<_>>();
+                options.push_str(&sources.join(";"));
+            }
+            options
         })
     }
 }
@@ -957,6 +1009,28 @@ pub fn render(config: &Config) -> String {
     ] {
         set(&mut doc, section, field, &table[section][field]);
     }
+    if config.transfer.backend_id.is_some() {
+        set(
+            &mut doc,
+            "transfer",
+            "backend_id",
+            &table["transfer"]["backend_id"],
+        );
+    }
+    if !config.transfer.allowed_sources.is_empty() {
+        let mut sources = toml_edit::Array::new();
+        for source in &config.transfer.allowed_sources {
+            sources.push(source.as_str());
+        }
+        doc["transfer"]["allowed_sources"] = toml_edit::value(sources);
+    }
+    if !config.transfer.required_profiles.is_empty() {
+        let mut profiles = toml_edit::Table::new();
+        for (id, &schema) in &config.transfer.required_profiles {
+            profiles.insert(id, toml_edit::value(i64::from(schema)));
+        }
+        doc["transfer"]["required_profiles"] = toml_edit::Item::Table(profiles);
+    }
     let mut text = doc.to_string();
     for section in [
         "anticheat",
@@ -1218,6 +1292,49 @@ keep = {keep}
             let bad = on.replace(from, to);
             assert_ne!(bad, on, "{from} is in the template");
             assert!(Config::parse(&bad).is_err(), "{to} was taken");
+        }
+    }
+
+    #[test]
+    fn a_required_destination_roster_round_trips_to_the_engine() {
+        let text = "[transfer]\nenabled = true\n[transfer.required_profiles]\n\"slimefun:profile\" = 1\n\"other:state\" = 2\n";
+        let config = Config::parse(text).unwrap();
+        assert_eq!(Config::parse(&render(&config)).unwrap(), config);
+        assert!(
+            config
+                .transfer
+                .engine_arg()
+                .unwrap()
+                .ends_with(",required_profiles=other:state@2;slimefun:profile@1")
+        );
+        for invalid in [
+            text.replace("enabled = true", "enabled = false"),
+            text.replace("slimefun:profile", "unqualified"),
+            text.replace(" = 1", " = 0"),
+        ] {
+            assert!(Config::parse(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn configured_transfer_backend_routes_round_trip() {
+        let text = "[transfer]\nenabled = true\nbackend_id = \"local\"\nallowed_sources = [\"west-1\", \"east_2\"]\n";
+        let config = Config::parse(text).unwrap();
+        assert_eq!(Config::parse(&render(&config)).unwrap(), config);
+        assert!(
+            config
+                .transfer
+                .engine_arg()
+                .unwrap()
+                .ends_with(",backend_id=local,allowed_sources=east_2;west-1")
+        );
+        for bad in [
+            text.replace("enabled = true", "enabled = false"),
+            text.replace("backend_id = \"local\"\n", ""),
+            text.replace("west-1", "local"),
+            text.replace("east_2", "invalid;/peer"),
+        ] {
+            assert!(Config::parse(&bad).is_err(), "{bad}");
         }
     }
 

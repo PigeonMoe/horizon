@@ -615,6 +615,7 @@ pub(in crate::game) mod tests {
                 dim,
                 at,
                 rotation: None,
+                notify_position: true,
                 vehicle: None,
             });
         game.run_level_teleports();

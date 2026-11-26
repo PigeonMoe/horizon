@@ -157,7 +157,8 @@ impl Game<'_> {
                 .map(|e| e.id.trim_start_matches("minecraft:"))
                 .collect();
             let (bounds, mut random) = (m.bounds(), m.random.clone());
-            self.effects_on_death(&names, bounds, false, Some(id), Some(&mut random));
+            let kind = m.kind.id.clone();
+            self.effects_on_death(&names, bounds, false, Some((id, &kind)), Some(&mut random));
             if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                 m.random = random;
             }
@@ -546,7 +547,9 @@ mod tests {
                     invisible: false,
                     check_interval: 0,
                     custom_name: None,
-                    random: horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(0)),
+                    random: horizon_core::random::EntityRandom::own(
+                        horizon_core::random::LegacyRandom::new(0),
+                    ),
                 });
             }
             game.paintings.push(Painting {

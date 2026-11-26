@@ -785,6 +785,18 @@ impl Game<'_> {
         ))
     }
 
+    pub(super) fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
+        let hub = &self.lan.as_ref()?.hub;
+        if let Some(id) = hub.source_frozen_handover(owner) {
+            return Some(id);
+        }
+        hub.transfers.as_ref()?;
+        let guest = hub.guests.iter().find(|guest| {
+            guest.uuid == owner && guest.placed && !guest.held && guest.participates_online()
+        })?;
+        guest.handover.as_ref().map(|handover| handover.id)
+    }
+
     /// The chunks players started and stopped watching that the hub
     /// recorded (`lan::chunk_watch`), told to the mods in the hub's order,
     /// with no player's state swapped in, and a sent chunk's passages sent
@@ -866,7 +878,7 @@ impl Game<'_> {
         if let Some(guest) = self.lan.as_ref().and_then(|host| {
             host.hub.guests.simulation_iter().find(|guest| {
                 guest.placed
-                    && guest.participates_online()
+                    && guest.participates_in_player_simulation()
                     && guest.uuid == uuid
                     && !self.lan_guest_swaps.contains(&guest.conn)
             })
@@ -1181,6 +1193,24 @@ impl Game<'_> {
             mod_api::EntityRef::new(epoch, player.entity_id as u32),
             player.uuid,
         ))
+    }
+
+    pub(super) fn native_known_player_uuid(&self, name: &str) -> Option<u128> {
+        if let Some(player) = self.native_player_by_name(name) {
+            return Some(player.uuid());
+        }
+        if !self.is_dedicated_server() {
+            return None;
+        }
+        let uuid = super::dedicated::cached_user_uuid_by_name(name)?;
+        // A join hook can see the player before the dedicated loop caches the
+        // new name. The live account takes precedence during that window too.
+        let renamed = self.lan.as_ref().is_some_and(|host| {
+            host.hub
+                .online_players()
+                .any(|player| player.uuid == uuid && !player.name.eq_ignore_ascii_case(name))
+        });
+        (!renamed).then_some(uuid)
     }
 
     /// A connected player's record, including one displaced by a nested turn.
@@ -1566,6 +1596,12 @@ impl Game<'_> {
         }
         (self.native_acting_player() == Some(player)).then_some(false)
     }
+    pub(super) fn player_client_language(&self, player: PlayerRef) -> Option<String> {
+        if let Some(guest) = self.online_player_record(player) {
+            return Some(guest.info.language.clone());
+        }
+        (self.native_acting_player() == Some(player)).then(|| self.settings.language.clone())
+    }
     /// `ServerPlayer.getRespawnConfig`: the player's respawn point as the
     /// game keeps it (the guest's record, or the acting player's in place),
     /// `Some(None)` when they have none. None for a stale or unavailable
@@ -1887,6 +1923,9 @@ impl Game<'_> {
         let Some(read) = self.player_handle_read(player) else {
             return false;
         };
+        if self.player_frozen_handover(player.uuid()).is_some() {
+            return false;
+        }
         let conn = match read {
             PlayerRead::Acting { .. } => None,
             PlayerRead::Guest(g) if !g.dead => Some(g.conn),
@@ -1953,10 +1992,8 @@ impl Game<'_> {
         self.native_commands.refresh = true;
     }
 
-    /// Asks the mods what root commands each player's tree keeps
-    /// (`native_player_commands_sent`) and stores the answer in the hub,
-    /// which sends the trees without what the mods took out: for `only`, or
-    /// for every placed player.
+    /// Asks the mods which roots and literal branches to hide from each
+    /// player's command tree, for `only` or for every placed player.
     pub(super) fn native_filter_commands(&mut self, only: Option<u32>) {
         let Some(host) = self.lan.as_ref() else {
             return;
@@ -1972,22 +2009,31 @@ impl Game<'_> {
             let Some(host) = self.lan.as_ref() else {
                 return;
             };
+            let Some(guest) = host.hub.guest(conn) else {
+                continue;
+            };
+            let (permission, placed) = (guest.permission, guest.placed);
             let names = host.hub.command_names(conn);
             let mut kept = names.clone();
-            let placed = host.hub.guest(conn).is_some_and(|g| g.placed);
-            if !placed {
-                // A joining player has no world yet: nothing can be told them.
-                self.native_player_commands_sent(uuid, &name, &mut kept);
-            } else if self.lan_acting == Some(conn) {
-                self.native_player_commands_sent(uuid, &name, &mut kept);
+            let mut hidden_literals = Vec::new();
+            let mut filter = |game: &mut Game<'_>| {
+                game.native_player_commands_sent(uuid, &name, &mut kept);
+                game.native_player_command_literals_sent(
+                    uuid,
+                    &name,
+                    permission,
+                    &mut hidden_literals,
+                );
+            };
+            if !placed || self.lan_acting == Some(conn) {
+                filter(self);
             } else {
-                self.as_guest(conn, |g| {
-                    g.native_player_commands_sent(uuid, &name, &mut kept);
-                });
+                self.as_guest(conn, filter);
             }
             if let Some(host) = self.lan.as_mut() {
                 let _ = host.hub.update_guest(conn, |g| {
                     g.hidden_commands = names.into_iter().filter(|n| !kept.contains(n)).collect();
+                    g.hidden_command_literals = hidden_literals;
                 });
             }
         }

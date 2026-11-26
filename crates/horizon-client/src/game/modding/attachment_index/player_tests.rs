@@ -190,6 +190,7 @@ fn queued_level_teleport_moves_the_player_row_and_later_writes_stay_in_the_desti
                 dim: Dim::Nether,
                 at: [8.5, 70.0, 8.5],
                 rotation: None,
+                notify_position: true,
                 vehicle: None,
             });
         game.run_level_teleports();

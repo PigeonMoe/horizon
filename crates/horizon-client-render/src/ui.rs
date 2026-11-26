@@ -8,7 +8,7 @@ use crate::{
     text::Text,
 };
 use horizon_assets::resource_source::ResourceSource;
-use std::{collections::HashMap, sync::RwLock, time::Instant};
+use std::{borrow::Cow, collections::HashMap, sync::RwLock, time::Instant};
 
 /// `GuiSpriteScaling.NineSlice`: the sprite's size in GUI pixels, whatever
 /// its texture's resolution, its borders (left, top, right, bottom) in the
@@ -1272,6 +1272,8 @@ pub struct EditBox {
     focused_at: Instant,
     /// Grey completion shown after the text (EditBox.setSuggestion).
     pub suggestion: Option<String>,
+    /// Hide the value when drawing or narrating this text field.
+    pub obscured: bool,
     pub text_color: u32,
     /// `EditBox.setCentered`: the text starts in the middle of the box's
     /// width, not at its left edge (`BookSignScreen`'s title).
@@ -1527,6 +1529,7 @@ impl EditBox {
             focused: true,
             focused_at: Instant::now(),
             suggestion: None,
+            obscured: false,
             text_color: rgba(224, 224, 224, 255),
             centered: false,
             text_color_uneditable: rgba(112, 112, 112, 255),
@@ -1610,7 +1613,7 @@ impl EditBox {
     /// EditBox.findClickedPositionInText: the character boundary under GUI `x`.
     pub fn position_at(&mut self, atlas: &HudAtlas, x: f32) -> usize {
         self.layout(atlas);
-        let rest: String = self.value.chars().skip(self.display).collect();
+        let rest: String = self.visible_value().chars().skip(self.display).collect();
         let shown: String = rest
             .chars()
             .take(atlas.font.fit(&rest, self.inner_width()))
@@ -1666,7 +1669,7 @@ impl EditBox {
     fn layout(&mut self, atlas: &HudAtlas) {
         let len = char_len(&self.value);
         self.display = self.display.min(len);
-        let (value, inner) = (self.value.clone(), self.inner_width());
+        let (value, inner) = (self.visible_value().into_owned(), self.inner_width());
         let visible = |d: usize| -> usize {
             let rest: String = value.chars().skip(d).collect();
             atlas.font.fit(&rest, inner)
@@ -1676,6 +1679,13 @@ impl EditBox {
         }
         if self.cursor < self.display {
             self.display = self.cursor;
+        }
+    }
+    fn visible_value(&self) -> Cow<'_, str> {
+        if self.obscured {
+            Cow::Owned("*".repeat(char_len(&self.value)))
+        } else {
+            Cow::Borrowed(&self.value)
         }
     }
     /// Keyboard editing shared by every text field. Returns true if handled.
@@ -1708,6 +1718,9 @@ impl EditBox {
         clipboard: &mut dyn crate::clipboard::Clipboard,
     ) -> bool {
         use crate::clipboard::EditShortcut;
+        if self.obscured && matches!(shortcut, EditShortcut::Copy | EditShortcut::Cut) {
+            return false;
+        }
         if !self.editable {
             match shortcut {
                 // EditBox.keyPressed: Cut copies the selection, then does not
@@ -1744,7 +1757,7 @@ impl EditBox {
     /// After a draw: the first character shown and the GUI x of each shown character
     /// boundary, from the start of the shown text to its end.
     pub fn shown_edges(&self, atlas: &HudAtlas) -> (usize, Vec<f32>) {
-        let rest: String = self.value.chars().skip(self.display).collect();
+        let rest: String = self.visible_value().chars().skip(self.display).collect();
         let shown = atlas.font.fit(&rest, self.inner_width());
         let edges = (0..=shown)
             .map(|n| self.text_x() + atlas.font.width(&rest.chars().take(n).collect::<String>()))
@@ -1788,8 +1801,12 @@ impl EditBox {
             .unwrap_or([self.x, self.y, self.width, self.height]);
         crate::widgets::target_as(rect, crate::widgets::Kind::Field);
         crate::widgets::narratable(|| {
-            crate::widgets::Narratable::edit_box(self.message.clone(), self.value.clone(), rect)
-                .focused(self.focused)
+            crate::widgets::Narratable::edit_box(
+                self.message.clone(),
+                self.visible_value().into_owned(),
+                rect,
+            )
+            .focused(self.focused)
         });
         if self.bordered {
             let sprite = skin.unwrap_or(if self.focused {
@@ -1813,7 +1830,8 @@ impl EditBox {
         } else {
             self.text_color_uneditable
         };
-        let rest: String = self.value.chars().skip(self.display).collect();
+        let format = format.filter(|_| !self.obscured);
+        let rest: String = self.visible_value().chars().skip(self.display).collect();
         let shown_len = atlas.font.fit(&rest, self.inner_width());
         let displayed: String = rest.chars().take(shown_len).collect();
         let rel_cursor = self.cursor as isize - self.display as isize;
@@ -1869,7 +1887,10 @@ impl EditBox {
                 true,
             );
         }
-        if !insert && let Some(s) = &self.suggestion {
+        if !self.obscured
+            && !insert
+            && let Some(s) = &self.suggestion
+        {
             batch.text(atlas, s, cursor_x - 1.0, ty, rgba(128, 128, 128, 255), true);
         }
         let rel_highlight =

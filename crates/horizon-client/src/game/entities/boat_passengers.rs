@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 pub(super) const BOARDING_COOLDOWN: i32 = 60;
 /// `Player.DEFAULT_VEHICLE_ATTACHMENT`: how far below the seat a player's
 /// feet are.
-const PLAYER_RIDING_OFFSET: f64 = 0.6;
+pub(super) const PLAYER_RIDING_OFFSET: f64 = 0.6;
 
 /// How many box queries the walk over every mob answers, once a write to the mob list has
 /// made the grid stale, before a new grid is built: about what building one costs (with
@@ -287,6 +287,23 @@ impl Game<'_> {
             self.boat_passengers(b.id) + usize::from(players == 0)
         };
         b.seat(0, count, false, PLAYER_RIDING_OFFSET, false)
+    }
+
+    /// `AbstractBoat.getPassengerAttachmentPoint` uses the rider's index in
+    /// the passenger list, which can differ from its connection's join order.
+    pub(super) fn guest_boat_seat(&self, i: usize, rider: u32) -> Option<Vec3> {
+        let boat = &self.boats[i];
+        let passengers = self.native_passenger_ids(boat.id);
+        let seat = passengers.iter().position(|&id| id == rider)?;
+        // A window host can occupy the first seat without a network guest row.
+        let local = usize::from(self.lan_acting.is_none() && self.riding == Some(boat.id));
+        Some(boat.seat(
+            seat + local,
+            passengers.len() + local,
+            false,
+            PLAYER_RIDING_OFFSET,
+            false,
+        ))
     }
     /// `getRootVehicle` of mob `j`: the mob or boat at the bottom of what it
     /// rides, None when it rides nothing.

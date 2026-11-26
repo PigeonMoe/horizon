@@ -61,8 +61,9 @@ impl<'a, A: HealthAttributes, E: CombatEnvironment<A>> ServerPlayerCombat<'a, E,
         &mut self,
         state: &mut HurtState<E::Source>,
         damage: f32,
+        observe_zero_damage: bool,
     ) -> Result<Option<PendingHurt<E::UseItem>>, ServerDamageError<Error<E>, A::Error>> {
-        server_player_hurt_until_helmet(state, self, damage)
+        server_player_hurt_until_helmet(state, self, damage, observe_zero_damage)
     }
     /// The rest of a hit whose helmet the caller has worn.
     pub fn hurt_after_helmet(

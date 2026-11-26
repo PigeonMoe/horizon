@@ -1761,6 +1761,35 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let block = b.table.block_by_name(&format!("minecraft:{next}"))?;
         Some(b.table.with_properties_of(block, state))
     }
+    pub(crate) fn lightning_clear_copper(&mut self, struck: BlockPos) {
+        self.b.lightning_clear_copper_with(self, struck);
+    }
+}
+
+/// World operations for copper cleaning. Writes may be vetoed by the entity's host.
+pub trait LightningCopperWorld {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId;
+    fn random_index(&mut self, bound: i32) -> i32;
+    fn clean_copper(&mut self, pos: BlockPos, from: BlockStateId, to: BlockStateId);
+    fn emit_event(&mut self, event: LevelEvent);
+}
+
+impl<L: LevelAccess + ?Sized> LightningCopperWorld for Sim<'_, L> {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.state(pos)
+    }
+    fn random_index(&mut self, bound: i32) -> i32 {
+        self.rand_int(bound)
+    }
+    fn clean_copper(&mut self, pos: BlockPos, _: BlockStateId, to: BlockStateId) {
+        self.set_block_and_update(pos, to);
+    }
+    fn emit_event(&mut self, event: LevelEvent) {
+        self.emit(event);
+    }
+}
+
+impl Behaviours {
     /// `WeatheringCopper.getPrevious` (and `getFirst` by repeating it) by
     /// registry naming: the block one oxidation step back.
     fn copper_previous_name(path: &str) -> Option<String> {
@@ -1781,60 +1810,73 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// One oxidation step back, or all of them: the world's
     /// `neoforge:oxidizables` inverse (`DataMapHooks.getPreviousOxidizedStage`)
     /// first, else by registry naming.
-    fn copper_stepped(&self, state: BlockStateId, all_the_way: bool) -> Option<BlockStateId> {
-        let b = self.b;
+    pub(super) fn copper_stepped(
+        &self,
+        state: BlockStateId,
+        all_the_way: bool,
+    ) -> Option<BlockStateId> {
         let previous = |name: &str| -> Option<String> {
-            b.read_block_maps(|maps| maps.previous_oxidation(name).map(str::to_owned))
+            self.read_block_maps(|maps| maps.previous_oxidation(name).map(str::to_owned))
                 .or_else(|| {
                     let path = Self::copper_previous_name(name.strip_prefix("minecraft:")?)?;
                     Some(format!("minecraft:{path}"))
                 })
         };
-        let start: &str = &b.table.info(b.block(state)).name;
+        let start: &str = &self.table.info(self.block(state)).name;
         let name = if all_the_way {
             first_stage(start, previous)?
         } else {
             previous(start)?
         };
-        let block = b.table.block_by_name(&name)?;
-        Some(b.table.with_properties_of(block, state))
+        let block = self.table.block_by_name(&name)?;
+        Some(self.table.with_properties_of(block, state))
     }
     /// `LightningBolt.clearCopperOnLightningStrike`: the struck copper goes
     /// back to unoxidized, then 3 to 5 random walks of up to 8 steps each
     /// scrape one step of oxidation off the weathering copper they land on.
     /// A waxed block is left as it is but still starts the walks.
-    pub(crate) fn lightning_clear_copper(&mut self, struck: BlockPos) {
-        let b = self.b;
-        let state = self.state(struck);
-        let weathering = b
+    pub fn lightning_clear_copper_with(
+        &self,
+        world: &mut impl LightningCopperWorld,
+        struck: BlockPos,
+    ) {
+        let state = world.block_state(struck);
+        let weathering = self
             .data(state)
             .implements(super::classes::Interface::WeatheringCopper);
-        let waxed = b.table.name(state).starts_with("minecraft:waxed_");
+        let waxed = self.table.name(state).starts_with("minecraft:waxed_");
         if !(weathering || waxed) {
             return;
         }
         if weathering && let Some(first) = self.copper_stepped(state, true) {
-            self.set_block_and_update(struck, first);
+            world.clean_copper(struck, state, first);
         }
-        for _ in 0..self.rand_int(3) + 3 {
+        for _ in 0..world.random_index(3) + 3 {
             let mut at = struck;
-            for _ in 0..self.rand_int(8) + 1 {
+            for _ in 0..world.random_index(8) + 1 {
                 // randomStepCleaningCopper: up to 10 random blocks in the
                 // 3x3x3 cube around the walk's position.
                 let mut next = None;
                 for _ in 0..10 {
-                    let x = at.x - 1 + self.rand_int(3);
-                    let y = at.y - 1 + self.rand_int(3);
-                    let z = at.z - 1 + self.rand_int(3);
+                    let x = at.x - 1 + world.random_index(3);
+                    let y = at.y - 1 + world.random_index(3);
+                    let z = at.z - 1 + world.random_index(3);
                     let candidate = BlockPos::new(x, y, z);
-                    let state = self.state(candidate);
-                    if b.data(state)
+                    let state = world.block_state(candidate);
+                    if self
+                        .data(state)
                         .implements(super::classes::Interface::WeatheringCopper)
                     {
                         if let Some(previous) = self.copper_stepped(state, false) {
-                            self.set_block_and_update(candidate, previous);
+                            world.clean_copper(candidate, state, previous);
                         }
-                        self.level_event(3002, candidate, -1);
+                        // The spark and the walk still advance when protection denies the write.
+                        world.emit_event(LevelEvent::LevelEvent {
+                            id: 3002,
+                            pos: candidate,
+                            data: -1,
+                            source: None,
+                        });
                         next = Some(candidate);
                         break;
                     }

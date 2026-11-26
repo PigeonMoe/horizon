@@ -1498,19 +1498,26 @@ impl Game<'_> {
     /// `EndCrystal.tick` in every dimension: the time (the spin and bob),
     /// and fire at its block where there is a dragon fight (the End).
     pub(super) fn tick_crystals(&mut self) {
-        let fire = (self.dimension_type().has_ender_dragon_fight)
-            .then(|| self.pack.assets.registry.default_state("minecraft:fire"))
-            .flatten();
+        let has_dragon_fight = self.dimension_type().has_ender_dragon_fight;
         for i in 0..self.crystals.len() {
             self.crystals[i].time += 1;
             self.crystal_block_effects(i);
             let p = self.crystals[i].position;
-            let b = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
-            if let Some(fire) = fire
-                && self.res.facts().is_air(self.world.block(b[0], b[1], b[2]))
-                && self.world.loaded(b[0], b[2])
+            let [x, y, z] = [p.x, p.y, p.z].map(|v| v.floor() as i32);
+            if has_dragon_fight
+                && self.world.loaded(x, z)
+                && self.res.facts().is_air(self.world.block(x, y, z))
             {
-                let _ = self.level_set(b, fire);
+                let pos = BlockPos::new(x, y, z);
+                // Paper checks ENDER_CRYSTAL ignition before resolving the fire's state.
+                let fire = self.with_level(|blocks, level, ticks| {
+                    level
+                        .block_ignite_allowed(pos, "ender_crystal")
+                        .then(|| blocks.fire_state_for(level, ticks, pos))
+                });
+                if let Some(fire) = fire {
+                    let _ = self.level_set([x, y, z], fire);
+                }
             }
         }
     }
@@ -1554,7 +1561,14 @@ impl Game<'_> {
                 Vec3::new(x + 1.0, y + 2.0, z + 1.0),
             ));
             self.combat.explosion_direct = Some(c.id);
-            let _ = self.server_explode(at, 6.0, interaction, false);
+            let _ = self.server_explode_from(
+                at,
+                6.0,
+                interaction,
+                false,
+                super::explosion::ExplosionSource::default()
+                    .with_entity(c.id, "minecraft:end_crystal"),
+            );
             self.combat.explosion_direct = None;
             self.combat.explosion_in_water = false;
             self.fight.blast_by = None;
@@ -4252,9 +4266,12 @@ impl Game<'_> {
             f64::from(above[1]),
             f64::from(above[2]),
         );
+        let at = Vec3::new(x + 0.5, y, z + 0.5);
+        if self.entity_item_place_cancelled("minecraft:end_crystal", at, None) {
+            return true;
+        }
         // EndCrystal's constructor: `this.random.nextInt(100000)`, the crystal's own random.
         let drawn = random_source::entity().next_int_bound(100_000).unwrap_or(0);
-        let at = Vec3::new(x + 0.5, y, z + 0.5);
         let time = Crystal::start_time(at, drawn, self.clock.still());
         // EndCrystal's constructor takes an id from the entity counter, so
         // the crystal is an entity a command can name (`@e[type=end_crystal]`).
@@ -4785,7 +4802,7 @@ impl Game<'_> {
     /// so it can be spawned in any dimension. Horizon keeps one dragon per level, as `/summon`
     /// and loading do: with one already there, nothing spawns and the egg stays.
     pub(super) fn spawn_dragon_spawned(&mut self, at: [f64; 3], site: SpawnSite) -> Option<u32> {
-        if self.dragon.is_some() {
+        if !self.dragon.can_install(None) {
             return None;
         }
         let position = Vec3::new(at[0], at[1], at[2]);

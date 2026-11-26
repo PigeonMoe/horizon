@@ -1827,6 +1827,7 @@ impl Game<'_> {
                 dim: level,
                 at: pos,
                 rotation,
+                notify_position: true,
                 vehicle: None,
             });
         Ok(true)

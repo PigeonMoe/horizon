@@ -1473,7 +1473,13 @@ impl Game<'_> {
                 .map(|e| e.id.trim_start_matches("minecraft:"))
                 .collect();
             let bounds = m.bounds();
-            self.effects_on_death(&names, bounds, m.silent, Some(m.id), Some(&mut m.random));
+            self.effects_on_death(
+                &names,
+                bounds,
+                m.silent,
+                Some((m.id, &m.kind.id)),
+                Some(&mut m.random),
+            );
         }
         self.deliver_pending_mob_actions(level_id)?;
         self.finish_creature_entities(&mut laps, &primable)
@@ -1831,7 +1837,18 @@ impl Game<'_> {
         dying: &DyingDrops<'_>,
         stacks: Vec<(ItemStack, [f64; 3], i32)>,
         pickup_delay: u32,
+        velocity: impl FnMut(&mut Self) -> Option<[f64; 3]>,
+    ) {
+        self.drop_death_items_with_mob(dying, stacks, pickup_delay, velocity, None);
+    }
+
+    fn drop_death_items_with_mob(
+        &mut self,
+        dying: &DyingDrops<'_>,
+        stacks: Vec<(ItemStack, [f64; 3], i32)>,
+        pickup_delay: u32,
         mut velocity: impl FnMut(&mut Self) -> Option<[f64; 3]>,
+        mob: Option<(&Mob, bool)>,
     ) {
         let Some(source) = &dying.source else {
             for (stack, position, age) in stacks {
@@ -1894,9 +1911,34 @@ impl Game<'_> {
         if cancel {
             return;
         }
+        let bonus = mob.map(|(mob, had_chest)| {
+            let position = [mob.position.x, mob.position.y, mob.position.z];
+            let stacks = self.collect_mob_death_bonus_drops(
+                dying.kind,
+                dying.credited_player,
+                mob,
+                had_chest,
+                drops.iter().map(|drop| drop.stack.clone()),
+            );
+            (stacks, position)
+        });
         for drop in drops {
             if drop.stack.count > 0 && &*drop.stack.item != "minecraft:air" {
                 self.add_item_drop(drop);
+            }
+        }
+        if let Some((stacks, position)) = bonus {
+            for stack in stacks {
+                if stack.count > 0 && &*stack.item != "minecraft:air" {
+                    let random = super::spill::prepare_item_random(None);
+                    self.add_item_entity_prepared(
+                        stack,
+                        position,
+                        Some(random.velocity),
+                        10,
+                        Some(random),
+                    );
+                }
             }
         }
     }
@@ -2102,13 +2144,19 @@ impl Game<'_> {
                 None => None,
             };
         }
-        let player = (p.owner == Some(Who::Player))
-            .then(|| horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid()));
-        let name = if player.is_some() {
-            self.acting_player_name().to_owned()
-        } else {
-            String::new()
-        };
+        let player = p
+            .owner_uuid
+            .filter(|_| p.owner == Some(Who::Player))
+            .map(horizon_client::lan::playerdata::ints_uuid);
+        let name = player.map_or_else(String::new, |uuid| {
+            if uuid == horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid()) {
+                self.acting_player_name().to_owned()
+            } else {
+                self.player(uuid)
+                    .and_then(|owner| self.player_name(owner))
+                    .unwrap_or_default()
+            }
+        });
         let (id, kind) = (p.id, p.entity_type());
         if let Some(a) = p.arrow.as_mut()
             && !p.stuck
@@ -3254,13 +3302,18 @@ impl Game<'_> {
                     by,
                     breaker,
                 } => {
+                    if let Some(mob) = by
+                        && !self.mob_may_destroy(mob, pos)
+                    {
+                        continue;
+                    }
+                    let old = self.world.block(pos[0], pos[1], pos[2]);
                     if let Some(mob) = by {
-                        if !self.mob_may_destroy(mob, pos) {
+                        if self.mob_break_replaced(mob, pos, old) {
                             continue;
                         }
                         broke.push(mob);
                     }
-                    let old = self.world.block(pos[0], pos[1], pos[2]);
                     // Block.spawnDestroyParticles: fire breaks leave nothing.
                     if !self.res.facts().get(old).has_class("BaseFireBlock") {
                         self.level_event_at(2001, pos, old.0 as i32);
@@ -4229,6 +4282,13 @@ impl Game<'_> {
         };
         attack.projectile = self.combat.attack().projectile;
         attack.direct = self.combat.attack().direct;
+        // A spit has a direct projectile even though its damage type is
+        // outside #is_projectile. Keep its scoped policy when rebuilding the hit.
+        if damage_type == "minecraft:spit" && attack.projectile.is_some() {
+            attack
+                .policy_player
+                .clone_from(&self.combat.attack().policy_player);
+        }
         attack.position = from;
         attack.projectile_weapon = self.combat.attack().projectile_weapon.clone();
         if let Some(a) = attacker.or(owner) {
@@ -5128,18 +5188,37 @@ impl Game<'_> {
             ArrowEvent::Block {
                 pos,
                 reaction,
+                projectile,
+                kind,
                 owner,
+                owner_uuid,
             } => match reaction {
                 BlockReaction::PrimeTnt => {
-                    // `TntBlock.onProjectileHit`: the arrow's owner lights it.
-                    if self.tnt_prime_allowed(pos) {
-                        self.spawn_primed_tnt(pos, false, owner, None);
+                    // Paper's `TntBlock.onProjectileHit` checks the projectile's
+                    // EntityChangeBlockEvent before TNTPrimeEvent.
+                    if self.mob_block_change_allowed(projectile, kind, [pos.x, pos.y, pos.z])
+                        && self.tnt_prime_allowed(pos)
+                    {
+                        let (owner, guest) =
+                            if let Some((_, guest)) = self.arrow_block_player_owner(owner_uuid) {
+                                (Some(Who::Player), guest)
+                            } else {
+                                let mob = owner.filter(|owner| {
+                                    matches!(*owner, Who::Mob(id) if self.mobs.iter().any(|mob| {
+                                        mob.id == id && !mob.removed
+                                    }))
+                                });
+                                (mob, None)
+                            };
+                        self.spawn_primed_tnt(pos, false, owner, guest);
                         self.with_level(|b, level, ticks| b.remove_block(level, ticks, pos, false));
                         let _ = self.process_level_events();
                     }
                 }
                 BlockReaction::Light(lit) => {
-                    let _ = self.level_set([pos.x, pos.y, pos.z], lit);
+                    if self.arrow_block_ignite_allowed(pos, kind, owner_uuid) {
+                        let _ = self.level_set([pos.x, pos.y, pos.z], lit);
+                    }
                 }
             },
             ArrowEvent::SplashEvent => {
@@ -5219,6 +5298,9 @@ impl Game<'_> {
     /// (`arrows::finish_entity_hit`): its sounds and drop, and back among the
     /// projectiles if it flies on.
     fn finish_arrow_hit(&mut self, mut arrow: Projectile, outcome: EntityHit) {
+        if self.projectile_was_returned(arrow.id) {
+            return;
+        }
         let keep = {
             let rain = self.arrow_rain();
             horizon_client::arrows::finish_entity_hit(&mut arrow, &self.arrow_scene(&rain), outcome)
@@ -5315,7 +5397,9 @@ impl Game<'_> {
     /// A projectile's hit, landed in the attack of its owner.
     pub(super) fn projectile_hit(&mut self, p: &Projectile, hit: Hit) -> Result<()> {
         let attack = self.projectile_attack(p);
-        let result = self.with_attack(attack, |g| g.projectile_hit_landed(p, hit));
+        let result = self.with_projectile_return(p, |g| {
+            g.with_attack(attack, |g| g.projectile_hit_landed(p, hit))
+        });
         self.settle_dealt_absorbed(p.owner == Some(Who::Player));
         result?;
         // The hit's hurt teleports an enderman or a shulker now (`hurtServer`).
@@ -5583,7 +5667,7 @@ impl Game<'_> {
                 p.owner.is_some(),
             );
             let hurt = !self.vehicle_refuses_projectile(p, id, kind, damage_type)
-                && self.arrow_hits_cart(i, amount, p.velocity, burning, creative, p.owner, p.guest);
+                && self.arrow_hits_cart(i, amount, p.velocity, burning, creative, Some(p));
             self.finish_arrow_hit(
                 arrow,
                 if hurt {
@@ -6099,7 +6183,9 @@ impl Game<'_> {
                         self.spawn_mob_raw("minecraft:endermite", [from.x, from.y, from.z], false);
                     }
                     // ServerPlayer.teleport: removeVehicle before the placement.
+                    let origin = self.active_teleport_origin();
                     section_steps::teleport_player(self, to);
+                    self.notify_active_teleport(origin);
                     self.hurt_player_by_action(
                         "minecraft:ender_pearl",
                         damage,
@@ -6314,10 +6400,12 @@ impl Game<'_> {
             (ProjectileKind::LlamaSpit, Hit::Entity { .. }) if p.owner.is_none() => {}
             (ProjectileKind::LlamaSpit, Hit::Entity { who, .. }) => match who {
                 Who::Player => {
-                    self.mob_hits_player(
+                    let attacker = self.combat.attack().attacker;
+                    self.mob_hits_player_caused(
                         1.0,
                         [p.previous.x, p.previous.y, p.previous.z],
                         "minecraft:spit",
+                        (attacker > 0).then_some(attacker as u32),
                     );
                 }
                 Who::Mob(id) => {
@@ -9849,6 +9937,18 @@ mod dye_mix_tests {
 }
 
 impl horizon_client::arrows::OwnerLookup for Game<'_> {
+    fn player_may_interact(&self, uuid: [i32; 4], pos: BlockPos) -> Option<bool> {
+        let (uuid, guest) = self.arrow_block_player_owner(Some(uuid))?;
+        let spawn_protection = match guest {
+            Some(conn) if Some(conn) != self.lan_acting => self
+                .lan
+                .as_ref()
+                .and_then(|host| self.spawn_protection_for(host, uuid)),
+            _ => self.lan_acting_spawn_protection,
+        };
+        Some(self.player_may_interact_at(pos, spawn_protection))
+    }
+
     fn non_player_entity(&self, uuid: [i32; 4]) -> bool {
         let found = self.target_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid));
         !matches!(

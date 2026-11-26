@@ -1032,7 +1032,7 @@ impl Hub {
     pub fn online_players(&self) -> impl Iterator<Item = &Guest> {
         self.guests
             .simulation_iter()
-            .filter(|g| g.placed && g.participates_online())
+            .filter(|g| g.placed && g.participates_in_player_simulation())
     }
     /// The number of network guests, including those still joining.
     pub fn online_count(&self) -> usize {
@@ -1311,6 +1311,9 @@ impl Hub {
             self.kick(conn, translatable("disconnect.timeout", &[]));
         }
         self.guests.update_all(|g| {
+            if g.profile_source_parked() {
+                return;
+            }
             let Some(h) = &g.handover else {
                 return;
             };
@@ -1627,7 +1630,7 @@ impl Hub {
             g.level_entered = self.ticks;
             g.last_reported = (g.position, [g.yaw, g.pitch]);
         });
-        self.send_active_effects(i);
+        self.send_held_or_active_effects(i);
         // ServerPlayer.sendPostEffects and initInventoryMenu.
         self.send_post_effects(i);
         self.send_inventory(i);
@@ -1684,7 +1687,7 @@ impl Hub {
             slot: g.selected as i32,
         }));
         self.resend_teleport(i, None);
-        self.send_active_effects(i);
+        self.send_held_or_active_effects(i);
         self.send_inventory(i);
         // The login sent the book of this server's file; the import may have brought another
         // (`ServerRecipeBook.sendInitialRecipeBook` replaces what the client has).
@@ -1769,6 +1772,123 @@ impl Hub {
         });
     }
 
+    pub fn source_frozen_handover(&self, owner: u128) -> Option<u128> {
+        self.lan.shared.source_frozen_handover(owner)
+    }
+
+    pub(super) fn profile_return_allowed(
+        &self,
+        owner: u128,
+        authorization: &super::source_handover::ReturnAuthorization,
+    ) -> bool {
+        let Some(settings) = self.transfers.as_ref().map(|transfer| &transfer.settings) else {
+            return false;
+        };
+        let Some(backend) = settings.backend_id.as_deref() else {
+            return false;
+        };
+        !settings.required_profiles.is_empty()
+            && authorization.retired.owner == owner
+            && self.source_frozen_handover(owner) == Some(authorization.retired.handover)
+            && settings.allowed_sources.contains(&authorization.source)
+            && self.lan.shared.config.forwarding_secret.is_some()
+            && self
+                .lan
+                .shared
+                .config
+                .source_handovers
+                .as_ref()
+                .is_some_and(|journal| journal.validate_return(backend, authorization).is_ok())
+    }
+
+    /// A verified binding before or during the hold. The join path can use
+    /// it to avoid loading the old local player before validation.
+    pub fn pending_profile_return(
+        &self,
+        conn: u32,
+    ) -> Option<&super::source_handover::ReturnAuthorization> {
+        let guest = self.guest(conn)?;
+        if !guest.expected
+            || guest.placed
+            || !guest.participates_online()
+            || !guest.left_reason.is_empty()
+        {
+            return None;
+        }
+        let authorization = guest.sender.profile_return()?;
+        self.profile_return_allowed(guest.uuid, authorization)
+            .then_some(authorization)
+    }
+
+    /// Authority bound to the current held connection by its verified login.
+    /// The control handler still compares the complete staged receipt tuple.
+    pub fn held_profile_return(
+        &self,
+        owner: u128,
+    ) -> Option<&super::source_handover::ReturnAuthorization> {
+        let guest = self
+            .guests
+            .iter()
+            .find(|guest| guest.uuid == owner && guest.held)?;
+        self.pending_profile_return(guest.conn)
+    }
+
+    /// Keep this backend connection responsive to the proxy while the
+    /// source fence owns its state. The game calls this between guest turns.
+    pub fn park_profile_source(&mut self, index: usize, id: u128) -> bool {
+        let Some(guest) = self.guests.get(index) else {
+            return false;
+        };
+        if !guest.placed
+            || guest.held
+            || !guest.participates_online()
+            || self.source_frozen_handover(guest.uuid) != Some(id)
+        {
+            return false;
+        }
+        self.deferred_payloads.remove(&Some(guest.conn));
+        let since = self.ticks;
+        self.guests.update(index, |guest| {
+            guest.pending_move = None;
+            guest.profile_source_parked = true;
+            guest.handover = Some(super::arrivals::Handover {
+                id,
+                since,
+                record: serde_json::Value::Null,
+            });
+        });
+        true
+    }
+
+    /// Detach a parked source only after a durable retirement. A proxy
+    /// may repeat the detach after the original connection has gone away.
+    pub fn detach_retired_profile_source(&mut self, owner: u128) -> bool {
+        let Some(id) = self
+            .lan
+            .shared
+            .config
+            .source_handovers
+            .as_ref()
+            .and_then(|journal| journal.retired_handover(owner))
+        else {
+            return false;
+        };
+        if let Some(index) = self
+            .guests
+            .iter()
+            .position(|guest| guest.uuid == owner && guest.participates_online())
+        {
+            let guest = &self.guests[index];
+            if !guest.profile_source_parked()
+                || guest.handover.as_ref().map(|handover| handover.id) != Some(id)
+            {
+                return false;
+            }
+            self.release_handover_guest(index, false);
+        }
+        true
+    }
+
     /// The guest index of the player `uuid` placed from the hand-over `id` (its import or
     /// confirmation committed): a retry of either, whose reply was lost, is answered the same.
     pub fn placed_arrival(&self, uuid: u128, id: u128) -> Option<usize> {
@@ -1780,6 +1900,13 @@ impl Hub {
     /// The guest index of the held player `uuid` whose record of the hand-over `id` was
     /// imported, and that has not been dropped or kicked meanwhile.
     pub fn imported_arrival(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        if self.source_frozen_handover(uuid).is_some()
+            && self
+                .held_profile_return(uuid)
+                .is_none_or(|authorization| authorization.handover != id)
+        {
+            return Err("the player is fenced by a source hand-over");
+        }
         let Some(i) = self
             .guests
             .iter()
@@ -1805,12 +1932,63 @@ impl Hub {
     /// What the client did since the import was not acted on, so it is put back where the
     /// server has it: the position to confirm again and the inventory.
     pub fn confirm_arrival(&mut self, uuid: u128, id: u128) -> Result<bool, &'static str> {
+        if self.source_frozen_handover(uuid).is_some() {
+            return Err("the return authority is still fenced");
+        }
         let i = self.imported_arrival(uuid, id)?;
+        if self.guests[i].arrival_profiles.is_some() {
+            return Err("the required profile sections have not been saved");
+        }
         let announce = self.guests[i].arrival_announce;
+        let protected = self.held_profile(i);
         self.resend_teleport(i, None);
-        self.send_inventory(i);
+        if !protected {
+            self.send_inventory(i);
+        }
         self.place_arrival(i, announce);
+        if protected {
+            if let Some(effect) = self.blindness_id() {
+                let guest = &self.guests[i];
+                guest.send(&C::RemoveMobEffect(play::RemoveMobEffect {
+                    id: guest.entity_id,
+                    effect,
+                }));
+            }
+            self.send_active_effects(i);
+            self.send_inventory(i);
+        }
         Ok(announce)
+    }
+
+    fn held_profile(&self, i: usize) -> bool {
+        self.guests[i].held
+            && self
+                .transfers
+                .as_ref()
+                .is_some_and(|transfers| !transfers.settings.required_profiles.is_empty())
+    }
+
+    fn blindness_id(&self) -> Option<i32> {
+        self.sync.id("minecraft:mob_effect", "minecraft:blindness")
+    }
+
+    /// The proxy can still build its world view. The synthetic effect is only
+    /// sent to this client, so it never enters the staged or saved player data.
+    fn send_held_or_active_effects(&mut self, i: usize) {
+        if !self.held_profile(i) {
+            self.send_active_effects(i);
+            return;
+        }
+        if let Some(effect) = self.blindness_id() {
+            let guest = &self.guests[i];
+            guest.send(&C::UpdateMobEffect(play::UpdateMobEffect {
+                id: guest.entity_id,
+                effect,
+                amplifier: 0,
+                duration: -1,
+                flags: 0,
+            }));
+        }
     }
 
     /// `ServerPlayer.sendPostEffects`: the player's `/posteffect` chains.
@@ -2127,6 +2305,7 @@ impl Hub {
                 g.previous_position = p;
             }
             g.last_reported = (g.position, [g.yaw, g.pitch]);
+            g.reset_paper_move_pose(g.position, [g.yaw, g.pitch]);
             g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
             let id = g.teleport_counter;
             g.awaiting_teleport = Some((id, g.position));
@@ -2270,9 +2449,18 @@ impl Hub {
         );
     }
     pub fn send_inventory(&mut self, i: usize) {
-        let items: Vec<Option<ItemStack>> = (0..46).map(|s| self.guests[i].menu_slot(s)).collect();
+        let protected = self.held_profile(i);
+        let items: Vec<Option<ItemStack>> = if protected {
+            vec![None; 46]
+        } else {
+            (0..46).map(|s| self.guests[i].menu_slot(s)).collect()
+        };
         let net: Vec<_> = items.iter().map(|s| self.stack(s)).collect();
-        let carried = self.guests[i].carried.clone();
+        let carried = if protected {
+            None
+        } else {
+            self.guests[i].carried.clone()
+        };
         let carried = self.stack(&carried);
         self.guests.update(i, |g| {
             g.menu_state = (g.menu_state + 1) & 0x7FFF;
@@ -2290,7 +2478,11 @@ impl Hub {
     /// Send an inventory-menu slot even if the authoritative stack did not
     /// change. The client may have predicted a different stack for this slot.
     pub fn send_inventory_slot(&mut self, i: usize, slot: usize) {
-        let current = self.guests[i].menu_slot(slot);
+        let current = if self.held_profile(i) {
+            None
+        } else {
+            self.guests[i].menu_slot(slot)
+        };
         let item = self.stack(&current);
         self.guests.update(i, |guest| {
             guest.menu_state = (guest.menu_state + 1) & 0x7FFF;
@@ -2338,6 +2530,21 @@ impl Hub {
                 }
                 NetEvent::Joined(j) => {
                     credits.push(credit);
+                    // Login can race publication while it is in configuration.
+                    let may_join = match j.sender.profile_return() {
+                        Some(authorization) => {
+                            j.expected
+                                && self.profile_return_allowed(j.uuid, authorization)
+                                && !self.guests.iter().any(|guest| {
+                                    guest.uuid == j.uuid && guest.participates_online()
+                                })
+                        }
+                        None => self.source_frozen_handover(j.uuid).is_none(),
+                    };
+                    if !may_join {
+                        j.sender.disconnect(super::source_handover::refusal());
+                        continue;
+                    }
                     while let Some(i) = self
                         .guests
                         .iter()
@@ -2365,6 +2572,9 @@ impl Hub {
                 }
                 NetEvent::Duplicate(uuid) => {
                     credits.push(credit);
+                    if self.source_frozen_handover(uuid).is_some() {
+                        continue;
+                    }
                     let conns: Vec<u32> = self
                         .guests
                         .iter()
@@ -2410,17 +2620,25 @@ impl Hub {
     /// here in arrival order: the client counts them as acknowledged, and its next
     /// message after the freeze would not validate otherwise.
     pub(crate) fn keep_acknowledgements(&mut self, i: usize, events: &mut Vec<HostEvent>) {
+        let strict_source = self.guests[i].profile_source_parked();
         let inbox = self.guests.update(i, |g| std::mem::take(&mut g.inbox));
         let mut credits = Vec::new();
         let mut inbox = inbox.into_iter();
         while let Some(entry) = inbox.next() {
-            let InboxItem::Packet(packet, credit) = entry else {
-                // Never filter or acknowledge past a raw callback boundary.
-                self.guests.update(i, |g| {
-                    g.inbox.push_back(entry);
-                    g.inbox.extend(inbox);
-                });
-                break;
+            let (packet, credit) = match entry {
+                InboxItem::Packet(packet, credit) => (packet, credit),
+                InboxItem::Raw(_, credit) if strict_source => {
+                    credits.push(credit);
+                    continue;
+                }
+                raw @ InboxItem::Raw(_, _) => {
+                    // Ordinary holds preserve the ordering of raw callbacks.
+                    self.guests.update(i, |g| {
+                        g.inbox.push_back(raw);
+                        g.inbox.extend(inbox);
+                    });
+                    break;
+                }
             };
             match &packet {
                 S::Chat(c) => {
@@ -2639,6 +2857,11 @@ impl Hub {
         announce: bool,
     ) -> Result<(), &'static str> {
         let i = self.handover_of(uuid, id)?;
+        self.release_handover_guest(i, announce);
+        Ok(())
+    }
+
+    fn release_handover_guest(&mut self, i: usize, announce: bool) {
         self.guests.update(i, |g| {
             g.quiet_leave = !announce;
             g.left_reason = "moved to another server".to_owned();
@@ -2647,13 +2870,16 @@ impl Hub {
         });
         let mut gone = self.remove_guest(i, "moved to another server");
         gone.released = true;
+        gone.profile_source_parked = false;
         gone.handover = None;
         self.pending_kicks.push(HostEvent::Left(Box::new(gone)));
-        Ok(())
     }
 
     /// The guest index of the player `uuid` while it is frozen for the hand-over `id`.
     pub fn handover_of(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        if self.source_frozen_handover(uuid).is_some() {
+            return Err("the player is fenced by a source hand-over");
+        }
         let Some(i) = self.guests.iter().position(|g| g.uuid == uuid) else {
             return Err("that player is not connected to this server");
         };
@@ -4069,6 +4295,16 @@ impl Hub {
                     if !self.guests[i].client_loaded() => {}
                 // handleAcceptTeleportPacket.
                 S::AcceptTeleportation(p) => {
+                    if self.guests[i].profile_source_parked() {
+                        // Finish the wire handshake without replaying a source-world
+                        // movement after the authoritative record was sealed.
+                        self.guests.update(i, |guest| {
+                            if guest.awaiting_teleport.is_some_and(|(id, _)| id == p.id) {
+                                guest.awaiting_teleport = None;
+                            }
+                        });
+                        continue;
+                    }
                     let recording = self.recording();
                     let g = &self.guests[i];
                     if p.id == g.teleport_counter && g.awaiting_teleport.is_none() {

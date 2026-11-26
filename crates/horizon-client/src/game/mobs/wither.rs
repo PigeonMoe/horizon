@@ -8,6 +8,7 @@ use horizon_client::{
     projectiles::{Projectile, ProjectileKind},
 };
 use horizon_core::{geometry::Direction, position::BlockPos};
+use horizon_world::level::LevelAccess;
 
 impl Game<'_> {
     /// `LivingEntity.createWitherRose`: a mob a wither killed leaves a wither
@@ -50,19 +51,19 @@ impl Game<'_> {
             position[1].floor() as i32,
             position[2].floor() as i32,
         ];
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
         let registry = self.pack.assets.registry;
         let rose = registry.default_state("minecraft:wither_rose");
         // NeoForge: `canEntityGrief` for the wither.
         if self.can_entity_grief(Some(wither))
             && let Some(rose) = rose
-            && self
-                .res
-                .facts()
-                .is_air(self.world.block(pos[0], pos[1], pos[2]))
-            && self.with_level(|b, level, ticks| {
-                b.can_survive(level, ticks, BlockPos::new(pos[0], pos[1], pos[2]), rose)
+            && self.with_level(|blocks, level, ticks| {
+                blocks.is_air(level.block_state(at))
+                    && blocks.can_survive(level, ticks, at, rose)
+                    && level.allow_block_form(at, level.block_state(at), rose)
             })
         {
+            // Paper takes the placement branch once the formation is approved.
             let _ = self.level_set(pos, rose);
             return;
         }

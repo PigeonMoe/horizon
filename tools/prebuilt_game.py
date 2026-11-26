@@ -225,7 +225,7 @@ def sync_unchanged(source: Path, destination: Path) -> tuple[int, int, int]:
     return written, removed, unchanged
 
 
-def cargo_features(server: bool, platform: str) -> list[str]:
+def cargo_features(server: bool, platform: str, pm_sync_mysql: bool = False) -> list[str]:
     """The game crate's features for this archive. The archive's std is a shared library with its own
     default-allocator `__rust_alloc`, and the wasm runtime's library, below the game, binds to it. Only ELF's
     dynamic linker (Linux) resolves every library's `__rust_alloc` to the first definition, the game's mimalloc.
@@ -236,6 +236,8 @@ def cargo_features(server: bool, platform: str) -> list[str]:
     features = ["--no-default-features"] if server else []
     if platform != "linux":
         features += ["--features", "system-allocator"]
+    if pm_sync_mysql:
+        features += ["--features", "pm-sync-mysql"]
     return features
 
 
@@ -439,7 +441,7 @@ def dylib_crate_types(staged: Path) -> None:
         manifest.write_text(text)
 
 
-def build(out: Path, server: bool) -> None:
+def build(out: Path, server: bool, pm_sync_mysql: bool = False) -> None:
     layout = package_format(ROOT)
     # Resolved here: the staging and build steps run from the staged copy.
     target_dir = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve() / "prebuilt"
@@ -451,7 +453,7 @@ def build(out: Path, server: bool) -> None:
     # On macOS this also gives both dylibs an @rpath install name instead of an absolute build path.
     if sys.platform == "darwin":
         rustflags += " -C rpath"
-    features = cargo_features(server, sys.platform)
+    features = cargo_features(server, sys.platform, pm_sync_mysql)
     # Linux's executable RUNPATH doesn't cover transitive dependencies: the game itself must find
     # the wasm runtime beside it. macOS's @rpath install names use the executable's rpath.
     link = ["--", "-C", "link-arg=-Wl,-rpath,$ORIGIN"] if sys.platform == "linux" else []
@@ -1090,6 +1092,7 @@ def main() -> None:
     build_parser = commands.add_parser("build")
     build_parser.add_argument("out", type=Path)
     build_parser.add_argument("--server", action="store_true", help="the dedicated server's features")
+    build_parser.add_argument("--pm-sync-mysql", action="store_true", help="verify Paper PM-Sync ownership in the dedicated engine")
     smoke_parser = commands.add_parser("smoke")
     smoke_parser.add_argument("out", type=Path)
     start_parser = commands.add_parser("start")
@@ -1120,7 +1123,9 @@ def main() -> None:
         validate_release(args.dist.resolve(), args.commit)
         return
     if args.command == "build":
-        build(args.out.resolve(), args.server)
+        if args.pm_sync_mysql and not args.server:
+            parser.error("--pm-sync-mysql needs --server")
+        build(args.out.resolve(), args.server, args.pm_sync_mysql)
     elif args.command == "exports":
         exports(args.out.resolve())
     elif args.command == "start":

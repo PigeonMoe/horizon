@@ -170,6 +170,17 @@ pub struct InsideEffects {
     pub(crate) after: [Vec<EntityWrite>; 5],
     /// `finalEffects`: the flushed plan, steps in the order they were reached.
     pub(crate) planned: Vec<PlannedInside>,
+    /// Engine-only lava damage callbacks in the player's sweep. Neither the
+    /// wire codec nor a block part's staged collector can submit these.
+    pub(crate) lava_damage: LavaDamage,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LavaDamage {
+    /// Offsets in this step's `runAfter(LAVA_IGNITE)` writes.
+    after_ignition: Vec<usize>,
+    /// Boundaries between actions in the flushed plan.
+    planned: Vec<usize>,
 }
 
 impl InsideEffects {
@@ -195,13 +206,30 @@ impl InsideEffects {
     pub fn run_after(&mut self, effect: InsideEffect, write: EntityWrite) {
         self.after[effect as usize].push(write);
     }
+    /// The engine's `LavaCauldronBlock.entityInside` queues its damage after
+    /// ignition, in contact order with the other callbacks at that effect.
+    #[doc(hidden)]
+    pub fn run_after_lava_ignites(&mut self) {
+        self.lava_damage
+            .after_ignition
+            .push(self.after[InsideEffect::LavaIgnite as usize].len());
+    }
     /// `applyAndClear`: flush the last step and take the whole plan, in order. The
     /// caller applies the writes to the swept entity inside its own tick and stops at
     /// the first item after it dies.
     pub fn take_planned(&mut self) -> Vec<PlannedInside> {
+        self.take_with_lava_damage().0
+    }
+    /// The usual plan and the engine's lava damage boundaries: a boundary of
+    /// N means the hit runs after N ordinary actions have been applied.
+    #[doc(hidden)]
+    pub fn take_with_lava_damage(&mut self) -> (Vec<PlannedInside>, Vec<usize>) {
         self.flush_step();
         self.last_step = -1;
-        std::mem::take(&mut self.planned)
+        (
+            std::mem::take(&mut self.planned),
+            std::mem::take(&mut self.lava_damage.planned),
+        )
     }
     /// Commit another collector's current step into this one: a staged callback
     /// answered, so what it queued joins this step. The staged collector must not
@@ -223,6 +251,8 @@ impl InsideEffects {
             && self.in_step == [false; 5]
             && self.before.iter().all(Vec::is_empty)
             && self.after.iter().all(Vec::is_empty)
+            && self.lava_damage.after_ignition.is_empty()
+            && self.lava_damage.planned.is_empty()
     }
     /// `flushStep`: this step's writes and effects into the plan, in `InsideEffect`
     /// order, before the effect, the effect itself, then after it.
@@ -234,6 +264,15 @@ impl InsideEffects {
             if std::mem::take(&mut self.in_step[index]) {
                 self.planned.push(PlannedInside::Effect(effect));
             }
+            if effect == InsideEffect::LavaIgnite {
+                let base = self.planned.len();
+                self.lava_damage.planned.extend(
+                    self.lava_damage
+                        .after_ignition
+                        .drain(..)
+                        .map(|at| base + at),
+                );
+            }
             for write in self.after[index].drain(..) {
                 self.planned.push(PlannedInside::Write(write));
             }
@@ -244,6 +283,50 @@ impl InsideEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cauldron_damage_keeps_its_after_ignition_ordinal_and_is_engine_only() {
+        use crate::wire::{Reader, Writer};
+
+        let mut effects = InsideEffects::default();
+        let before = EntityWrite::SetFireTicks(10);
+        let after = EntityWrite::SetFireTicks(20);
+        effects.advance_step(0);
+        effects.apply(InsideEffect::ClearFreeze);
+        effects.apply(InsideEffect::LavaIgnite);
+        effects.run_after(InsideEffect::LavaIgnite, before);
+        effects.run_after_lava_ignites();
+        effects.run_after(InsideEffect::LavaIgnite, after);
+        effects.run_after_lava_ignites();
+        effects.apply(InsideEffect::Extinguish);
+        effects.advance_step(1);
+        effects.apply(InsideEffect::LavaIgnite);
+        effects.run_after_lava_ignites();
+
+        let mut staged = InsideEffects::default();
+        staged.run_after_lava_ignites();
+        effects.absorb_step(staged);
+        let mut wire = Writer::new();
+        wire.put(&effects);
+        let mut on_guest: InsideEffects = Reader::decode(wire.bytes()).unwrap();
+        let (actions, damage) = effects.take_with_lava_damage();
+        let (guest_actions, guest_damage) = on_guest.take_with_lava_damage();
+        assert_eq!(
+            actions,
+            [
+                PlannedInside::Effect(InsideEffect::ClearFreeze),
+                PlannedInside::Effect(InsideEffect::LavaIgnite),
+                PlannedInside::Write(before),
+                PlannedInside::Write(after),
+                PlannedInside::Effect(InsideEffect::Extinguish),
+                PlannedInside::Effect(InsideEffect::LavaIgnite),
+            ],
+        );
+        assert_eq!(damage, [3, 4, 6]);
+        assert_eq!(guest_actions, actions);
+        assert!(guest_damage.is_empty());
+        assert!(effects.is_empty());
+    }
 
     /// `StepBasedCollector` flushes each step once, in `InsideBlockEffectType` order,
     /// with the `run_before` writes before their effect and the `run_after` writes

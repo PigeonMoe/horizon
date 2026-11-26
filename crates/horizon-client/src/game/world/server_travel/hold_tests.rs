@@ -240,6 +240,7 @@ fn a_command_arrival_holds_movement_until_lit_then_ticks_damage_again() {
         dim: game.dim,
         at,
         rotation: None,
+        notify_position: true,
         vehicle: None,
     });
     game.run_level_teleports();

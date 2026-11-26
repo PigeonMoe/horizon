@@ -84,6 +84,11 @@ pub(super) struct CombatTracker {
     /// The attack the hits on the player land in now: who attacks and what they hold. Set only
     /// by [`Game::with_attack`], which restores the previous one on return.
     attack: Attack,
+    /// A projectile temporarily borrowed by its impact continuation.
+    pub(super) projectile_return_impact: Option<super::native_projectiles::ProjectileReturnImpact>,
+    /// Authority to return that projectile during this damage callback.
+    pub(super) admitted_projectile_return:
+        Option<super::native_projectiles::AdmittedProjectileReturn>,
     /// The mob whose projectile is hitting the player now.
     pub(super) projectile_owner: Option<u32>,
     /// The display name of the projectile hitting the player now: the

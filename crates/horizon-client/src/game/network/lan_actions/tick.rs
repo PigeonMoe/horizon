@@ -29,6 +29,7 @@ impl Game<'_> {
                 if g.participates_in_player_simulation()
                     && host.hub.here(g)
                     && !self.server_trips.iter().any(|t| t.is(g.conn))
+                    && !self.portal_hull_trips.iter().any(|trip| trip.holds(g))
                 {
                     host.play.entry(g.conn).or_default().level_up_sound.tick();
                 }

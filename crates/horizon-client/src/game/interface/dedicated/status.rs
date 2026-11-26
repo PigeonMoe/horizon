@@ -47,6 +47,18 @@ impl Game<'_> {
         while let Some(request) = self.control.as_ref().and_then(|c| c.try_recv()) {
             // A `console stop` just before stops this server for the next request too.
             self.note_stopping(state.lists.lock().unwrap().stop);
+            let line = request.line.trim();
+            if let Some(verb @ ("player-profile-commit-paper" | "player-profile-resume-paper")) =
+                line.split_whitespace().next()
+            {
+                self.start_paper_request(
+                    verb,
+                    line[verb.len()..].trim_start(),
+                    request.reply,
+                    &mut state.paper_activation,
+                );
+                continue;
+            }
             let reply = match request.line.trim().split_once(' ') {
                 _ if request.line.trim() == "server-status" => self.server_status(state),
                 _ if request.line.trim() == "server-mods" => server_mods(
@@ -90,6 +102,10 @@ impl Game<'_> {
                 _ => json!({ "error": format!("unknown request {:?}", request.line) }),
             };
             let _ = request.reply.send(reply.to_string());
+        }
+        if state.paper_activation.is_some() {
+            self.note_stopping(state.lists.lock().unwrap().stop);
+            self.poll_paper_request(&mut state.paper_activation);
         }
     }
 

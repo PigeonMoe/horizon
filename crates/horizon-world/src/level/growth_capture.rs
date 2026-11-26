@@ -1,6 +1,6 @@
 //! Capture live growth candidates before applying land policies. Reads during
 //! growth see the captured edits, even when a listener later refuses one.
-use super::{LevelAccess, Sim};
+use super::{Behaviours, LevelAccess, Sim};
 use crate::registry::BlockStateId;
 use horizon_core::{nbt::Compound, position::BlockPos};
 use std::collections::HashMap;
@@ -25,8 +25,13 @@ struct Write {
     state: BlockStateId,
     // None means the feature writes raw chunk section data.
     update: Option<(i32, i32)>,
-    block_entity: Option<Compound>,
+    block_entity: Option<BlockEntityWrite>,
     destroyed: Option<(BlockStateId, bool)>,
+}
+
+pub(super) enum BlockEntityWrite {
+    Load(Compound),
+    CreateSpawner(Compound),
 }
 
 impl GrowthCapture {
@@ -34,33 +39,47 @@ impl GrowthCapture {
         Some(self.writes[*self.index.get(&pos)?].state)
     }
 
-    pub(super) fn stage(&mut self, pos: BlockPos, state: BlockStateId, update: Option<(i32, i32)>) {
-        let write = Write {
-            pos,
-            state,
-            update,
-            block_entity: None,
-            destroyed: None,
-        };
-        if let Some(&slot) = self.index.get(&pos) {
-            let previous = &mut self.writes[slot];
-            if previous.state == state {
-                previous.update = update;
-            } else {
-                *previous = Write {
-                    destroyed: previous.destroyed,
-                    ..write
-                };
-            }
-        } else {
-            self.index.insert(pos, self.writes.len());
-            self.writes.push(write);
-        }
+    fn write_at(&mut self, pos: BlockPos, state: BlockStateId) -> &mut Write {
+        let slot = *self.index.entry(pos).or_insert_with(|| {
+            let slot = self.writes.len();
+            self.writes.push(Write {
+                pos,
+                state,
+                update: None,
+                block_entity: None,
+                destroyed: None,
+            });
+            slot
+        });
+        &mut self.writes[slot]
     }
 
-    pub(super) fn stage_block_entity(&mut self, pos: BlockPos, tag: Compound) {
-        if let Some(&slot) = self.index.get(&pos) {
-            self.writes[slot].block_entity = Some(tag);
+    pub(super) fn stage(
+        &mut self,
+        behaviours: &Behaviours,
+        pos: BlockPos,
+        state: BlockStateId,
+        update: Option<(i32, i32)>,
+    ) {
+        let write = self.write_at(pos, state);
+        if write.block_entity.is_some() && !behaviours.keeps_block_entity(state, write.state) {
+            write.block_entity = None;
+        }
+        write.state = state;
+        write.update = update;
+    }
+
+    pub(super) fn stage_block_entity(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        write: BlockEntityWrite,
+    ) {
+        let pending = &mut self.write_at(pos, state).block_entity;
+        // The dungeon configures only a missing entity. A regular load at
+        // the same position can replace an earlier staged load or creation.
+        if pending.is_none() || matches!(write, BlockEntityWrite::Load(_)) {
+            *pending = Some(write);
         }
     }
 
@@ -139,9 +158,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 self.game_event_state(write.pos, "minecraft:block_destroy", old);
             }
             if self.state(write.pos) == write.state
-                && let Some(tag) = write.block_entity
+                && let Some(entity) = write.block_entity
             {
-                self.level.load_block_entity(write.pos, tag);
+                match entity {
+                    BlockEntityWrite::Load(tag) => self.level.load_block_entity(write.pos, tag),
+                    BlockEntityWrite::CreateSpawner(tag) => {
+                        self.level.create_feature_spawner(write.pos, tag)
+                    }
+                }
             }
         }
         result

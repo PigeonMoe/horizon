@@ -37,6 +37,8 @@ pub(super) fn validate(
     if let Some(marker) = hook.host {
         match marker {
             HostAccess::Read if !is_level && hook.side != Side::Client => {}
+            HostAccess::ServerRead
+                if !is_level && hook.side == Side::Server && mutable == Some(false) => {}
             // A server hit's level writes through its random host; a both-side one reads, as
             // a both-side `GameLevel` does, and is told its side by `LevelSide`.
             HostAccess::Level
@@ -44,7 +46,7 @@ pub(super) fn validate(
                     && !ticks
                     && (hook.side == Side::Server && mutable == Some(true)
                         || hook.side == Side::Both && mutable == Some(false)) => {}
-            HostAccess::Read | HostAccess::Level => {
+            HostAccess::Read | HostAccess::ServerRead | HostAccess::Level => {
                 return Err(format!("{name}: this entry takes no host marker"));
             }
         }
@@ -114,6 +116,9 @@ pub(super) fn host_param(hook: &Hook, mutable: Option<bool>, ticks: bool) -> Opt
                 Side::Server | Side::Both if hook.host == Some(HostAccess::Read) => {
                     ("&dyn Host", "&*self")
                 }
+                Side::Server if hook.host == Some(HostAccess::ServerRead) => {
+                    ("&dyn ServerHost", "&*self")
+                }
                 Side::Server => ("&mut dyn ServerHost", "self"),
                 Side::Client if mutable => ("&mut dyn ClientHost", "self"),
                 Side::Client => ("&dyn ClientHost", "&*self"),
@@ -159,6 +164,24 @@ pub(super) fn host_param(hook: &Hook, mutable: Option<bool>, ticks: bool) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_read_hooks_receive_only_an_immutable_server_host() {
+        let hook = Hook {
+            host: Some(HostAccess::ServerRead),
+            ..Hook::sample(
+                "horizon_client::game::Game<'_>::native_profile",
+                Side::Server,
+            )
+        };
+        assert_eq!(
+            host_param(&hook, Some(false), false).unwrap().ty,
+            "&dyn ServerHost"
+        );
+        assert!(validate(&hook, "profile", false, Some(false), false).is_ok());
+        assert!(validate(&hook, "profile", false, Some(true), false).is_err());
+        assert!(validate(&hook, "profile", true, Some(false), false).is_err());
+    }
 
     #[test]
     fn phase_context_is_not_an_event_field_or_game_host() {

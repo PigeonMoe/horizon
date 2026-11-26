@@ -1,5 +1,6 @@
 impl super::Mob {
-    pub(super) fn collision_subject(&self) -> crate::collisions::PowderSnowSubject<'_> {
+    /// The mob's current equipment and state for contextual block collisions.
+    pub fn collision_subject(&self) -> crate::collisions::PowderSnowSubject<'_> {
         use horizon_world::collision_context::CollisionItem;
         crate::collisions::PowderSnowSubject {
             fall_distance: self.fall_distance,

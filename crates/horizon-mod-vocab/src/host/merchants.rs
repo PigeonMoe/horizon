@@ -85,6 +85,15 @@ pub trait MerchantsBackendMut {
     #[access(WorldOnly)]
     fn merchant_set_profession(&mut self, merchant: MerchantRef, profession: &str) -> bool;
     /// Side: server.
+    /// Resets a villager to no profession, level 1 and zero experience and
+    /// forgets its rolled offers. An accessible trading screen stays open,
+    /// preserving its payment items while clearing offers and the result.
+    /// False without changing the villager or screen if the handle is stale,
+    /// the profession is unresolved, the entity is not a villager, or its
+    /// live session is borrowed by a menu operation or another player turn.
+    #[access(WorldOnly)]
+    fn merchant_reset_villager_career(&mut self, merchant: MerchantRef) -> bool;
+    /// Side: server.
     /// `VillagerData.withLevel`: `Math.max(1, level)`, with no upper limit in
     /// vanilla. The offers stay as they are; the next level-up adds its trades
     /// (a level past 5 can't level up). A trading guest's session follows,

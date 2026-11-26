@@ -62,7 +62,8 @@ impl Game<'_> {
     }
 
     /// Why a write to this player's inventory, ender chest, hands or saved data is refused
-    /// before it starts: a client, a handle with no online player, a dead player.
+    /// before it starts: a client, a handle with no online player, a dead player,
+    /// or a player whose state has been frozen for a hand-over.
     pub(super) fn player_write_gate(&self, player: PlayerRef) -> Result<(), PlayerDataRefusal> {
         if self.remote.is_some() {
             return Err(PlayerDataRefusal::Client);
@@ -70,6 +71,9 @@ impl Game<'_> {
         match self.player_handle_read(player) {
             None => Err(PlayerDataRefusal::Stale),
             Some(PlayerRead::Guest(g)) if g.dead => Err(PlayerDataRefusal::Dead),
+            Some(_) if self.player_frozen_handover(player.uuid()).is_some() => {
+                Err(PlayerDataRefusal::Transferring)
+            }
             Some(_) => Ok(()),
         }
     }

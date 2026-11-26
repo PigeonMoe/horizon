@@ -59,6 +59,7 @@ pub(super) type DropPose = ([f64; 3], [f32; 2]);
 
 pub(super) struct GuestMenuClick<'a> {
     pub(super) packet: &'a play::ContainerClick,
+    pub(super) merchant_checked: bool,
     check_drop: bool,
     deferred: Option<DropMenu>,
     pub(super) drop_pose: Option<DropPose>,
@@ -179,6 +180,7 @@ impl Game<'_> {
         let action = input(packet.input);
         let mut click = GuestMenuClick {
             packet,
+            merchant_checked: false,
             check_drop: (action == Input::Throw
                 || (packet.slot == -999 && matches!(action, Input::Pickup | Input::QuickMove)))
                 && self.native_authoritative()

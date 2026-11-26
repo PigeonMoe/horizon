@@ -21,9 +21,14 @@
 //! is done on a tick. It has nothing to do with vanilla's `accepts-transfers`,
 //! which is about the transfer packet a server sends a client.
 use super::hub::Hub;
-use std::collections::HashMap;
+use super::source_handover::ReturnAuthorization;
+use horizon_core::identifier::Identifier;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Aggregate opaque profile budget for a portable hand-over record.
+pub const MAX_REQUIRED_PROFILE_BYTES: usize = super::profile_sections::MAX_PROFILE_BYTES;
 
 /// `server.toml`'s `[transfer]`, as horizon-server passes it: `--transfers
 /// expect_seconds=10,max_expect_seconds=60,max_expected=64,max_freeze_seconds=30,max_hold_seconds=60,stop_wait_seconds=10`.
@@ -44,6 +49,12 @@ pub struct Settings {
     pub max_hold_ticks: u64,
     /// How long a stop waits for a proxy to move the players out ([`StopWait`]); zero stops at once.
     pub stop_wait: Duration,
+    /// Destination-only package sections every arrival must validate before placement.
+    pub required_profiles: BTreeMap<Identifier, u32>,
+    /// The local backend's stable, coordinator-configured identity.
+    pub backend_id: Option<String>,
+    /// The configured peers allowed to originate a strict transfer here.
+    pub allowed_sources: BTreeSet<String>,
 }
 
 impl Default for Settings {
@@ -55,22 +66,58 @@ impl Default for Settings {
             max_freeze_ticks: 20 * 30,
             max_hold_ticks: 20 * 60,
             stop_wait: Duration::from_secs(10),
+            required_profiles: BTreeMap::new(),
+            backend_id: None,
+            allowed_sources: BTreeSet::new(),
         }
     }
 }
 
 impl Settings {
-    /// Reads `--transfers`' value: `key=value` pairs separated by commas, each a
-    /// whole number above zero, but `stop_wait_seconds`, which is zero to [`MAX_STOP_WAIT`].
+    /// Read `--transfers` options as comma-separated `key=value` fields.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut s = Self::default();
+        let mut roster_seen = false;
+        let mut sources_seen = false;
         for pair in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let (key, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("{pair:?} is not key=value"))?;
             let key = key.trim();
+            let value = value.trim();
+            match key {
+                "required_profiles" => {
+                    if roster_seen {
+                        return Err("required_profiles is specified more than once".into());
+                    }
+                    roster_seen = true;
+                    s.required_profiles = super::profile_sections::parse_roster(value)?;
+                    continue;
+                }
+                "backend_id" => {
+                    if s.backend_id.is_some() {
+                        return Err("backend_id is specified more than once".into());
+                    }
+                    s.backend_id = Some(value.to_owned());
+                    continue;
+                }
+                "allowed_sources" => {
+                    if sources_seen {
+                        return Err("allowed_sources is specified more than once".into());
+                    }
+                    sources_seen = true;
+                    if !value.is_empty() {
+                        for source in value.split(';') {
+                            if !s.allowed_sources.insert(source.to_owned()) {
+                                return Err(format!("allowed source {source:?} is listed twice"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let n: u64 = value
-                .trim()
                 .parse()
                 .ok()
                 .filter(|n| *n > 0 || key == "stop_wait_seconds")
@@ -98,6 +145,10 @@ impl Settings {
                 other => return Err(format!("unknown setting {other:?}")),
             }
         }
+        horizon_server_files::transfer_routes::validate(
+            s.backend_id.as_deref(),
+            &s.allowed_sources,
+        )?;
         if s.expect > s.max_expect {
             return Err("expect_seconds is above max_expect_seconds".into());
         }
@@ -131,10 +182,9 @@ pub struct Transfers {
 
 impl Transfers {
     pub fn new(settings: Settings) -> Self {
-        let expected = Arc::new(Mutex::new(Expectations::new(
-            settings.max_expected,
-            settings.max_expect,
-        )));
+        let mut table = Expectations::new(settings.max_expected, settings.max_expect);
+        table.required = !settings.required_profiles.is_empty();
+        let expected = Arc::new(Mutex::new(table));
         Self {
             settings,
             expected,
@@ -244,14 +294,23 @@ pub fn stop_wait_line(wait: Duration) -> String {
 pub enum ExpectError {
     /// The table is full of live expectations.
     Full,
+    /// An existing expectation names a different admission.
+    Conflict,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Expectation {
+    deadline: Instant,
+    pub(super) returning: Option<Arc<ReturnAuthorization>>,
 }
 
 /// The players a server was told to expect, by unique id.
 #[derive(Debug)]
 pub struct Expectations {
-    until: HashMap<u128, Instant>,
+    until: HashMap<u128, Expectation>,
     max: usize,
     max_ttl: Duration,
+    required: bool,
 }
 
 impl Default for Expectations {
@@ -267,6 +326,7 @@ impl Expectations {
             until: HashMap::new(),
             max,
             max_ttl,
+            required: false,
         }
     }
 
@@ -274,12 +334,38 @@ impl Expectations {
     /// allowed). A second request for the same player replaces the first one's
     /// deadline. Returns whether the player was already expected.
     pub fn expect(&mut self, uuid: u128, ttl: Duration, now: Instant) -> Result<bool, ExpectError> {
+        self.reserve(uuid, ttl, now, None)
+    }
+
+    fn reserve(
+        &mut self,
+        uuid: u128,
+        ttl: Duration,
+        now: Instant,
+        returning: Option<Arc<ReturnAuthorization>>,
+    ) -> Result<bool, ExpectError> {
         self.expire(now);
+        if self
+            .until
+            .get(&uuid)
+            .is_some_and(|existing| existing.returning != returning)
+        {
+            return Err(ExpectError::Conflict);
+        }
         if !self.until.contains_key(&uuid) && self.until.len() >= self.max {
             return Err(ExpectError::Full);
         }
         let deadline = now + ttl.min(self.max_ttl);
-        Ok(self.until.insert(uuid, deadline).is_some())
+        Ok(self
+            .until
+            .insert(
+                uuid,
+                Expectation {
+                    deadline,
+                    returning,
+                },
+            )
+            .is_some())
     }
 
     /// Uses up the expectation of `uuid`, and says whether it was still alive:
@@ -292,7 +378,46 @@ impl Expectations {
     /// [`Self::take`], giving the deadline of the expectation used up, for
     /// [`Self::put_back`].
     pub fn take_until(&mut self, uuid: u128, now: Instant) -> Option<Instant> {
-        self.until.remove(&uuid).filter(|deadline| now < *deadline)
+        self.until
+            .get(&uuid)
+            .filter(|entry| entry.returning.is_none())?;
+        self.until
+            .remove(&uuid)
+            .filter(|entry| now < entry.deadline)
+            .map(|entry| entry.deadline)
+    }
+
+    /// A retired source can admit only the exact bound return, after the
+    /// network login has independently authenticated the forwarded UUID.
+    pub(super) fn take_return(
+        &mut self,
+        uuid: u128,
+        retired_id: u128,
+        now: Instant,
+    ) -> Option<Expectation> {
+        let entry = self.until.get(&uuid)?;
+        let authorization = entry.returning.as_ref()?;
+        if now >= entry.deadline
+            || authorization.retired.owner != uuid
+            || authorization.retired.handover != retired_id
+        {
+            return None;
+        }
+        self.until.remove(&uuid)
+    }
+
+    /// Profiled destination servers admit only an expectation the proxy still owns.
+    pub fn take_required_for_login(
+        &mut self,
+        uuid: u128,
+        now: Instant,
+    ) -> Result<Option<Instant>, RequiredExpectation> {
+        if !self.required {
+            return Ok(None);
+        }
+        self.take_until(uuid, now)
+            .map(Some)
+            .ok_or(RequiredExpectation)
     }
 
     /// Gives back an expectation a login used up and that did not reach play (it
@@ -300,8 +425,27 @@ impl Expectations {
     /// within that time is still expected. Nothing is put back once its time has
     /// passed, over a newer expectation of the same player, or into a full table.
     pub fn put_back(&mut self, uuid: u128, deadline: Instant, now: Instant) {
-        if now < deadline && !self.until.contains_key(&uuid) && self.until.len() < self.max {
-            self.until.insert(uuid, deadline);
+        self.put_back_expectation(
+            uuid,
+            Expectation {
+                deadline,
+                returning: None,
+            },
+            now,
+        );
+    }
+
+    pub(super) fn put_back_expectation(
+        &mut self,
+        uuid: u128,
+        expectation: Expectation,
+        now: Instant,
+    ) {
+        if now < expectation.deadline
+            && !self.until.contains_key(&uuid)
+            && self.until.len() < self.max
+        {
+            self.until.insert(uuid, expectation);
         }
     }
 
@@ -316,7 +460,7 @@ impl Expectations {
         let gone: Vec<u128> = self
             .until
             .iter()
-            .filter(|(_, deadline)| now >= **deadline)
+            .filter(|(_, expectation)| now >= expectation.deadline)
             .map(|(uuid, _)| *uuid)
             .collect();
         for uuid in &gone {
@@ -345,7 +489,7 @@ impl Expectations {
     pub fn holding(&self, except: Option<u128>, now: Instant) -> usize {
         self.until
             .iter()
-            .filter(|(uuid, deadline)| Some(**uuid) != except && now < **deadline)
+            .filter(|(uuid, expectation)| Some(**uuid) != except && now < expectation.deadline)
             .count()
     }
 
@@ -353,6 +497,9 @@ impl Expectations {
         self.until.is_empty()
     }
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequiredExpectation;
 
 /// The version of the record `player-export` answers with.
 pub const RECORD_VERSION: i64 = 1;
@@ -404,6 +551,13 @@ pub fn frozen_too_long(since: u64, now: u64, max: u64) -> bool {
 /// `player-export <uuid> freeze` during a stop's wait: refused once a hand-over that starts now could
 /// not finish before the stop's limit ([`StopWait`]). A player already frozen is answered as before.
 pub fn check_freeze(hub: &Hub, i: usize, now: Instant) -> Result<(), &'static str> {
+    if hub
+        .transfers
+        .as_ref()
+        .is_some_and(|transfer| !transfer.settings.required_profiles.is_empty())
+    {
+        return Err("this destination has no approved source profile collector");
+    }
     let wait = hub.transfers.as_ref().and_then(|t| t.stop_wait);
     if hub.guests[i].handover.is_none() && wait.is_some_and(|w| !w.may_freeze(now)) {
         return Err("the server is stopping: no hand-over starts this late");
@@ -414,6 +568,9 @@ pub fn check_freeze(hub: &Hub, i: usize, now: Instant) -> Result<(), &'static st
 /// Why the connected player `uuid` cannot be exported now, or the index of its
 /// guest. A held player is not exportable: it has no state of its own yet.
 pub fn check_exportable(hub: &Hub, uuid: u128) -> Result<usize, &'static str> {
+    if hub.source_frozen_handover(uuid).is_some() {
+        return Err("the player is fenced by a source hand-over");
+    }
     let Some(i) = hub.guests.iter().position(|g| g.uuid == uuid) else {
         return Err("that player is not connected to this server");
     };
@@ -461,9 +618,13 @@ pub fn export_record(
     if let Some(h) = &hub.guests[i].handover {
         return Ok(h.record.clone());
     }
-    let id = freeze.then(new_handover_id).transpose()?;
     let g = &hub.guests[i];
-    let tag = super::playerdata::player_tag(g);
+    if freeze && super::profile_storage::has_markers(g.saved.as_ref()) {
+        return Err("this player's required profile sections have no source collector".into());
+    }
+    let id = freeze.then(new_handover_id).transpose()?;
+    let mut tag = super::playerdata::player_tag(g);
+    super::profile_storage::clear_markers(&mut tag);
     let bytes = write_named(
         &NamedTag {
             name: "".into(),
@@ -687,6 +848,65 @@ pub fn expect_request(hub: &mut Hub, args: &str, now: Instant) -> serde_json::Va
     if parts.next().is_some() {
         return error("player-expect takes a unique id and at most a time");
     }
+    if hub.source_frozen_handover(uuid).is_some() {
+        return error("a fenced player requires a bound return expectation");
+    }
+    reserve_expectation(hub, transfers, uuid, ttl, now, None)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReturnRequest {
+    authorization: ReturnAuthorization,
+    seconds: Option<u64>,
+}
+
+/// Owner-control authorization to hold one forwarded return connection.
+/// Reservation consumes no source fence and has no authority to place it.
+pub fn expect_return_request(hub: &mut Hub, args: &str, now: Instant) -> serde_json::Value {
+    let Some(transfers) = &hub.transfers else {
+        return error(OFF);
+    };
+    if transfers.stopping {
+        return error(STOPPING);
+    }
+    let Some((owner, json)) = args.trim().split_once(char::is_whitespace) else {
+        return error("player-profile-expect-return needs the player's unique id and a request");
+    };
+    let Some(owner) = parse_uuid(owner).filter(|owner| *owner != 0) else {
+        return error("player-profile-expect-return needs the player's unique id");
+    };
+    let Ok(request) = serde_json::from_str::<ReturnRequest>(json.trim()) else {
+        return error("invalid profile return expectation");
+    };
+    let ttl = match request.seconds {
+        Some(0) => return error("the time must be a number of seconds above zero"),
+        Some(seconds) => Duration::from_secs(seconds),
+        None => transfers.settings.expect,
+    };
+    if !hub.profile_return_allowed(owner, &request.authorization) {
+        return error(
+            "the return does not match this backend's retired authority and source roster",
+        );
+    }
+    reserve_expectation(
+        hub,
+        transfers,
+        owner,
+        ttl,
+        now,
+        Some(Arc::new(request.authorization)),
+    )
+}
+
+fn reserve_expectation(
+    hub: &Hub,
+    transfers: &Transfers,
+    uuid: u128,
+    ttl: Duration,
+    now: Instant,
+    returning: Option<Arc<ReturnAuthorization>>,
+) -> serde_json::Value {
     if hub.guests.iter().any(|g| g.uuid == uuid) {
         return error("that player is already connected to this server");
     }
@@ -702,13 +922,14 @@ pub fn expect_request(hub: &mut Hub, args: &str, now: Instant) -> serde_json::Va
     if !bypass && online + table.holding(Some(uuid), now) >= max_players {
         return error(FULL);
     }
-    match table.expect(uuid, ttl, now) {
+    match table.reserve(uuid, ttl, now, returning) {
         Ok(renewed) => serde_json::json!({
             "ok": true,
             "renewed": renewed,
             "ttl_seconds": ttl.min(table.max_ttl()).as_secs(),
         }),
         Err(ExpectError::Full) => error("too many players are expected at once"),
+        Err(ExpectError::Conflict) => error("that player has another transfer expectation"),
     }
 }
 
@@ -873,18 +1094,22 @@ mod hub_tests {
     }
 
     fn hub_with(config: NetConfig) -> Hub {
+        hub_with_listener(config, false)
+    }
+
+    fn hub_with_listener(config: NetConfig, listen: bool) -> Hub {
         let mut sync = data::SyncData::empty();
         // The entity types the tracker names: the player, as id 0.
         sync.builtin.registries.insert(
             "minecraft:entity_type".to_string(),
             horizon_protocol::registry::Ids::from_names(vec!["minecraft:player".to_string()]),
         );
+        sync.builtin.registries.insert(
+            "minecraft:mob_effect".into(),
+            horizon_protocol::registry::Ids::from_names(vec!["minecraft:blindness".into()]),
+        );
         let sync = std::sync::Arc::new(sync);
-        // No listener: these tests drive the hub directly and never connect.
-        let config = NetConfig {
-            listen: false,
-            ..config
-        };
+        let config = NetConfig { listen, ..config };
         let lan = Lan::start_with(sync.clone(), config).unwrap();
         let encoder = ChunkEncoder::new(
             [] as [(std::sync::Arc<str>, bool); 0],
@@ -1104,6 +1329,225 @@ mod hub_tests {
         }
         // The held player is in its own list but did not announce itself.
         assert!(!sent.contains(&id::SYSTEM_CHAT), "{sent:?}");
+    }
+
+    #[test]
+    fn a_profile_return_only_holds_a_forwarded_exact_generation() {
+        use crate::lan::source_handover::{AuthorityRevision, Handover, Journal};
+        use horizon_protocol::{
+            PROTOCOL_VERSION,
+            buf::Writer,
+            connection::Connection,
+            crypto::{offline_uuid, uuid_string},
+            packets::{Empty, configuration as cfg, handshake, login},
+        };
+        use std::sync::Arc;
+
+        let name = "SyntheticReturn";
+        let owner = offline_uuid(name);
+        let previous = Handover {
+            owner,
+            id: 77,
+            destination: "previous-backend".into(),
+            record: b"old exported profile".to_vec(),
+            local_checkpoint: b"old local player".to_vec(),
+        };
+        let world = tempfile::tempdir().unwrap();
+        let journal = Arc::new(Journal::open(world.path()).unwrap());
+        journal
+            .prepare_versioned(&previous, AuthorityRevision::try_from(18).unwrap())
+            .unwrap();
+        journal
+            .retire(
+                owner,
+                previous.id,
+                &previous.destination,
+                previous.record_digest(),
+            )
+            .unwrap();
+        let authorization = super::ReturnAuthorization {
+            retired: journal.retired_anchor(owner).unwrap().unwrap(),
+            handover: 88,
+            revision: AuthorityRevision::try_from(24).unwrap(),
+            source: "next-hop".into(),
+            destination: "home".into(),
+            record_sha256: [1; 32],
+            request_sha256: [2; 32],
+        };
+        let transfers = super::Transfers::new(
+            super::Settings::parse(
+                "backend_id=home,allowed_sources=next-hop,required_profiles=slimefun:profile@1",
+            )
+            .unwrap(),
+        );
+        let mut hub = hub_with_listener(
+            NetConfig {
+                forwarding_secret: Some(b"local-return-test-forwarding-key".to_vec()),
+                arrivals: Some(transfers.expected.clone()),
+                source_handovers: Some(journal.clone()),
+                ..NetConfig::loopback(0, "Profile return".into(), 4)
+            },
+            true,
+        );
+        hub.transfers = Some(transfers);
+        let owner_text = uuid_string(owner);
+        let trusted = format!(
+            "{owner_text} {{\"authorization\":{},\"seconds\":60}}",
+            serde_json::to_string(&authorization).unwrap()
+        );
+        assert!(super::expect_request(&mut hub, &owner_text, Instant::now())["error"].is_string());
+        assert_eq!(
+            super::expect_return_request(&mut hub, &trusted, Instant::now())["ok"],
+            true
+        );
+        let mut changed = authorization.clone();
+        changed.handover += 1;
+        let changed = format!(
+            "{owner_text} {{\"authorization\":{}}}",
+            serde_json::to_string(&changed).unwrap()
+        );
+        assert!(
+            super::expect_return_request(&mut hub, &changed, Instant::now())["error"].is_string()
+        );
+
+        // An RFC 2104 signature for this public synthetic fixture profile.
+        let mut forwarded = Writer::new();
+        forwarded.bytes(&[
+            0xb3, 0xbb, 0x2a, 0xf0, 0xb9, 0xfe, 0xd5, 0x9a, 0x4f, 0x80, 0x26, 0xd4, 0x13, 0x43,
+            0xe1, 0x33, 0x19, 0xe7, 0xa0, 0xf9, 0xae, 0xd3, 0x05, 0x12, 0x21, 0x76, 0x65, 0xe1,
+            0x5a, 0x85, 0x32, 0xa3,
+        ]);
+        forwarded.varint(1);
+        forwarded.string("127.0.0.1");
+        forwarded.uuid(owner);
+        forwarded.string(name);
+        forwarded.varint(0);
+        let port = hub.lan.port;
+        let login = |mut payload: Option<Vec<u8>>| -> Result<Connection, String> {
+            let mut client =
+                Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
+            client
+                .reader
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .send(
+                    &handshake::Serverbound::Intention(handshake::Intention {
+                        protocol: PROTOCOL_VERSION,
+                        host: "127.0.0.1".into(),
+                        port,
+                        intent: handshake::LOGIN,
+                    })
+                    .encode(),
+                )
+                .unwrap();
+            client
+                .send(
+                    &login::Serverbound::Hello(login::ServerHello {
+                        name: name.into(),
+                        uuid: owner,
+                    })
+                    .encode(),
+                )
+                .unwrap();
+            loop {
+                let (id, body) = client.recv().unwrap();
+                match login::Clientbound::decode(id, &body).unwrap() {
+                    login::Clientbound::CustomQuery(query) => {
+                        assert_eq!(query.channel, crate::lan::forwarding::CHANNEL);
+                        client
+                            .send(
+                                &login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
+                                    transaction: query.transaction,
+                                    payload: payload.take(),
+                                })
+                                .encode(),
+                            )
+                            .unwrap();
+                    }
+                    login::Clientbound::Compression(packet) => {
+                        client.set_compression(packet.threshold)
+                    }
+                    login::Clientbound::LoginFinished(packet) => {
+                        assert_eq!(packet.profile.uuid, owner);
+                        return Ok(client);
+                    }
+                    login::Clientbound::Disconnect(reason) => return Err(reason.reason_json),
+                    _ => panic!("unexpected fixture login packet"),
+                }
+            }
+        };
+        assert!(login(None).err().unwrap().contains("behind a proxy"));
+        let mut client = login(Some(forwarded.data.clone())).unwrap();
+        // A renewed expectation during configuration cannot evict the first
+        // connection with the same forwarded UUID.
+        assert_eq!(
+            super::expect_return_request(&mut hub, &trusted, Instant::now())["ok"],
+            true
+        );
+        assert!(
+            login(Some(forwarded.data))
+                .err()
+                .unwrap()
+                .contains("duplicate_login")
+        );
+        client
+            .send(&login::Serverbound::LoginAcknowledged(Empty).encode())
+            .unwrap();
+        loop {
+            let (id, body) = client.recv().unwrap();
+            match cfg::Clientbound::decode(id, &body).unwrap() {
+                cfg::Clientbound::SelectKnownPacks(packs) => client
+                    .send(&cfg::Serverbound::SelectKnownPacks(packs).encode())
+                    .unwrap(),
+                cfg::Clientbound::FinishConfiguration(_) => {
+                    client
+                        .send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
+                        .unwrap();
+                    break;
+                }
+                cfg::Clientbound::Disconnect(reason) => {
+                    panic!("profile return lost during configuration: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+        let mut world_state = crate::world::World::new(horizon_world::registry::BlockStateId(0), 0);
+        let border = crate::worldborder::WorldBorder::default();
+        let mut entity_id = 100;
+        let mut ctx = tick_context(&mut world_state, &border, &mut entity_id);
+        let until = Instant::now() + Duration::from_secs(5);
+        let conn = loop {
+            let events = hub.poll(&mut ctx);
+            if let Some(crate::lan::hub::HostEvent::Joined(conn)) = events
+                .into_iter()
+                .find(|event| matches!(event, crate::lan::hub::HostEvent::Joined(_)))
+            {
+                break conn;
+            }
+            assert!(
+                Instant::now() < until,
+                "the bound return did not reach the hub"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(hub.pending_profile_return(conn), Some(&authorization));
+        assert!(hub.held_profile_return(owner).is_none());
+        hub.place_new_player(conn, &mut ctx);
+        assert_eq!(hub.held_profile_return(owner), Some(&authorization));
+        let guest = hub.guest(conn).unwrap();
+        assert!(guest.held && !guest.placed);
+        hub.update_guest(conn, |g| {
+            g.imported = true;
+            g.arrival_handover = Some(authorization.handover);
+        });
+        assert!(hub.imported_arrival(owner, authorization.handover).is_ok());
+        assert!(
+            hub.imported_arrival(owner, authorization.handover + 1)
+                .is_err()
+        );
+        assert!(hub.confirm_arrival(owner, authorization.handover).is_err());
+        assert_eq!(hub.source_frozen_handover(owner), Some(previous.id));
     }
 
     /// An expectation is for one player: another uuid logs in as usual.
@@ -1861,6 +2305,109 @@ mod hub_tests {
     }
 
     #[test]
+    fn a_profile_source_keeps_network_acks_without_legacy_unfreeze_or_detach() {
+        use crate::lan::{
+            guest::InboxItem,
+            source_handover::{Handover, Journal},
+        };
+        use horizon_protocol::packets::play::{ChunkBatchReceived, MovePlayerPos, Serverbound};
+        use std::sync::Arc;
+
+        crate::raw_payloads::test_support::with_peer(|transport| {
+            let root = tempfile::tempdir().unwrap();
+            let journal = Arc::new(Journal::open(root.path()).unwrap());
+            let record = Handover {
+                owner: UUID_N,
+                id: 58,
+                destination: "receiver".into(),
+                record: b"portable record".to_vec(),
+                local_checkpoint: b"source checkpoint".to_vec(),
+            };
+            let mut hub = hub_with(NetConfig {
+                source_handovers: Some(journal.clone()),
+                ..NetConfig::loopback(0, "Strict source".into(), 4)
+            });
+            let (mut player, _old_output) = guest(1, record.owner, "Source");
+            let (sender, owner) = channel();
+            player.sender =
+                PlayerSender::new_with_payload_transport(sender, Arc::default(), transport);
+            player.placed = true;
+            let before = player.position;
+            hub.guests.push(player);
+            journal.prepare(&record).unwrap();
+            assert!(hub.park_profile_source(0, record.id));
+            assert!(!hub.detach_retired_profile_source(record.owner));
+            assert!(!hub.here(&hub.guests[0]));
+            assert!(hub.watches(&hub.guests[0]));
+            assert!(hub.online_players().next().is_none());
+            let mut world = crate::world::World::new(horizon_world::registry::BlockStateId(0), 0);
+            let border = crate::worldborder::WorldBorder::default();
+            let mut next = 100;
+            let mut ctx = tick_context(&mut world, &border, &mut next);
+            let sender = hub.guests[0].sender.clone();
+            let raw = crate::raw_payloads::test_support::delivery(1, sender, vec![1]);
+            let ingress = hub.lan.shared.events.clone();
+            ingress.send(crate::lan::NetEvent::RawPayload(raw)).unwrap();
+            drop(hub.poll(&mut ctx));
+
+            hub.guests.update(0, |guest| {
+                guest.unacknowledged = 2;
+                guest.inbox.extend([
+                    InboxItem::uncredited(Serverbound::MovePlayerPos(MovePlayerPos {
+                        x: before[0] + 30.0,
+                        y: before[1],
+                        z: before[2],
+                        flags: 1,
+                    })),
+                    InboxItem::uncredited(Serverbound::ChunkBatchReceived(ChunkBatchReceived {
+                        chunks_per_tick: 9.0,
+                    })),
+                ]);
+            });
+            let events = hub.drain_packets(&mut ctx);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, crate::lan::hub::HostEvent::RawPayload(_)))
+            );
+            assert!(!hub.packets_paused());
+            drop(events);
+            assert_eq!(ingress.stats().reserved_bytes, 0);
+            assert_eq!(hub.guests[0].position, before);
+            assert_eq!(hub.guests[0].unacknowledged, 1);
+            hub.ticks += super::Settings::default().max_freeze_ticks + 1;
+            hub.poll(&mut ctx);
+            assert!(hub.guests[0].profile_source_parked());
+            assert!(
+                !owner
+                    .try_iter()
+                    .any(|out| matches!(out, Out::Disconnect(_)))
+            );
+            let id = super::handover_text(record.id);
+            for how in ["abort", "moved"] {
+                assert!(
+                    super::release_request(&mut hub, &format!("{UUID} {id} {how}"))["error"]
+                        .is_string()
+                );
+            }
+            journal
+                .retire(
+                    record.owner,
+                    record.id,
+                    &record.destination,
+                    record.record_digest(),
+                )
+                .unwrap();
+            assert!(hub.detach_retired_profile_source(record.owner));
+            assert!(hub.detach_retired_profile_source(record.owner));
+            let left = left_events(&mut hub);
+            assert_eq!(left.len(), 1);
+            assert!(left[0].released);
+            assert_eq!(hub.source_frozen_handover(record.owner), Some(record.id));
+        });
+    }
+
+    #[test]
     fn the_freeze_lasts_the_settings_ticks() {
         assert_eq!(super::Settings::default().max_freeze_ticks, 600);
         assert!(!super::frozen_too_long(10, 10 + 599, 600));
@@ -2233,6 +2780,77 @@ mod hub_tests {
 
     // ---- the held player's limits and its picture of the others ------------
 
+    #[test]
+    fn profile_hold_sends_empty_inventory_and_blindness_until_confirmation() {
+        use crate::items::ItemStack;
+        use horizon_core::identifier::Identifier;
+        use horizon_protocol::packets::play::Clientbound as C;
+
+        let mut hub = hub();
+        hub.transfers = Some(super::Transfers::new(super::Settings {
+            required_profiles: [(Identifier::parse_namespaced("slimefun:profile").unwrap(), 1)]
+                .into(),
+            ..super::Settings::default()
+        }));
+        let (mut player, mine) = guest(5, UUID_N, "Newcomer");
+        let stack = |count| ItemStack {
+            item: "minecraft:stone".into(),
+            count,
+            damage: 0,
+            extra: None,
+        };
+        player.expected = true;
+        player.inventory[0] = Some(stack(5));
+        player.carried = Some(stack(2));
+        hub.guests.push(player);
+        place(&mut hub, 5);
+        let initial = packets(&mine);
+        hub.guests.update(0, |player| {
+            player.inventory[0] = Some(stack(3));
+            player.carried = None;
+            player.arrival_handover = Some(19);
+            player.imported = true;
+        });
+        hub.send_arrival_state(0);
+        for wave in [initial, packets(&mine)] {
+            let mut blank = false;
+            let mut blinded = false;
+            for (id, body) in wave {
+                match C::decode(id, &body) {
+                    Ok(C::ContainerSetContent(packet)) => {
+                        assert_eq!(packet.items.len(), 46);
+                        assert!(packet.items.iter().all(Option::is_none));
+                        assert!(packet.carried.is_none());
+                        blank = true;
+                    }
+                    Ok(C::UpdateMobEffect(packet)) if packet.effect == 0 => {
+                        assert_eq!(packet.duration, -1);
+                        blinded = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(blank && blinded);
+        }
+        assert!(hub.guests[0].effects.list.is_empty());
+        assert!(hub.confirm_arrival(UUID_N, 19).is_ok());
+        let mut received = false;
+        let mut unblinded = false;
+        for (id, body) in packets(&mine) {
+            match C::decode(id, &body) {
+                Ok(C::ContainerSetContent(packet)) => {
+                    let items: Vec<_> = packet.items.into_iter().flatten().collect();
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(items[0].count, 3);
+                    received = true;
+                }
+                Ok(C::RemoveMobEffect(packet)) if packet.effect == 0 => unblinded = true,
+                _ => {}
+            }
+        }
+        assert!(received && unblinded && hub.guests[0].placed);
+    }
+
     /// A held player held under the hub's own settings.
     fn held_with_a_watcher(settings: super::Settings) -> (Hub, Receiver<Out>, Receiver<Out>) {
         let mut hub = hub();
@@ -2481,6 +3099,13 @@ mod hub_tests {
             serde_json::json!({ "record": r })
         };
         cases.push(("version", with("version", serde_json::json!(2))));
+        cases.push((
+            "required profiles on a version 1 record",
+            with(
+                "profiles",
+                serde_json::json!([{ "id": "slimefun:profile", "version": 1, "payload": "U0ZQMQ==" }]),
+            ),
+        ));
         cases.push(("no version", with("version", serde_json::Value::Null)));
         cases.push(("data version", with("data_version", serde_json::json!(1))));
         cases.push((

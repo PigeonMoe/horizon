@@ -1155,6 +1155,7 @@ impl MotionWorld<'_, '_, '_> {
                 false,
                 true,
                 None,
+                false,
             )?;
             match self
                 .player

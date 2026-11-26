@@ -22,18 +22,27 @@ pub(in crate::game) fn with_guests_at(
     root: std::path::PathBuf,
     test: impl FnOnce(&mut super::Game<'_>),
 ) {
+    with_guests_configured(root, |_| (), test);
+}
+
+pub(in crate::game) fn with_guests_configured(
+    root: std::path::PathBuf,
+    configure: impl FnOnce(&mut NetConfig),
+    test: impl FnOnce(&mut super::Game<'_>),
+) {
     super::native_entity_refs::tests::with_game_at(root, |game| {
         let settings = LanSettings {
             port: 0,
             guest_commands: false,
             force_game_mode: false,
         };
-        let net = NetConfig {
+        let mut net = NetConfig {
             listen: false,
             announce: false,
             lod_distance: 0,
             ..NetConfig::lan(0, String::new(), 2)
         };
+        configure(&mut net);
         let config = HubConfig {
             default_game_mode: 0,
             guest_commands: false,

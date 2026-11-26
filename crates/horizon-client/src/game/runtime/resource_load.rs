@@ -736,6 +736,7 @@ pub(super) fn load_resources(
         horizon_client::mobs::suffocation::bind(collision.clone(), &motion.causes_suffocation)?;
     let resources = Resources {
         core: WorldCore {
+            server_language: super::native_server_language::load(vanilla_root),
             item_data,
             facts,
             biomes: biomes.clone(),

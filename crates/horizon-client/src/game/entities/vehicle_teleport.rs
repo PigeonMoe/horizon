@@ -4,9 +4,13 @@
 //! `teleportSameDimension` -> `calculatePassengerTransition`), and `/rotate`
 //! turns an entity without teleporting it (`RotateCommand` ->
 //! `Entity.forceSetRotation`).
-use super::Game;
 use super::commands::Target;
 use super::entity::{Entity as _, with_entity, with_entity_mut};
+use super::respawn_anchor::DismountCollision;
+use super::server_travel::{
+    LevelTeleport, LevelTeleportPassenger, PlayerTravelOrigin, TravelCause,
+};
+use super::{Dim, Game};
 use horizon_core::geometry::Vec3;
 use horizon_core::nbt::Tag;
 use horizon_protocol::packets::play::{self, Clientbound as C};
@@ -52,6 +56,11 @@ pub(super) fn absolute_pitch(pitch: f32) -> Option<f32> {
 /// the vehicle's pitch clamp; the rider's pitch is clamped on its own
 /// (`Entity.setXRot`), and an axis the command did not set leaves the rider's.
 pub(super) fn passenger_rotation(before: [f32; 2], after: [f32; 2], rider: [f32; 2]) -> [f32; 2] {
+    let [yaw, pitch] = passenger_angles(before, after, rider);
+    [yaw, absolute_pitch(pitch).unwrap_or(rider[1])]
+}
+
+fn passenger_angles(before: [f32; 2], after: [f32; 2], rider: [f32; 2]) -> [f32; 2] {
     let axis = |i: usize| {
         if after[i].is_finite() {
             after[i] + (rider[i] - before[i])
@@ -59,7 +68,7 @@ pub(super) fn passenger_rotation(before: [f32; 2], after: [f32; 2], rider: [f32;
             rider[i]
         }
     };
-    [axis(0), absolute_pitch(axis(1)).unwrap_or(rider[1])]
+    [axis(0), axis(1)]
 }
 
 /// The angles a command turned a vehicle to, with the angles it had before:
@@ -81,6 +90,51 @@ pub(in crate::game) enum TeleportMotion {
     Keep,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VehicleTransfer {
+    Command,
+    Mod,
+    Rollback,
+}
+
+/// Apply an absolute Paper rollback transition to the saved vehicle tree.
+/// The source still has its attempted pose until it is removed.
+fn set_rollback_destination(tag: &mut Tag, at: Vec3, rotation: [f32; 2]) {
+    use horizon_client::entity_nbt;
+
+    let from = entity_nbt::position(tag).unwrap_or(at);
+    let before = entity_nbt::rotation(tag);
+    let Tag::Compound(fields) = tag else {
+        return;
+    };
+    let doubles = |values: [f64; 3]| {
+        Tag::List(
+            values
+                .into_iter()
+                .map(|value| Tag::Double(value.to_bits()))
+                .collect(),
+        )
+    };
+    fields.insert("Pos".into(), doubles(at.components()));
+    fields.insert("Motion".into(), doubles(Vec3::ZERO.components()));
+    fields.insert(
+        "Rotation".into(),
+        Tag::List(vec![
+            Tag::Float(rotation[0].to_bits()),
+            Tag::Float(absolute_pitch(rotation[1]).unwrap_or(before[1]).to_bits()),
+        ]),
+    );
+    if let Some(Tag::List(passengers)) = fields.get_mut(&"Passengers".into()) {
+        for passenger in passengers {
+            let position = entity_nbt::position(passenger).unwrap_or(from);
+            let child_at = passenger_destination(from, at, position);
+            let child_rotation =
+                passenger_angles(before, rotation, entity_nbt::rotation(passenger));
+            set_rollback_destination(passenger, child_at, child_rotation);
+        }
+    }
+}
+
 /// `AbstractMinecart.getKnownMovement` with `OldMinecartBehavior`: the cart's
 /// motion clamped to 0.4 either way along x and z (or zero when any component
 /// is NaN), what a teleport's `PositionMoveRotation.of(this)` carries over.
@@ -98,6 +152,14 @@ pub(super) fn cart_known_movement(velocity: Vec3) -> Vec3 {
 /// The entity id a vehicle's riders point at, for the targets that carry some.
 fn vehicle_id(t: Target) -> Option<u32> {
     super::native_entities::target_id(t)
+}
+
+struct VehicleRiderTransfer {
+    conn: u32,
+    mount: u32,
+    at: [f64; 3],
+    rotation: [f32; 2],
+    origin: Option<(Dim, PlayerTravelOrigin)>,
 }
 
 #[cfg(test)]
@@ -142,6 +204,7 @@ impl Game<'_> {
         let [bx, by, bz] =
             [cart.position.x, cart.position.y, cart.position.z].map(|v| v.floor() as i32);
         let half = f64::from(rider.width().min(1.0) / 2.0);
+        let collision = DismountCollision::mob(rider);
         for dy in [0, 1, -1] {
             for (dx, dz) in offsets {
                 let p = [bx + dx, by + dy, bz + dz];
@@ -158,7 +221,7 @@ impl Game<'_> {
                         Vec3::new(at.x - half, at.y, at.z - half),
                         Vec3::new(at.x + half, at.y + f64::from(rider.height()), at.z + half),
                     );
-                    if self.can_dismount_to(bounds) {
+                    if self.can_dismount_to(bounds, &collision) {
                         return Some(at);
                     }
                 }
@@ -191,6 +254,7 @@ impl Game<'_> {
         let reach =
             (f64::from(mount.width()) + f64::from(rider.width()) + f64::from(1e-5_f32)) / 2.0;
         let limit = mount.bounds().max_position().y + 0.75;
+        let collision = DismountCollision::mob(rider);
         for turn in [turn, -turn] {
             let radians = f64::from((mount.yaw + turn) * 0.017_453_292);
             let (dx, dz) = (-trig::sin(radians), trig::cos(radians));
@@ -213,7 +277,7 @@ impl Game<'_> {
                         Vec3::new(x - half, at.y, z - half),
                         Vec3::new(x + half, at.y + f64::from(rider.height()), z + half),
                     );
-                    if self.can_dismount_to(bounds) {
+                    if self.can_dismount_to(bounds, &collision) {
                         return Some(at);
                     }
                 }
@@ -249,6 +313,152 @@ impl Game<'_> {
         // Dismounting removes live slots. Restoring only mob mounts would append
         // those riders after every other kind when the transfer tree is captured.
         self.persist.passenger_slots.insert(root, slots);
+    }
+
+    /// Settle each player's ordinary dismount on the source side before its
+    /// cross-level teleport event. NPC subtrees have already settled.
+    fn prepare_command_riders(
+        &mut self,
+        vehicle: u32,
+        destination: Dim,
+        at: Vec3,
+        rotation: Option<[f32; 2]>,
+        accepted: &mut Vec<VehicleRiderTransfer>,
+    ) -> bool {
+        let mut passengers = self.native_passenger_ids(vehicle);
+        for rider in self.mob_passenger_ids(vehicle) {
+            if !passengers.contains(&rider) {
+                passengers.push(rider);
+            }
+        }
+        if passengers.is_empty() {
+            return true;
+        }
+        let Some((from, angles)) = self.vehicle_transfer_pose(vehicle) else {
+            return false;
+        };
+        let source = self.dim;
+        let mut ejected = Vec::new();
+        for &id in passengers.iter().rev() {
+            let Some(player) = self.entity(id) else {
+                continue;
+            };
+            let conn = match self.native_entity_target(player) {
+                Some(Target::Player) => self.lan_acting,
+                Some(Target::Guest(conn)) => Some(conn),
+                _ => None,
+            };
+            let Some(conn) = conn else {
+                continue;
+            };
+            if self.entity_vehicle(player).map(|mount| mount.id()) != Some(vehicle) {
+                continue;
+            }
+            if self.entity_stop_riding_for_travel(player) {
+                ejected.push((id, conn));
+            } else if self
+                .entity_vehicle(player)
+                .is_some_and(|mount| mount.id() == vehicle)
+            {
+                return false;
+            }
+        }
+        for id in passengers {
+            if let Some(&(_, conn)) = ejected.iter().find(|(player, _)| *player == id) {
+                let Some((origin, view)) = self.command_passenger_origin(conn, source) else {
+                    continue;
+                };
+                if !self.server_player_travel_allowed(conn, destination, TravelCause::Teleport)
+                    || self
+                        .command_passenger_origin(conn, source)
+                        .map(|(now, _)| now)
+                        != Some(origin)
+                {
+                    continue;
+                }
+                let [x, y, z] = origin.position;
+                let to = passenger_destination(from, at, Vec3::new(x, y, z)).components();
+                if self.player_teleport_allowed(
+                    origin.uuid,
+                    (source, origin.position),
+                    (destination, to),
+                    TravelCause::Teleport.id(),
+                ) && self
+                    .command_passenger_origin(conn, source)
+                    .map(|(now, _)| now)
+                    == Some(origin)
+                {
+                    accepted.push(VehicleRiderTransfer {
+                        conn,
+                        mount: vehicle,
+                        at: to,
+                        rotation: rotation
+                            .map_or(view, |turn| passenger_rotation(angles, turn, view)),
+                        origin: Some((source, origin)),
+                    });
+                }
+            } else if self.passenger_object_vehicle(id) == Some(vehicle)
+                && let Some((position, view)) = self.vehicle_transfer_pose(id)
+                && !self.prepare_command_riders(
+                    id,
+                    destination,
+                    passenger_destination(from, at, position),
+                    rotation.map(|turn| passenger_angles(angles, turn, view)),
+                    accepted,
+                )
+            {
+                return false;
+            }
+        }
+        self.dim == source
+    }
+
+    fn vehicle_transfer_pose(&self, id: u32) -> Option<(Vec3, [f32; 2])> {
+        if let Some(mob) = self.mob_object(id) {
+            return Some((mob.position, [mob.yaw, mob.head_pitch]));
+        }
+        let target = self.level_entity(id as i32)?;
+        let [x, y, z] = self.target_position(target)?;
+        Some((Vec3::new(x, y, z), self.target_rotation(target)))
+    }
+
+    fn command_passenger_origin(
+        &self,
+        conn: u32,
+        source: Dim,
+    ) -> Option<(PlayerTravelOrigin, [f32; 2])> {
+        let guest = self.command_guest(conn)?;
+        if self.dim != source
+            || guest.dimension != source.id()
+            || guest.is_fake()
+            || self.on_server_trip(conn)
+            || self
+                .level_teleports
+                .iter()
+                .any(|teleport| teleport.conn == conn)
+        {
+            return None;
+        }
+        let target = if self.lan_acting == Some(conn) {
+            if self.riding.is_some() {
+                return None;
+            }
+            Target::Player
+        } else {
+            if guest.vehicle.is_some() {
+                return None;
+            }
+            Target::Guest(conn)
+        };
+        if !self.native_player_facts(target)?.alive {
+            return None;
+        }
+        let origin = PlayerTravelOrigin {
+            uuid: guest.uuid,
+            position: self.target_position(target)?,
+            vehicle: None,
+        };
+        Some((origin, self.target_rotation(target)))
     }
 
     /// `Entity.teleportPassengers` on a mob dismounted during a transition.
@@ -405,6 +615,13 @@ impl Game<'_> {
             // Open the destination before removing the entity.
             game.enter_level(destination)?;
             game.enter_level(source)?;
+            // A rollback carrying a dragon already owns the empty destination
+            // slot. A nested command must keep its unrelated dragon in place.
+            if matches!(target, Target::Dragon(_))
+                && game.levels.parked_dragon_arrival_reserved(destination)
+            {
+                return Ok(Some(false));
+            }
             let cooldown = game.portals.entities.get(&id).map_or(0, |s| s.cooldown);
             let Some((mut tag, state)) = game.take_lone_traveller(id) else {
                 return Ok(Some(false));
@@ -460,6 +677,45 @@ impl Game<'_> {
         turn_riders: bool,
         motion: TeleportMotion,
     ) -> horizon_client::Result<bool> {
+        let transfer = match motion {
+            TeleportMotion::Stop => VehicleTransfer::Command,
+            TeleportMotion::Keep => VehicleTransfer::Mod,
+        };
+        self.transfer_vehicle(target, destination, at, rotation, turn_riders, transfer)
+    }
+
+    pub(in crate::game) fn teleport_vehicle_rollback_across(
+        &mut self,
+        target: Target,
+        destination: Dim,
+        at: [f64; 3],
+        rotation: [f32; 2],
+    ) -> bool {
+        match self.transfer_vehicle(
+            target,
+            destination,
+            at,
+            Some(rotation),
+            true,
+            VehicleTransfer::Rollback,
+        ) {
+            Ok(moved) => moved,
+            Err(error) => {
+                log::error!("vehicle rollback into {}: {error}", destination.id());
+                false
+            }
+        }
+    }
+
+    fn transfer_vehicle(
+        &mut self,
+        target: Target,
+        destination: Dim,
+        at: [f64; 3],
+        rotation: Option<[f32; 2]>,
+        turn_riders: bool,
+        transfer: VehicleTransfer,
+    ) -> horizon_client::Result<bool> {
         let Some(root) = vehicle_id(target) else {
             return Ok(false);
         };
@@ -468,13 +724,29 @@ impl Game<'_> {
             if source == destination {
                 return Ok(false);
             }
-            // Refused passengers are dismounted and remain in the source level.
-            if !game.tree_may_travel(root, destination) {
-                return Ok(true);
+            // An active travel listener can keep just the blocking branch
+            // behind. Without one, the occupied dragon slot cannot change.
+            if game.entity_travel_hook_epoch().is_none() {
+                game.check_vehicle_dragon_slot(root, destination)?;
             }
-            // Open the destination before changing or removing any entity.
+            let check_player_landing = transfer != VehicleTransfer::Mod;
+            let rollback = transfer == VehicleTransfer::Rollback;
+            // Refused structural branches stay in the source. Command-player
+            // admissions also need the final position and the dismount pose.
+            let can_travel = if check_player_landing {
+                game.command_vehicle_entities_may_travel(root, destination)
+            } else {
+                game.entity_may_travel(root, destination, TravelCause::Teleport)
+            };
+            if !can_travel {
+                return Ok(!rollback);
+            }
+            // Open the destination before placing or taking the source tree.
             game.enter_level(destination)?;
             game.enter_level(source)?;
+            // Travel listeners may have changed the tree, and opening a level
+            // runs its load listeners. Check the state that is about to move.
+            game.check_vehicle_dragon_slot(root, destination)?;
             if game
                 .mobs
                 .iter()
@@ -483,49 +755,96 @@ impl Game<'_> {
                 game.dismount_mob(root);
             }
             game.prepare_vehicle_transition(root);
-            let kept = match motion {
-                TeleportMotion::Keep => game.transition_motion(target),
-                TeleportMotion::Stop => None,
-            };
-            let from = game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders);
-            if let Some(from) = from
-                && game.options.dedicated.is_some()
-            {
-                game.native_entity_teleport(game.dim.id(), root, from, at);
+            let tree = game.passenger_tree(root);
+            let mut players = Vec::new();
+            if check_player_landing {
+                let from = game.target_position(target);
+                if !game.prepare_command_riders(
+                    root,
+                    destination,
+                    Vec3::new(at[0], at[1], at[2]),
+                    rotation.filter(|_| turn_riders),
+                    &mut players,
+                ) || game.target_position(target) != from
+                    || game.passenger_tree(root) != tree
+                    || tree.iter().any(|&mount| {
+                        game.seated_passengers(mount)
+                            .iter()
+                            .any(|&(_, _, is_player)| is_player)
+                    })
+                {
+                    return Ok(!rollback);
+                }
             }
-            match kept {
-                Some(kept) => game.restore_transition_motion(target, kept),
-                None => game.teleport_stops(target),
+            if !rollback {
+                let kept = (transfer == VehicleTransfer::Mod)
+                    .then(|| game.transition_motion(target))
+                    .flatten();
+                let from =
+                    game.place_teleport_in_level(target, at, rotation, [false; 3], turn_riders);
+                if let Some(from) = from
+                    && game.options.dedicated.is_some()
+                {
+                    game.native_entity_teleport(game.dim.id(), root, from, at);
+                }
+                match kept {
+                    Some(kept) => game.restore_transition_motion(target, kept),
+                    None => game.teleport_stops(target),
+                }
             }
             let tree = game.passenger_tree(root);
+            // Source leave hooks can run commands in the destination before
+            // its join hooks. Reserve the singleton until the captured dragon
+            // has been restored, including across admission of saved riders.
+            let dragon_arrival = if rollback
+                && let Some(dragon) = game.dragon.as_ref().filter(|d| tree.contains(&d.id))
+            {
+                Some(
+                    game.levels
+                        .reserve_parked_dragon(destination, dragon.id)
+                        .ok_or("the destination ender dragon slot is occupied")?,
+                )
+            } else {
+                None
+            };
             // NBT and runtime ownership come from the same ordered object walk,
             // including off-level mobs and riders of every other live kind.
-            let (tag, state) = game
+            let (mut tag, state) = game
                 .take_vehicle_tree_transfer(root)
                 .ok_or("missing vehicle object tree")?;
-            let mut players = Vec::new();
+            if rollback {
+                let [x, y, z] = at;
+                set_rollback_destination(
+                    &mut tag,
+                    Vec3::new(x, y, z),
+                    rotation.expect("rollback rotation"),
+                );
+            }
             // A command runs with its source player swapped out of the hub.
-            if game.riding.is_some_and(|id| tree.contains(&id))
+            if !check_player_landing
+                && game.riding.is_some_and(|id| tree.contains(&id))
                 && let (Some(conn), Some(player)) = (game.lan_acting, game.player.as_ref())
             {
-                players.push((
+                players.push(VehicleRiderTransfer {
                     conn,
-                    [player.position.x, player.position.y, player.position.z],
-                    [game.yaw, game.pitch],
-                    game.riding.unwrap(),
-                ));
+                    mount: game.riding.unwrap(),
+                    at: player.position.components(),
+                    rotation: [game.yaw, game.pitch],
+                    origin: None,
+                });
             }
-            if let Some(host) = game.lan.as_ref() {
+            if !check_player_landing && let Some(host) = game.lan.as_ref() {
                 for guest in &host.hub.guests {
                     if Some(guest.conn) != game.lan_acting
                         && guest.vehicle.is_some_and(|id| tree.contains(&id))
                     {
-                        players.push((
-                            guest.conn,
-                            guest.position,
-                            [guest.yaw, guest.pitch],
-                            guest.vehicle.unwrap(),
-                        ));
+                        players.push(VehicleRiderTransfer {
+                            conn: guest.conn,
+                            mount: guest.vehicle.unwrap(),
+                            at: guest.position,
+                            rotation: [guest.yaw, guest.pitch],
+                            origin: None,
+                        });
                     }
                 }
             }
@@ -540,9 +859,9 @@ impl Game<'_> {
             game.enter_level(destination)?;
             // restoreFrom reloads saved state into fresh entities, rather than
             // retaining navigation paths or goals from the old level.
-            let restored_objects = game
-                .restore_vehicle_tree_state(tag, state)
-                .ok_or("could not restore vehicle tree")?;
+            let restored_objects = game.restore_vehicle_tree_state(tag, state);
+            drop(dragon_arrival);
+            let restored_objects = restored_objects.ok_or("could not restore vehicle tree")?;
             // AbstractHorse.addPassenger snaps a reattached passenger to the
             // new horse's getViewYRot(0) / getViewXRot(0). A fresh living
             // entity's previous head yaw is still zero, before its first tick.
@@ -565,15 +884,24 @@ impl Game<'_> {
                     rider.previous_head_pitch = pitch;
                 }
             }
-            for (conn, at, rotation, mount) in players {
-                game.level_teleports
-                    .push(super::server_travel::LevelTeleport {
-                        conn,
-                        dim: destination,
-                        at,
-                        rotation: Some(rotation),
-                        vehicle: restored_objects.by_source.get(&mount).copied(),
-                    });
+            for rider in players {
+                let vehicle = restored_objects.by_source.get(&rider.mount).map(|&mount| {
+                    LevelTeleportPassenger {
+                        mount,
+                        origin: rider.origin,
+                    }
+                });
+                if vehicle.is_none() && rider.origin.is_some() {
+                    continue;
+                }
+                game.level_teleports.push(LevelTeleport {
+                    conn: rider.conn,
+                    dim: destination,
+                    at: rider.at,
+                    rotation: Some(rider.rotation),
+                    notify_position: rider.origin.is_some(),
+                    vehicle,
+                });
             }
             game.native_joins_flush(false, 0);
             game.enter_level(source)?;
@@ -582,15 +910,22 @@ impl Game<'_> {
         .unwrap_or(Ok(false))
     }
 
-    /// Whether the vehicle `root` and the server players riding it (or what it
-    /// carries) may all travel to `destination` by a teleport
-    /// (`entity_travel_to_dimension`).
-    fn tree_may_travel(&mut self, root: u32, destination: super::Dim) -> bool {
-        self.entity_may_travel(
-            root,
-            destination,
-            super::server_travel::TravelCause::Teleport,
-        )
+    fn check_vehicle_dragon_slot(
+        &self,
+        root: u32,
+        destination: super::Dim,
+    ) -> horizon_client::Result<()> {
+        if self.levels.parked_dragon_unavailable(destination)
+            && self
+                .dragon
+                .as_ref()
+                .is_some_and(|dragon| self.passenger_tree(root).contains(&dragon.id))
+        {
+            // The dragon loader refuses a second dragon. Catch that refusal
+            // before a postorder restore could install part of the tree.
+            return Err(format!("{} already has an ender dragon", destination.id()).into());
+        }
+        Ok(())
     }
 
     /// `BlockAttachedEntity.setPos`: a frame or painting moves to the block
@@ -668,7 +1003,13 @@ impl Game<'_> {
                         self.move_riders(id, old, new, rotation);
                     } else {
                         // This existing writer also carries this rider's descendants.
-                        self.teleport_to_in_level(target, [at.x, at.y, at.z], turn, [false; 3], true);
+                        self.teleport_to_in_level(
+                            target,
+                            [at.x, at.y, at.z],
+                            turn,
+                            [false; 3],
+                            true,
+                        );
                     }
                 }
                 continue;
@@ -723,6 +1064,12 @@ impl Game<'_> {
             }
         }
         let [yaw, pitch] = self.vehicle_rotation(vehicle);
+        // The client drives its immediate mount from that mount's committed
+        // pose. A retained off-level mount has no client entity or driving base.
+        let vehicle_at = self
+            .level_entity(vehicle as i32)
+            .and_then(|target| self.target_position(target));
+        let dimension = self.dim.id();
         if let Some(host) = self.lan.as_mut() {
             for i in 0..host.hub.guests.len() {
                 if host.hub.guests[i].vehicle != Some(vehicle) {
@@ -731,24 +1078,29 @@ impl Game<'_> {
                 // Entity.sendTeleportTransitionToRidingPlayers: the rider's
                 // client moves the vehicle it drives itself, so it hears the
                 // vehicle's teleport (else its next MoveVehicle undoes it).
-                host.hub.guests[i].send(&C::TeleportEntity(play::TeleportEntity {
-                    id: vehicle as i32,
-                    position: [new.x, new.y, new.z],
-                    delta: [0.0; 3],
-                    yaw,
-                    pitch,
-                    relatives: 0,
-                    on_ground: false,
-                }));
-                if let Some(placed) = rotation {
-                    host.hub.guests.update(i, |g| {
+                host.hub.guests.update(i, |g| {
+                    if g.dimension == dimension {
+                        g.vehicle_good = vehicle_at;
+                    }
+                    if let Some(position) = vehicle_at {
+                        g.send(&C::TeleportEntity(play::TeleportEntity {
+                            id: vehicle as i32,
+                            position,
+                            delta: [0.0; 3],
+                            yaw,
+                            pitch,
+                            relatives: 0,
+                            on_ground: false,
+                        }));
+                    }
+                    if let Some(placed) = rotation {
                         let [yaw, pitch] =
                             passenger_rotation(placed.before, placed.after, [g.yaw, g.pitch]);
                         g.yaw = yaw;
                         g.head_yaw = yaw;
                         g.pitch = pitch;
-                    });
-                }
+                    }
+                });
                 let id = host.hub.guests[i].entity_id as u32;
                 let g = host.hub.guests[i].position;
                 let from = Vec3::new(g[0], g[1], g[2]);

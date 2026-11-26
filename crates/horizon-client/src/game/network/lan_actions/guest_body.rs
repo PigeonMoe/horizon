@@ -2,7 +2,7 @@
 use super::*;
 use horizon_client::{
     lan::guest::Guest,
-    motion::{MotionResources, PlayerMotion},
+    motion::{MotionResources, PlayerInsideAction, PlayerMotion},
 };
 use horizon_core::geometry::Vec3;
 
@@ -120,6 +120,44 @@ impl Game<'_> {
             tag_items: Some(world_items!(self)),
             block_registries: Some(&self.pack.block_registries),
         })
+    }
+
+    fn guest_block_damage_with_reactions(
+        &mut self,
+        from: Vec3,
+        just_stopped_gliding: bool,
+    ) -> horizon_client::Result<()> {
+        let Some(mut world) = self.motion_world_for_guest(just_stopped_gliding) else {
+            return Ok(());
+        };
+        let plan = world.plan_server_block_damage(from)?;
+        for action in plan {
+            if world.player.health.dead_or_dying() {
+                break;
+            }
+            match action {
+                PlayerInsideAction::Apply(step) => world.apply_inside_action(step)?,
+                PlayerInsideAction::LavaDamage => {
+                    let source = "minecraft:lava";
+                    let Some((hit, admitted)) = world.start_environment_hurt(source, 4.0)? else {
+                        continue;
+                    };
+                    if let Some(damage) = admitted.filter(|damage| *damage > 0.0) {
+                        let cancel = self.player_environment_damage_cancels(source, damage);
+                        let Some(resumed) = self.motion_world_for_guest(just_stopped_gliding)
+                        else {
+                            return Ok(());
+                        };
+                        world = resumed;
+                        if cancel {
+                            continue;
+                        }
+                    }
+                    world.finish_environment_hurt(hit)?;
+                }
+            }
+        }
+        world.finish_server_block_damage()
     }
 
     /// The guest's body on the server each tick: ServerPlayer.tick's damage
@@ -320,33 +358,48 @@ impl Game<'_> {
             w.player.leather_boots = leather_boots;
             w.player.freeze_immune = freeze_immune;
             w.player.burn_from_stepping_immune = burn_immune;
-            let _ = w.server_block_damage(start);
-            let _ = w.update_soul_speed_block();
-            let _ = w.tick_environment_damage();
-            if !mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre) {
-                let _ = w.apply_fire_contact();
-            } else if let Ok(Some(damage)) = w.prepare_fire_contact()
-                && let Ok(Some((hit, admitted))) = w.start_fire_contact_hurt(damage)
-            {
-                let mut cancel = false;
-                if let Some(damage) = admitted.filter(|damage| *damage > 0.0)
-                    && let Some(player) = game.native_acting_player()
-                {
-                    game.native_player_environment_damage_pre(
-                        mod_api::__private::PlayerEnvironmentDamagePreCall {
-                            player,
-                            damage_type: "minecraft:in_fire",
-                            damage,
-                            cancel: &mut cancel,
-                        },
-                    );
-                }
+            let environment_reactions =
+                mod_api::__private::listened(mod_api::HookId::PlayerEnvironmentDamagePre);
+            if environment_reactions {
+                let _ = game.guest_block_damage_with_reactions(start, just_stopped_gliding);
                 let Some(motion) = game.motion_world_for_guest(just_stopped_gliding) else {
                     return (Vec::new(), None);
                 };
                 w = motion;
-                if !cancel {
-                    let _ = w.finish_fire_contact_hurt(hit);
+            } else {
+                let _ = w.server_block_damage(start);
+            }
+            let _ = w.update_soul_speed_block();
+            if !environment_reactions {
+                let _ = w.tick_environment_damage();
+                let _ = w.apply_fire_contact();
+            } else {
+                type PrepareHazard =
+                    fn(&mut MotionWorld<'_, '_, '_>) -> horizon_client::Result<Option<f32>>;
+                let phases: [(&str, PrepareHazard); 3] = [
+                    ("minecraft:drown", |motion| motion.prepare_drowning_damage()),
+                    ("minecraft:lava", |motion| motion.prepare_lava_contact()),
+                    ("minecraft:in_fire", |motion| motion.prepare_fire_contact()),
+                ];
+                for (damage_type, prepare) in phases {
+                    let Ok(Some(damage)) = prepare(&mut w) else {
+                        continue;
+                    };
+                    let Ok(Some((hit, admitted))) = w.start_environment_hurt(damage_type, damage)
+                    else {
+                        continue;
+                    };
+                    if let Some(damage) = admitted.filter(|damage| *damage > 0.0) {
+                        let cancel = game.player_environment_damage_cancels(damage_type, damage);
+                        let Some(motion) = game.motion_world_for_guest(just_stopped_gliding) else {
+                            return (Vec::new(), None);
+                        };
+                        w = motion;
+                        if cancel {
+                            continue;
+                        }
+                    }
+                    let _ = w.finish_environment_hurt(hit);
                 }
             }
             let _ = w.server_hazards_tick(in_wall);

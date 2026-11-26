@@ -57,7 +57,7 @@ fn a_silent_tnt_cart_primes_without_its_sound() {
     tnt_cart(&mut game, 42, true);
     game.audio.capture = Some(Vec::new());
     let mut silent = game.carts[0].clone();
-    game.activate_cart(&mut silent, true);
+    game.activate_cart(&mut silent, true, &mut super::CartRiderTick::default());
     assert_eq!(silent.fuse, 80, "a silent cart still primes");
     assert!(
         game.lan_entity_events
@@ -74,7 +74,7 @@ fn a_silent_tnt_cart_primes_without_its_sound() {
     tnt_cart(&mut game, 43, false);
     game.audio.capture = Some(Vec::new());
     let mut normal = game.carts[0].clone();
-    game.activate_cart(&mut normal, true);
+    game.activate_cart(&mut normal, true, &mut super::CartRiderTick::default());
     assert_eq!(normal.fuse, 80);
     let sounds = game.audio.capture.take().unwrap();
     assert_eq!(sounds.len(), 1, "{sounds:?}");

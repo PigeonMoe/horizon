@@ -152,7 +152,7 @@ fn a_veto_of_the_first_of_two_reports_in_one_tick_corrects_and_the_second_is_not
     let mut hub = standing(true, vec![turned(10.0), turned(20.0)]);
     let conn = hub.guests[0].conn;
     assert_eq!(moves(&drain(&mut hub)), [conn]);
-    hub.resolve_move(conn, false);
+    assert_eq!(hub.resolve_move(conn, false), None);
     assert_eq!(look(&hub), [0.0, 0.0], "the vetoed report is not applied");
     assert!(hub.guests[0].awaiting_teleport.is_some());
     // The second waited behind it, and meets the unconfirmed correction: only the server's own

@@ -404,6 +404,12 @@ pub trait LevelsBackend {
     #[access(WorldOnly)]
     fn level_day_time(&self, level: LevelRef) -> Option<i64>;
     /// Side: server.
+    /// This dimension's persistent UUID, with the same bits as Paper's `World.getUID()` for an
+    /// imported Paper world. The UUID remains the same across closes and server restarts.
+    /// None for a client, a stale handle or a save whose UUID could not be read or persisted.
+    #[access(WorldOnly)]
+    fn level_world_uuid(&self, level: LevelRef) -> Option<u128>;
+    /// Side: server.
     /// The time of the level's own clock in ticks: the clock its dimension type names as
     /// `default_clock`, which its sky, spawning and beds go by and `/time` sets there. A mod's
     /// level with a `day_cycle` clock of its own counts it apart from the Overworld's; a level
@@ -778,6 +784,13 @@ pub trait LevelsBackend {
     /// Does not load chunks, inspect the block's breakability, or change the world.
     #[access(WorldOnly)]
     fn level_allow_device_breaking(&self, level: LevelRef, owner: u128, pos: [i32; 3]) -> bool;
+    /// Side: server.
+    /// Ask whether an online `player` in this active level may target `pos` with a PvP
+    /// ability. Checks the PvP game rule and `player_attack_at_pre` at the loaded target
+    /// position. False for stale handles, a player outside this level, or an unloaded target.
+    /// Does not require a victim, load chunks, deal damage, or check the player's origin.
+    #[access(WorldOnly)]
+    fn level_allow_player_attack_at(&self, level: LevelRef, player: PlayerRef, pos: [i32; 3]) -> bool;
 }
 /// The handles' writes of the `levels` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -785,10 +798,10 @@ pub trait LevelsBackend {
 #[horizon_mod_api_macros::host_area]
 pub trait LevelsBackendMut {
     /// Side: server.
-    /// Ask `inventory_move_item` before a mod moves a stack between block inventories.
+    /// Ask `inventory_move_item` before a mod moves a stack between or within block inventories.
     /// The caller must preserve both inventories on refusal. This call neither moves items
     /// nor loads chunks. Returns false for stale or inactive levels, nonresident positions,
-    /// an unknown item, overlapping endpoints or a veto from a listener.
+    /// an unknown item or a veto from a listener.
     #[access(WorldOnly)]
     fn level_allow_inventory_transfer(
         &mut self,

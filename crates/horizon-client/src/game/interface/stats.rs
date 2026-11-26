@@ -241,7 +241,7 @@ pub(super) fn locate_player_json(world: &Path, dir: &str, uuid: [i32; 4], name: 
 }
 
 /// The value registry owned by each vanilla statistic type.
-fn stat_registry(ty: &str) -> Option<&'static str> {
+pub(super) fn stat_registry(ty: &str) -> Option<&'static str> {
     Some(match ty {
         "minecraft:mined" => "minecraft:block",
         "minecraft:crafted"

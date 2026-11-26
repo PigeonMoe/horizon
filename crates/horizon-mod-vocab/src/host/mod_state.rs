@@ -20,6 +20,17 @@ pub trait ModStateHost {
 /// The server host's methods of the `mod_state` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait ModStateServerHost {
+    /// Snapshot the top-level entries of a persisted server-wide attachment in
+    /// the calling package's namespace. Only keys starting with `prefix` are
+    /// included. Exceeding `max_entries` refuses the query. Reading does not
+    /// decode a typed value, insert a default or mutate the attachment store.
+    #[access(WorldOnly)]
+    fn server_attachment_entries(
+        &self,
+        id: &Identifier,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<Compound, AttachmentError>;
     /// Side: server.
     /// Validate captured residency against the current dimension immediately before
     /// an ordinary journaled attachment write. This does not open a transaction.
@@ -67,4 +78,13 @@ pub trait ModStateServerHost {
     /// Withdraws a task the calling mod scheduled: true if it was still waiting.
     #[access(WorldOnly)]
     fn cancel_task(&mut self, id: TaskId) -> bool;
+    /// Side: server.
+    /// Queues a notification for `Hooks::mod_event` on this ready server. The topic is a
+    /// resource identifier in the calling mod's namespace, at most 128 UTF-8 bytes. The
+    /// payload must be valid JSON and at most 64 KiB. Returns false if the call is outside the
+    /// owning mod's scope, the server is closing, or the arguments or queue capacity are exceeded.
+    /// The queue holds 128 notifications and delivers at most 32 per server tick in FIFO order.
+    /// Closing the world drops undelivered notifications.
+    #[access(WorldOnly)]
+    fn publish_mod_event(&mut self, topic: &str, payload_json: &str) -> bool;
 }

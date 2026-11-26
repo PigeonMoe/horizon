@@ -16,6 +16,7 @@ protocol = ["world", "dep:horizon-protocol"]
 prepare = ["dep:horizon-prepare"]
 # A server's own files: server.properties, the op, white and ban lists, the user cache.
 server-files = ["dep:horizon-server-files", "dep:horizon-java-properties"]
+pm-sync-mysql = ["server-files", "horizon-server-files/pm-sync-mysql"]
 
 mod-build = ["dep:horizon-mod-api-gen", "dep:horizon-mod-point-shape"]
 

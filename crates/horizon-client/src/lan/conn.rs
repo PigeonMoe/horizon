@@ -14,6 +14,7 @@ use super::{
     forwarding,
     io_pool::{self, Session as _},
     pigeon_auth,
+    source_handover::ReturnAuthorization,
 };
 use crate::raw_payloads::{Side, Transport};
 use horizon_protocol::{
@@ -26,7 +27,7 @@ use horizon_protocol::{
         handshake, login, play, status,
     },
     payload_negotiation::Phase,
-    text::translatable,
+    text::{literal, translatable},
 };
 use mod_api::{PayloadFrameStage, PayloadId, PayloadSendError};
 use std::{
@@ -297,6 +298,7 @@ pub struct PlayerSender {
     /// 0 for one that did not answer (the legacy layout, a menu of a block only).
     pub menu_extra_rev: u8,
     pub(super) pigeon_auth_prompt: bool,
+    profile_return: Option<Arc<ReturnAuthorization>>,
 }
 #[derive(Clone)]
 enum To {
@@ -348,6 +350,10 @@ impl PlayerSender {
     pub fn payload_transport(&self) -> &Arc<Transport> {
         &self.payload_transport
     }
+
+    pub(super) fn profile_return(&self) -> Option<&ReturnAuthorization> {
+        self.profile_return.as_deref()
+    }
     /// Frozen physical framing, used to reject before copying a large raw body.
     pub(crate) fn payload_framing(&self) -> horizon_protocol::connection::Framing {
         self.framing
@@ -370,6 +376,7 @@ impl PlayerSender {
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
             pigeon_auth_prompt: false,
+            profile_return: None,
         }
     }
     #[cfg(test)]
@@ -409,6 +416,7 @@ impl PlayerSender {
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
             pigeon_auth_prompt: false,
+            profile_return: None,
         };
         (sender, move || inspect.queued_contents())
     }
@@ -427,6 +435,7 @@ impl PlayerSender {
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
             pigeon_auth_prompt: false,
+            profile_return: None,
         }
     }
     /// The bytes received from and sent to the client on the wire so far.
@@ -1104,6 +1113,7 @@ fn serve_login(
         .filter(|(owner_name, _)| c.is_memory() && hello.name.eq_ignore_ascii_case(owner_name))
         .map(|(owner_name, uuid)| (owner_name.clone(), *uuid));
     let mut pending = None;
+    let mut verified_forwarding = false;
     let (uuid, properties) = match (online, forwarding) {
         (Some(online), _) if let Some(config) = offline => {
             let (uuid, form) = match pigeon_auth::begin(config, &name, address) {
@@ -1137,6 +1147,7 @@ fn serve_login(
         }
         (None, Some(secret)) => match forward(&mut c, secret) {
             Ok(Ok(forwarded)) => {
+                verified_forwarding = true;
                 (name, address) = (
                     forwarded.name,
                     std::net::SocketAddr::new(forwarded.address, address.port()),
@@ -1180,36 +1191,100 @@ fn serve_login(
             None => (offline_uuid(&hello.name), Vec::new()),
         },
     };
+    let fence = shared.source_frozen_handover(uuid);
+    let returning = fence
+        .filter(|_| verified_forwarding)
+        .and_then(|retired_id| {
+            shared
+                .config
+                .arrivals
+                .as_ref()?
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take_return(uuid, retired_id, Instant::now())
+        });
+    if fence.is_some() && returning.is_none() {
+        let text = refuse(
+            &mut c,
+            shared,
+            "Server thread",
+            &user,
+            &super::source_handover::refusal(),
+        );
+        lost(shared, &user, &text);
+        return Ok(());
+    }
+
+    // An unprepared login on a profile receiver must not reserve a place or
+    // evict an existing copy of the same UUID through the duplicate gate.
+    let required_expectation = match shared
+        .config
+        .arrivals
+        .as_ref()
+        .filter(|_| returning.is_none())
+        .map_or(Ok(None), |table| {
+            table
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_required_for_login(uuid, std::time::Instant::now())
+        }) {
+        Ok(expected) => expected,
+        Err(_) => {
+            let reason = horizon_core::nbt::Tag::compound([
+                (
+                    "translate",
+                    literal("horizon.transfer.expectation_required"),
+                ),
+                (
+                    "fallback",
+                    literal("This server requires a transfer prepared by its proxy."),
+                ),
+            ]);
+            let text = refuse(&mut c, shared, "Server thread", &user, &reason);
+            lost(shared, &user, &text);
+            return Ok(());
+        }
+    };
+    let put_back = |expected| {
+        if let Some(table) = shared.config.arrivals.as_ref() {
+            let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(returning) = &returning {
+                table.put_back_expectation(uuid, returning.clone(), Instant::now());
+            } else if let Some(deadline) = expected {
+                table.put_back(uuid, deadline, Instant::now());
+            }
+        }
+    };
     // verifyLoginAndFinishConnectionSetup: PlayerList.canPlayerLogin, then
     // duplicates and a full server.
-    if pending.is_none()
-        && let Some(reason) = shared.try_admit(address, uuid, &name)
-    {
+    let refusal = if returning.is_some() {
+        shared.try_admit_return(address, uuid, &name)
+    } else if pending.is_none() {
+        shared.try_admit(address, uuid, &name)
+    } else {
+        None
+    };
+    if let Some(reason) = refusal {
+        put_back(required_expectation);
         let text = refuse(&mut c, shared, "Server thread", &user, &reason);
         lost(shared, &user, &text);
         return Ok(());
     }
     // A player a proxy said would arrive (`player-expect`) uses the expectation up
-    // here, as the login starts: one that ran out while the player was still in
-    // configuration (a resource pack prompt) would otherwise make it an ordinary
-    // login from this server's own file.
-    let expected = shared.config.arrivals.as_ref().and_then(|table| {
-        table
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take_until(uuid, std::time::Instant::now())
+    // as the login starts. A failed configuration gives it back to the proxy.
+    let expected = required_expectation.or_else(|| {
+        shared
+            .config
+            .arrivals
+            .as_ref()
+            .filter(|_| returning.is_none())
+            .and_then(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take_until(uuid, std::time::Instant::now())
+            })
     });
-    // A login that does not reach play (it failed in configuration) gives the
-    // expectation back, so the proxy's next attempt is still expected.
-    let put_back = || {
-        if let (Some(deadline), Some(table)) = (expected, shared.config.arrivals.as_ref()) {
-            table.lock().unwrap_or_else(|e| e.into_inner()).put_back(
-                uuid,
-                deadline,
-                std::time::Instant::now(),
-            );
-        }
-    };
     let premium = pending.is_none() && online.is_some();
     let pigeon_auth_prompt = premium
         && shared.config.pigeon_auth.as_ref().is_some_and(|config| {
@@ -1236,20 +1311,21 @@ fn serve_login(
                 parts,
                 address,
                 counted,
-                expected.is_some(),
+                expected.is_some() || returning.is_some(),
+                returning.and_then(|connection| connection.returning),
                 pigeon_auth_prompt,
             );
             Ok(())
         }
         Ok(None) => {
-            put_back();
+            put_back(expected);
             if admitted {
                 shared.release(uuid);
             }
             Ok(())
         }
         Err(err) => {
-            put_back();
+            put_back(expected);
             if admitted {
                 shared.release(uuid);
             }
@@ -2094,6 +2170,7 @@ fn play(
     address: std::net::SocketAddr,
     counted: Option<super::Counted>,
     expected: bool,
+    profile_return: Option<Arc<ReturnAuthorization>>,
     pigeon_auth_prompt: bool,
 ) {
     let Some(conn) = shared.next_id() else {
@@ -2129,6 +2206,7 @@ fn play(
         viewed_levels: parts.channels.viewed_levels.answer(),
         menu_extra_rev: parts.channels.menu_extra_rev.revision(),
         pigeon_auth_prompt,
+        profile_return,
     };
     let required_pack = shared
         .config
@@ -2876,6 +2954,142 @@ mod tests {
         assert!(
             again.contains("multiplayer.disconnect.transfers_disabled"),
             "{again}"
+        );
+    }
+
+    #[test]
+    fn a_reopened_source_handover_fences_logins_without_transfer_settings() {
+        use crate::lan::source_handover::{Handover, Journal};
+        let world = tempfile::tempdir().unwrap();
+        let name = "Alex";
+        let owner = offline_uuid(name);
+        let handover = Handover {
+            owner,
+            id: 7,
+            destination: "receiver".into(),
+            record: b"portable snapshot".to_vec(),
+            local_checkpoint: b"local snapshot".to_vec(),
+        };
+        let journal = Journal::open(world.path()).unwrap();
+        journal.prepare(&handover).unwrap();
+        journal
+            .retire(
+                owner,
+                handover.id,
+                &handover.destination,
+                handover.record_digest(),
+            )
+            .unwrap();
+        drop(journal);
+
+        let config = crate::lan::NetConfig {
+            listen: false,
+            accepts_transfers: true,
+            source_handovers: Some(Arc::new(Journal::open(world.path()).unwrap())),
+            ..crate::lan::NetConfig::loopback(0, "Source fence".into(), 8)
+        };
+        let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
+        let refused =
+            transfer_login(Connection::local(lan.connect_local().unwrap()), name).unwrap_err();
+        assert!(
+            refused.contains("horizon.transfer.source_fenced"),
+            "{refused}"
+        );
+        assert!(!lan.poll().into_iter().any(|event| matches!(
+            event.into_parts().0,
+            NetEvent::Joined(_) | NetEvent::Duplicate(_)
+        )));
+        transfer_login(Connection::local(lan.connect_local().unwrap()), "Steve")
+            .expect("the fence belongs to one owner");
+    }
+
+    #[test]
+    fn a_profile_receiver_refuses_unprepared_logins_and_holds_expected_arrivals() {
+        let transfers = crate::lan::arrivals::Transfers::new(
+            crate::lan::arrivals::Settings::parse("required_profiles=slimefun:profile@1").unwrap(),
+        );
+        let config = crate::lan::NetConfig {
+            announce: false,
+            listen: false,
+            accepts_transfers: true,
+            arrivals: Some(transfers.expected.clone()),
+            ..crate::lan::NetConfig::loopback(0, "Profile receiver".into(), 8)
+        };
+        let lan = crate::lan::Lan::start_with(Arc::new(SyncData::empty()), config).unwrap();
+        let name = "Alex";
+        // The transfer intention alone gives no authority to enter without preparation.
+        let refused =
+            transfer_login(Connection::local(lan.connect_local().unwrap()), name).unwrap_err();
+        assert!(
+            refused.contains("horizon.transfer.expectation_required"),
+            "{refused}"
+        );
+        transfers
+            .table()
+            .expect(offline_uuid(name), Duration::from_secs(10), Instant::now())
+            .unwrap();
+        let mut client = Connection::local(lan.connect_local().unwrap());
+        client
+            .reader
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        login_profile(&mut client, name);
+        client
+            .send(&login::Serverbound::LoginAcknowledged(Empty).encode())
+            .unwrap();
+        loop {
+            let (id, bytes) = client.recv().unwrap();
+            match cfg::Clientbound::decode(id, &bytes).unwrap() {
+                cfg::Clientbound::SelectKnownPacks(packs) => client
+                    .send(&cfg::Serverbound::SelectKnownPacks(packs).encode())
+                    .unwrap(),
+                cfg::Clientbound::FinishConfiguration(_) => {
+                    client
+                        .send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
+                        .unwrap();
+                    break;
+                }
+                cfg::Clientbound::Disconnect(reason) => {
+                    panic!("expected login refused: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let arrival = lan
+                .poll()
+                .into_iter()
+                .map(|event| event.into_parts().0)
+                .find_map(|event| match event {
+                    NetEvent::Joined(joined) => Some(joined),
+                    _ => None,
+                });
+            if let Some(joined) = arrival {
+                assert_eq!(joined.uuid, offline_uuid(name));
+                assert!(joined.expected, "only a held arrival may reach the game");
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "the held login did not reach the game"
+            );
+            std::thread::yield_now();
+        }
+        let duplicate = Connection::local(lan.connect_local().unwrap());
+        duplicate
+            .reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let refused = transfer_login(duplicate, name).unwrap_err();
+        assert!(
+            refused.contains("horizon.transfer.expectation_required"),
+            "{refused}"
+        );
+        assert!(
+            !lan.poll()
+                .into_iter()
+                .any(|event| matches!(event.into_parts().0, NetEvent::Duplicate(_)))
         );
     }
 
@@ -3976,6 +4190,7 @@ mod outgoing_budget_tests {
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
             pigeon_auth_prompt: false,
+            profile_return: None,
         }
     }
     #[test]

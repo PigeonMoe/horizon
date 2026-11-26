@@ -1310,5 +1310,7 @@
   "horizon.options.menu_focus": "Focus",
   "horizon.options.menu_navigation": "Menu Navigation",
   "horizon.options.menu_pointer": "Pointer",
-  "horizon.screenshot.canceled": "Screenshot canceled"
+  "horizon.screenshot.canceled": "Screenshot canceled",
+  "horizon.transfer.expectation_required": "This server requires a transfer prepared by its proxy.",
+  "horizon.transfer.source_fenced": "Your player data is reserved for a transfer to another server."
 }

@@ -171,6 +171,9 @@ pub(in crate::game) struct DragonSlot {
     slot: horizon_client::join_seq::ResidentSlot<crate::game::dragon::Dragon>,
     table: std::cell::RefCell<DragonPartsTable>,
     registered: std::cell::Cell<u32>,
+    // The transferring caller owns the reservation. Returning or unwinding
+    // releases it even if the level has been switched during a callback.
+    arrival: std::sync::Weak<u32>,
 }
 impl std::ops::Deref for DragonSlot {
     type Target = horizon_client::join_seq::ResidentSlot<crate::game::dragon::Dragon>;
@@ -184,6 +187,23 @@ impl std::ops::DerefMut for DragonSlot {
     }
 }
 impl DragonSlot {
+    pub(in crate::game) fn has_reserved_arrival(&self) -> bool {
+        self.arrival.strong_count() != 0
+    }
+
+    pub(in crate::game) fn can_install(&self, source: Option<u32>) -> bool {
+        self.slot.is_none() && self.arrival.upgrade().is_none_or(|id| source == Some(*id))
+    }
+
+    pub(in crate::game) fn reserve_arrival(&mut self, source: u32) -> Option<std::sync::Arc<u32>> {
+        if !self.can_install(None) {
+            return None;
+        }
+        let arrival = std::sync::Arc::new(source);
+        self.arrival = std::sync::Arc::downgrade(&arrival);
+        Some(arrival)
+    }
+
     fn register(&self, id: u32) {
         let old = self.registered.replace(id);
         if old == id {

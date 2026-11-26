@@ -30,6 +30,50 @@ impl JavaString {
     pub fn to_string_lossy(&self) -> String {
         String::from_utf16_lossy(&self.0)
     }
+
+    /// Decode the contents of a Java `readUTF` field, without its length prefix.
+    pub fn from_modified_utf8(bytes: &[u8]) -> Option<Self> {
+        modified_utf8(bytes)
+    }
+
+    /// Encode the contents of a Java `writeUTF` field, without its length prefix.
+    /// Returns `None` if its encoded length cannot fit in the Java field.
+    pub fn to_modified_utf8(&self) -> Option<Vec<u8>> {
+        let len = usize::from(self.modified_utf8_len()?);
+        let mut bytes = Vec::with_capacity(len);
+        for (unit, used) in self.modified_utf8_units() {
+            bytes.extend_from_slice(&unit[..used]);
+        }
+        Some(bytes)
+    }
+
+    fn modified_utf8_len(&self) -> Option<u16> {
+        let len: usize = self
+            .0
+            .iter()
+            .map(|&c| match c {
+                1..=127 => 1,
+                0..=2047 => 2,
+                _ => 3,
+            })
+            .sum();
+        u16::try_from(len).ok()
+    }
+
+    fn modified_utf8_units(&self) -> impl Iterator<Item = ([u8; 3], usize)> + '_ {
+        self.0.iter().map(|&c| match c {
+            1..=127 => ([c as u8, 0, 0], 1),
+            0..=2047 => ([0xc0 | (c >> 6) as u8, 0x80 | (c & 63) as u8, 0], 2),
+            _ => (
+                [
+                    0xe0 | (c >> 12) as u8,
+                    0x80 | ((c >> 6) & 63) as u8,
+                    0x80 | (c & 63) as u8,
+                ],
+                3,
+            ),
+        })
+    }
 }
 
 pub type Compound = BTreeMap<JavaString, Tag>;
@@ -890,16 +934,7 @@ impl Writer {
         self.put(&len.to_be_bytes())
     }
     fn string(&mut self, string: &JavaString) -> Result<(), Error> {
-        let len: usize = string
-            .0
-            .iter()
-            .map(|&c| match c {
-                1..=127 => 1,
-                0..=2047 => 2,
-                _ => 3,
-            })
-            .sum();
-        let Ok(len) = u16::try_from(len) else {
+        let Some(len) = string.modified_utf8_len() else {
             if self.empty_long_strings {
                 return self.put(&0u16.to_be_bytes());
             }
@@ -913,16 +948,8 @@ impl Writer {
             self.bytes.extend(string.0.iter().map(|&c| c as u8));
             return Ok(());
         }
-        for &c in &string.0 {
-            match c {
-                1..=127 => self.put(&[c as u8])?,
-                0..=2047 => self.put(&[0xc0 | (c >> 6) as u8, 0x80 | (c & 63) as u8])?,
-                _ => self.put(&[
-                    0xe0 | (c >> 12) as u8,
-                    0x80 | ((c >> 6) & 63) as u8,
-                    0x80 | (c & 63) as u8,
-                ])?,
-            }
+        for (unit, used) in string.modified_utf8_units() {
+            self.put(&unit[..used])?;
         }
         Ok(())
     }
@@ -1024,15 +1051,25 @@ impl Writer {
 /// `NbtIo.write`: a file root. A string too long for modified UTF-8 is
 /// written empty, as vanilla's disk writer does; [`write_network`] refuses it.
 pub fn write_named(root: &NamedTag, limits: Limits) -> Result<Vec<u8>, Error> {
-    write_named_parts(&root.name, &root.tag, limits)
+    write_named_parts(&root.name, &root.tag, limits, true)
 }
 
-fn write_named_parts(name: &JavaString, tag: &Tag, limits: Limits) -> Result<Vec<u8>, Error> {
+/// Write a named file root, refusing strings that cannot fit in modified UTF-8.
+pub fn write_named_strict(root: &NamedTag, limits: Limits) -> Result<Vec<u8>, Error> {
+    write_named_parts(&root.name, &root.tag, limits, false)
+}
+
+fn write_named_parts(
+    name: &JavaString,
+    tag: &Tag,
+    limits: Limits,
+    empty_long_strings: bool,
+) -> Result<Vec<u8>, Error> {
     let mut writer = Writer {
         bytes: Vec::new(),
         limits,
         nodes: 0,
-        empty_long_strings: true,
+        empty_long_strings,
         canonical_nan: true,
     };
     writer.put(&[tag.id()])?;
@@ -1076,7 +1113,7 @@ pub fn validate_component_value(value: &Tag) -> Result<(), String> {
         ..Limits::default()
     };
     // Disk NBT canonicalizes NaNs and normalizes negative zero when read.
-    let saved = write_named_parts(&JavaString::default(), value, limits)
+    let saved = write_named_parts(&JavaString::default(), value, limits, true)
         .map_err(|error| error.to_string())?;
     let (loaded, _) = read_named(&saved, limits).map_err(|error| error.to_string())?;
     if loaded.tag != *value {
@@ -1330,6 +1367,7 @@ mod tests {
             [0x0a, 0, 0, 0x08, 0, 1, b's', 0, 0, 0]
         );
         assert!(write_network(&root.tag, Limits::saved()).is_err());
+        assert!(write_named_strict(&root, Limits::saved()).is_err());
         // The rest of the tree is kept.
         let root = NamedTag {
             name: "".into(),

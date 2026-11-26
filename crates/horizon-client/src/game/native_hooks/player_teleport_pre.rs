@@ -3,6 +3,17 @@ use crate::game::Dim;
 use horizon_core::geometry::Vec3;
 
 impl Game<'_> {
+    pub(in crate::game) fn native_player_position_committed(
+        &mut self,
+        player: u128,
+        from_level: &str,
+        from: [f64; 3],
+        to_level: &str,
+        to: [f64; 3],
+    ) {
+        self.fire_player_position_committed(player, from_level, from, to_level, to);
+    }
+
     pub(in crate::game) fn native_player_teleport_pre(
         &mut self,
         call: mod_api::__private::PlayerTeleportPreCall<'_>,

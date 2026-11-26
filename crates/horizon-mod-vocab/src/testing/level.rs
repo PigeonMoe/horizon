@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, HashMap};
 #[non_exhaustive]
 pub struct FakeLevel {
     level: LevelRef,
+    /// The UUID returned by the test host for this level, if configured.
+    pub world_uuid: Option<u128>,
     blocks: HashMap<[i32; 3], String>,
     block_entities: BTreeMap<[i32; 3], FakeBlockEntity>,
     pub(super) entities: BTreeMap<u32, FakeEntity>,
@@ -44,6 +46,7 @@ impl FakeLevel {
                 WorldEpoch::new(FAKE_EPOCH),
                 crate::content::registry_keys::dimension_key(dimension),
             ),
+            world_uuid: None,
             blocks: HashMap::new(),
             block_entities: BTreeMap::new(),
             entities: BTreeMap::new(),

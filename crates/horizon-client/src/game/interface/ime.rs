@@ -65,7 +65,12 @@ impl Game<'_> {
     /// still being composed is shown under the focused field's caret.
     pub(super) fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
         let taken = self.text_field_focused();
-        let event = PreeditEvent::from_winit(text, cursor);
+        let mut event = PreeditEvent::from_winit(text, cursor);
+        if self.dialog_password_input()
+            && let Some(event) = event.as_mut()
+        {
+            event.obscure();
+        }
         // ScreenEvent.Preedit.Pre, then the screen's handler (the focused
         // field takes it), then Preedit.Post when no field did.
         let shown = event.clone().unwrap_or_default();
@@ -152,6 +157,10 @@ impl Game<'_> {
             return;
         }
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        if self.dialog_password_input() {
+            self.dialog_type(&text);
+            return;
+        }
         // ScreenEvent.CharacterTyped.Pre: the input method's committed text
         // reaches a text box by characters, as a key's own text does, so the
         // open screen hears of each of them first and a cancelled one never

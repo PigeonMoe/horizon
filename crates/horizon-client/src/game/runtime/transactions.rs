@@ -275,6 +275,8 @@ pub(super) enum After {
     Drop([i32; 3], ItemStack),
     /// `Player.drop(stack, false)` by the player with this UUID: what no longer fits.
     PlayerDrop(u128, ItemStack),
+    /// A natural item drop at a validated position in another level.
+    NaturalItemDrop(mod_api::LevelRef, [f64; 3], ItemStack),
     GivePickup(u128),
     InventoryTrigger(u128),
     GiveRest(u128, ItemStack, Option<[i32; 4]>),
@@ -995,6 +997,9 @@ impl Game<'_> {
                 self.native_as_player(uuid, |g| {
                     g.drop_plain(stack);
                 });
+            }
+            After::NaturalItemDrop(level, position, stack) => {
+                self.finish_natural_item_drop(level, position, stack);
             }
             After::Spawn(at, stack) => self.spawn_item(stack, at, [0.0; 3], 10),
             After::Emptied(id) => {

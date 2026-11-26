@@ -95,6 +95,19 @@ impl PreeditEvent {
         Self::from_sdl_text_editing(Some(text), start, length)
     }
 
+    /// Mask a password composition without moving its character boundaries.
+    pub fn obscure(&mut self) {
+        self.caret_position = self
+            .full_text
+            .char_indices()
+            .take_while(|(index, _)| *index < self.caret_position)
+            .count();
+        self.full_text = "*".repeat(self.full_text.chars().count());
+        for block in &mut self.blocks {
+            *block = "*".repeat(block.chars().count());
+        }
+    }
+
     /// `PreeditEvent.toFormattedText`.
     pub fn to_formatted_text(&self, focused_style: &Style) -> Text {
         if self.blocks.len() == 1 {
@@ -333,6 +346,16 @@ mod tests {
         let hidden = PreeditEvent::from_winit(text, None).unwrap();
         assert_eq!(hidden.caret_position, text.len());
         assert_eq!(hidden.blocks.len(), 1);
+    }
+
+    #[test]
+    fn obscured_composition_keeps_unicode_caret_and_selection() {
+        let mut event = PreeditEvent::from_winit("这只是测验", Some((3, 9))).unwrap();
+        event.obscure();
+        assert_eq!(event.full_text, "*****");
+        assert_eq!(event.blocks, ["*", "**", "**"]);
+        assert_eq!(event.caret_position, 1);
+        assert_eq!(event.focused_block, 1);
     }
 
     #[test]

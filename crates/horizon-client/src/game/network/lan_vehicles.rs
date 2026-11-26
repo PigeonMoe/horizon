@@ -9,10 +9,13 @@
 //! here with the rider's input (`ServerPlayer.getLastClientMoveIntent`).
 //! Sneaking gets out (`Player.rideTick`: `wantsToStopRiding`), and the client
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
-use super::{Dim, Game, Keys, lan::LanHost, minecarts::SEAT};
-use horizon_client::collisions::SceneCollisions;
-use horizon_client::lan::hub::no_blocks_in;
+use super::{Dim, Game, Keys, commands::Target, lan::LanHost, minecarts::SEAT};
+use horizon_client::lan::{
+    guest::Guest,
+    hub::{Hub, no_blocks_in},
+};
 use horizon_client::mobs::equine;
+use horizon_client::{camera::wrap_degrees, collisions::SceneCollisions};
 use horizon_core::geometry::{Aabb, Axis, Vec3};
 use horizon_protocol::{
     packets::play::{self, Clientbound as C},
@@ -50,6 +53,54 @@ pub(super) struct WatchedVehicle {
     at: [f64; 3],
     /// Ticks it has stood still.
     still: u32,
+}
+
+pub(super) struct GuestDismount {
+    player: u128,
+    entity: i32,
+    level: Dim,
+    from: Vec3,
+    landing: Option<Vec3>,
+}
+
+pub(super) enum DeferredGuestDismount {
+    /// A new seat during the admission callback clears the in-flight landing.
+    Checking,
+    Ready(GuestDismount),
+}
+
+impl GuestDismount {
+    pub(super) fn matches_guest(&self, level: Dim, rider: &Guest, position: [f64; 3]) -> bool {
+        level == self.level
+            && rider.dimension == self.level.id()
+            && rider.uuid == self.player
+            && rider.entity_id == self.entity
+            && position == self.from.components()
+            && rider.vehicle.is_none()
+            && !rider.dead
+            && rider.health > 0.0
+    }
+
+    fn destination(&self) -> Vec3 {
+        self.landing.unwrap_or(self.from)
+    }
+
+    pub(super) fn send_position(&self, hub: &mut Hub, index: usize) {
+        let at = self.destination();
+        hub.guests.update(index, |rider| {
+            if let Some(body) = rider.motion.as_mut() {
+                body.position = at;
+                if self.landing.is_none() {
+                    body.velocity = Vec3::ZERO;
+                }
+            }
+        });
+        if self.landing.is_some() {
+            hub.teleport_keeping_motion(index, at.components());
+        } else {
+            hub.teleport(index, Some(at.components()));
+        }
+    }
 }
 
 impl Game<'_> {
@@ -232,6 +283,7 @@ impl Game<'_> {
         }
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
         let boat = self.boats.iter().position(|b| b.id == vehicle);
+        let boat_seat = boat.and_then(|i| self.guest_boat_seat(i, g.entity_id as u32));
         let cart = self.carts.iter().any(|c| c.id == vehicle);
         let mount = self.mobs.iter().any(|m| m.id == vehicle);
         let cushion = self.cushions.iter().any(|c| c.id == vehicle);
@@ -271,8 +323,9 @@ impl Game<'_> {
                     .update(gi, |guest| guest.vehicle_good = value);
             }
         }
-        // Getting out goes through leave_guest, which tells the client and
-        // teleports it (ServerPlayer.dismountTo).
+        // The guest turn publishes the seat change before an ordinary boat
+        // or minecart dismount commits its landing.
+        let mut dismount = None;
         let seat = self.as_guest(conn, |game| {
             // A cushion does not move: the rider sits on it until it sneaks
             // (`Cushion.removePassenger` plays the get-up sound).
@@ -293,29 +346,150 @@ impl Game<'_> {
             }
             if let Some(i) = game.boats.iter().position(|b| Some(b.id) == game.riding) {
                 if keys.shift || ejected {
-                    game.dismount(i);
+                    dismount = game
+                        .prepare_boat_dismount(i)
+                        .and_then(|landing| game.admit_guest_dismount(landing));
                     return None;
                 }
-                let p = game.player_boat_seat(i);
-                return Some([p.x, p.y, p.z]);
+                return boat_seat.map(Vec3::components);
             }
-            // The minecart moves with the rider's input, and lets it out when
-            // it sneaks or the cart breaks. An animal takes the rider's input
-            // for its own tick (`travelRidden`), or lets it off.
-            if !game.tick_cart_riding(keys) && game.tick_mount_riding(keys) {
-                game.riding?;
-                game.position_rider();
+            if keys.shift
+                && let Some(i) = game.carts.iter().position(|c| Some(c.id) == game.riding)
+            {
+                dismount = game
+                    .prepare_cart_dismount(i)
+                    .and_then(|landing| game.admit_guest_dismount(landing));
+            } else {
+                let (cart, ejected) = game.tick_cart_riding_turn(keys);
+                dismount = ejected;
+                if !cart {
+                    let (mount, landing) = game.tick_mount_riding_turn(keys);
+                    dismount = landing;
+                    if mount {
+                        game.riding?;
+                        game.position_rider();
+                    }
+                }
             }
             game.riding?;
             let p = game.player.as_ref()?.position;
             Some([p.x, p.y, p.z])
         });
+        if let Some(dismount) = dismount {
+            self.finish_guest_dismount(conn, dismount);
+        }
         if let Some(Some(at)) = seat
             && let Some(host) = self.lan.as_mut()
         {
             host.hub.guests.update(gi, |g| {
                 g.previous_position = g.position;
                 g.position = at;
+            });
+        }
+    }
+
+    pub(super) fn admit_guest_dismount(&mut self, landing: Vec3) -> Option<GuestDismount> {
+        let rider = self.player.as_ref()?;
+        let (entity, from, level) = (rider.entity_id, rider.position, self.dim);
+        let player = horizon_client::lan::playerdata::ints_uuid(self.acting_uuid());
+        let allowed = from == landing || self.current_player_teleport_allowed(landing, "dismount");
+        // The writable callback can move, remove or remount the rider.
+        (self.dim == level
+            && self.riding.is_none()
+            && horizon_client::lan::playerdata::ints_uuid(self.acting_uuid()) == player
+            && self.player.as_ref().is_some_and(|rider| {
+                rider.entity_id == entity && rider.position == from && !rider.health.dead_or_dying()
+            }))
+        .then_some(GuestDismount {
+            player,
+            entity,
+            level,
+            from,
+            landing: allowed.then_some(landing),
+        })
+    }
+
+    /// Wait for the rider's turn to publish the unmount before sending the
+    /// landing.
+    pub(super) fn defer_guest_dismount(&mut self, landing: Vec3) {
+        self.guest_dismount = Some(DeferredGuestDismount::Checking);
+        let admitted = self.admit_guest_dismount(landing);
+        if matches!(self.guest_dismount, Some(DeferredGuestDismount::Checking)) {
+            self.guest_dismount = admitted.map(DeferredGuestDismount::Ready);
+        }
+    }
+
+    pub(super) fn finish_requested_player_dismount(&mut self, landing: Vec3) {
+        if self.lan_acting.is_some() {
+            self.defer_guest_dismount(landing);
+            return;
+        }
+        let Some(dismount) = self.admit_guest_dismount(landing) else {
+            return;
+        };
+        let at = dismount.destination();
+        if let Some(rider) = self.player.as_mut() {
+            self.previous_position = dismount.from;
+            rider.position = at;
+            rider.velocity = Vec3::ZERO;
+        }
+        let from = dismount.from.components();
+        let to = at.components();
+        if from != to {
+            if let Ok(id) = u32::try_from(dismount.entity) {
+                self.entity_section_step(id, from, to);
+            }
+            if self.riding.is_none()
+                && self.active_teleport_origin() == Some((dismount.player, dismount.level, to))
+            {
+                self.notify_player_position(
+                    dismount.player,
+                    (dismount.level, from),
+                    (dismount.level, to),
+                );
+            }
+        }
+    }
+
+    /// The guest turn has detached the seat. Send its separately cancellable
+    /// `ServerPlayer.dismountTo` position packet after the passenger update.
+    fn finish_guest_dismount(&mut self, conn: u32, dismount: GuestDismount) {
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        let Some(index) = host.hub.guests.connection_index(conn) else {
+            return;
+        };
+        let rider = &host.hub.guests[index];
+        if !dismount.matches_guest(self.dim, rider, rider.position) {
+            return;
+        }
+        dismount.send_position(&mut host.hub, index);
+        self.report_guest_dismount(conn, dismount);
+    }
+
+    pub(super) fn report_guest_dismount(&mut self, conn: u32, dismount: GuestDismount) {
+        let at = dismount.destination();
+        if at == dismount.from {
+            return;
+        }
+        if let Ok(id) = u32::try_from(dismount.entity) {
+            self.entity_section_step(id, dismount.from.components(), at.components());
+        }
+        if self.player_position_listened() {
+            self.as_guest(conn, |game| {
+                if game.dim == dismount.level
+                    && game.riding.is_none()
+                    && game.player.as_ref().is_some_and(|rider| {
+                        rider.entity_id == dismount.entity && rider.position == at
+                    })
+                {
+                    game.notify_player_position(
+                        dismount.player,
+                        (dismount.level, dismount.from.components()),
+                        (dismount.level, at.components()),
+                    );
+                }
             });
         }
     }
@@ -332,6 +506,7 @@ impl Game<'_> {
         let Some(vehicle) = host.hub.guests[gi].vehicle else {
             return;
         };
+        let rider = host.hub.guests[gi].entity_id as u32;
         if before == Some(vehicle) {
             return;
         }
@@ -347,7 +522,7 @@ impl Game<'_> {
             .boats
             .iter()
             .position(|b| b.id == vehicle)
-            .map(|i| (self.boats[i].position, self.player_boat_seat(i)))
+            .and_then(|i| Some((self.boats[i].position, self.guest_boat_seat(i, rider)?)))
             .or_else(|| {
                 self.carts
                     .iter()
@@ -396,12 +571,6 @@ impl Game<'_> {
     /// moved too quickly or wrongly; then it stays, and the client is told
     /// where it is.
     pub(super) fn guest_move_vehicle(&mut self, conn: u32, p: &play::MoveVehicleRequest) {
-        let controls_vehicle = self
-            .lan
-            .as_ref()
-            .and_then(|host| host.hub.guest(conn))
-            .and_then(|g| g.vehicle)
-            .is_none_or(|v| self.guest_controls_vehicle(conn, v));
         let Some(host) = self.lan.as_ref() else {
             return;
         };
@@ -417,18 +586,25 @@ impl Game<'_> {
             return;
         }
         let g = &host.hub.guests[gi];
-        if g.awaiting_teleport.is_some() || !g.client_loaded() {
+        if g.landing || g.awaiting_teleport.is_some() || !g.client_loaded() {
             return;
         }
-        // Only the vehicle's controlling passenger moves it: the move of a
-        // player in a boat's second seat is ignored (#11541).
-        if !controls_vehicle {
+        let Some(vehicle) = g.vehicle else {
+            return;
+        };
+        // The root vehicle must be driven by this player. A camel carried by
+        // a boat cannot move independently, even with the player on its saddle.
+        // A player in a boat's second seat cannot move it either (#11541).
+        if self.native_root_vehicle_id(vehicle, Target::Mob(vehicle)) != Some(vehicle)
+            || !self.guest_controls_vehicle(conn, vehicle)
+        {
             return;
         }
         let player = g.uuid;
+        let rider = g.entity_id as u32;
         let owner = host.hub.singleplayer_owner == Some(player);
         let allow_flight = host.hub.config.allow_flight;
-        let (vehicle, good) = (g.vehicle, g.vehicle_good);
+        let good = g.vehicle_good;
         let back = |host: &mut LanHost, position: Vec3, yaw: f32| {
             let packet = play::MoveVehicle {
                 position: [position.x, position.y, position.z],
@@ -440,12 +616,11 @@ impl Game<'_> {
         // Only a boat, and a horse its rider's client moves, are driven by
         // their rider (getControllingPassenger); a minecart that is elsewhere
         // on the client is put back.
-        let boat = vehicle.and_then(|v| self.boats.iter().position(|b| b.id == v));
-        let mount = vehicle.and_then(|v| {
-            self.mobs
-                .iter()
-                .position(|m| m.id == v && equine::moved_by_client(m))
-        });
+        let boat = self.boats.iter().position(|b| b.id == vehicle);
+        let mount = self
+            .mobs
+            .iter()
+            .position(|m| m.id == vehicle && equine::moved_by_client(m));
         // The vehicle's id, kind, position, rotation, motion, box, step height
         // and ground.
         let (id, old, yaw, velocity, bounds, step, on_ground) = if let Some(i) = boat {
@@ -472,7 +647,7 @@ impl Game<'_> {
                 m.on_ground,
             )
         } else {
-            if let Some(c) = vehicle.and_then(|v| self.carts.iter().find(|c| c.id == v))
+            if let Some(c) = self.carts.iter().find(|c| c.id == vehicle)
                 && c.position.distance_squared(Vec3::new(x, y, z)) > 1.0
             {
                 back(self.lan.as_mut().unwrap(), c.position, c.yaw);
@@ -580,7 +755,28 @@ impl Game<'_> {
                 return;
             }
         }
-        if !self.ridden_vehicle_packet_allowed(id, old, target, boat.map(|_| player)) {
+        let driver_move = if self.ridden_move_listened() {
+            self.lan.as_mut().unwrap().hub.guests.update(gi, |guest| {
+                guest.record_paper_move(
+                    target.components(),
+                    [wrap_degrees(p.yaw), wrap_degrees(p.pitch)],
+                )
+            })
+        } else {
+            None
+        };
+        if !self.ridden_vehicle_packet_allowed(
+            id,
+            old,
+            target,
+            player,
+            driver_move.map(|(from, _)| from),
+        ) {
+            if let Some((from, rotation)) = driver_move {
+                self.lan.as_mut().unwrap().hub.guests.update(gi, |guest| {
+                    guest.reset_paper_move_pose(from, rotation);
+                });
+            }
             if let Some(i) = mount {
                 self.mobs[i].velocity = Vec3::ZERO;
             } else if let Some(i) = boat {
@@ -650,6 +846,7 @@ impl Game<'_> {
                 std::panic::resume_unwind(panic);
             }
             self.mobs[i] = m;
+            self.notify_vehicle_driver_move(conn, player, old, target);
             // propagateFallToPassengers reaches the guests through `host`: it is out
             // of `self.lan` while their packet is handled.
             let falls: Vec<(u32, f64, f32)> = events
@@ -725,14 +922,27 @@ impl Game<'_> {
             self.boat_fall(&self.boats[i], resolved.y)
         };
         self.boats.update(i, |b| b.fall_distance = fall);
-        let seat = self.player_boat_seat(i);
-        let Some(host) = self.lan.as_mut() else {
-            return;
-        };
-        host.hub.guests.update(gi, |g| {
-            g.previous_position = g.position;
-            g.position = [seat.x, seat.y, seat.z];
-        });
+        if let Some(seat) = self.guest_boat_seat(i, rider)
+            && let Some(host) = self.lan.as_mut()
+        {
+            host.hub.guests.update(gi, |g| {
+                g.previous_position = g.position;
+                g.position = seat.components();
+            });
+        }
+        self.notify_vehicle_driver_move(conn, player, old, target);
+    }
+
+    fn notify_vehicle_driver_move(&mut self, conn: u32, player: u128, from: Vec3, to: Vec3) {
+        if from != to && self.player_position_listened() {
+            self.as_guest(conn, |game| {
+                game.notify_player_position(
+                    player,
+                    (game.dim, [from.x, from.y, from.z]),
+                    (game.dim, [to.x, to.y, to.z]),
+                );
+            });
+        }
     }
 
     /// `Entity.getControllingPassenger` of a vehicle a server player rides: a
@@ -853,7 +1063,8 @@ mod controller_tests {
     /// (`getControllingPassenger`), whichever joined the server first. Its
     /// client hears it sits first, and only its moves count; the second
     /// seat's client, which still sends where it sees the boat, used to put
-    /// the boat back every tick (#11541).
+    /// the boat back every tick (#11541). Both server bodies follow distinct
+    /// attachment points even though their guest rows are in the opposite order.
     #[test]
     #[ignore = "daily"]
     fn the_first_rider_in_drives_the_boat() {
@@ -975,6 +1186,16 @@ mod controller_tests {
             on_ground: true,
         };
         game.lan = Some(host);
+        game.guest_boarded(2, None);
+        let rider_position =
+            |game: &Game<'_>, conn| game.lan.as_ref().unwrap().hub.guest(conn).unwrap().position;
+        let rear = f64::from(-0.6_f32);
+        let front = f64::from(0.2_f32);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        game.guest_vehicle_tick(2);
+        game.guest_vehicle_tick(3);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        assert_eq!(rider_position(&game, 3)[2], start.z + front);
         game.guest_move_vehicle(2, &move_to(start.x + 0.3));
         assert_eq!(
             game.boats[0].position, start,
@@ -986,6 +1207,10 @@ mod controller_tests {
             "the driver moves the boat: {:?}",
             game.boats[0].position
         );
+        game.guest_vehicle_tick(2);
+        assert_eq!(rider_position(&game, 2)[0], start.x + 0.3);
+        assert_eq!(rider_position(&game, 2)[2], start.z + rear);
+        assert_eq!(rider_position(&game, 3)[2], start.z + front);
         // handleMoveVehicle's `vehicle.move` runs AbstractBoat.checkFallDamage:
         // a boat that lands on the ground (a fall loaded from its save, here)
         // has no fall left.

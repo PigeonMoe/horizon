@@ -215,7 +215,10 @@ impl Game<'_> {
         let Some(id) = registry.id(&state) else {
             return;
         };
-        if self.level_set(pos, id).is_err() {
+        // Paper asks after rolling the pose, before placing the statue,
+        // dropping equipment, breaking the leash or removing the golem.
+        if !self.mob_block_change_allowed(m.id, &m.kind.id, pos) || self.level_set(pos, id).is_err()
+        {
             return;
         }
         // `createStatue`: the golem's custom name goes into the statue's components.

@@ -1,4 +1,7 @@
 pub use horizon_core::random::LegacyRandom;
+pub use horizon_core::java_number::{
+    double_to_string as java_double_to_string, float_to_string as java_float_to_string,
+};
 pub use horizon_core::{
     game_mode::GameMode, geometry::Direction, position::BlockPos, random::RandomSource,
 };

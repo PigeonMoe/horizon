@@ -94,6 +94,110 @@ fn a_painting_turns_only_to_a_horizontal_direction() {
 
 #[test]
 #[ignore = "daily"]
+fn painting_protection_uses_its_centre_on_both_sides_of_a_claim_boundary() {
+    use horizon_client::{chunk::Chunk, items::ItemStack};
+    use mod_api::{Flow, HangingBreakEvent, HangingPlaceEvent, Hooks, ServerHost};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    const ANCHOR: [i32; 3] = [4, 64, 6];
+    const CENTRE: [i32; 3] = [5, 65, 6];
+    const GUEST: u32 = 12;
+
+    struct Claim(Arc<AtomicBool>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Claim {
+        fn hanging_place(&self, _: &mut dyn ServerHost, event: &mut HangingPlaceEvent<'_>) -> Flow {
+            assert_eq!(event.player, u128::from(GUEST));
+            assert_eq!(event.kind, "minecraft:painting");
+            assert_eq!(event.pos, CENTRE);
+            self.protect(event.pos)
+        }
+
+        fn hanging_break(&self, _: &mut dyn ServerHost, event: &mut HangingBreakEvent<'_>) -> Flow {
+            assert_eq!(event.kind, "minecraft:painting");
+            assert_eq!(event.pos, CENTRE);
+            self.protect(event.pos)
+        }
+    }
+
+    impl Claim {
+        fn protect(&self, pos: [i32; 3]) -> Flow {
+            if pos[1] >= CENTRE[1] && self.0.load(Ordering::Relaxed) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    let protected = Arc::new(AtomicBool::new(true));
+    let mods = vec![mod_api::ModEntry::new(
+        "painting_boundary",
+        Box::new(Claim(protected.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        super::native_guest_turn_tests::with_guests(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            for x in 4..=5 {
+                for y in 64..=65 {
+                    game.world.set(x, y, 5, stone).unwrap();
+                }
+            }
+
+            // A south-facing 2×2 painting is centred one cell above the clicked anchor.
+            let variant = game.painting_variants.get("minecraft:match").unwrap();
+            assert_eq!((variant.width, variant.height), (2, 2));
+            game.painting_variants.placeable = vec![variant.id.clone()];
+            let painting = ItemStack::new("minecraft:painting", 2);
+            let hit = super::Hit {
+                pos: [4, 64, 5],
+                face: [0, 0, 1],
+                point: [4.5, 64.5, 6.0],
+                inside: false,
+            };
+
+            game.as_guest(GUEST, |game| {
+                *game.held_mut() = Some(painting.clone());
+                assert!(game.place_painting(&hit, &painting));
+                assert!(game.use_failed);
+                assert!(game.paintings.is_empty());
+                assert_eq!(game.held().unwrap().count, 2);
+
+                protected.store(false, Ordering::Relaxed);
+                assert!(game.place_painting(&hit, &painting));
+                assert_eq!(game.paintings[0].pos, ANCHOR);
+                assert_eq!(game.held().unwrap().count, 1);
+
+                protected.store(true, Ordering::Relaxed);
+                assert!(!game.break_painting(0, true));
+            })
+            .unwrap();
+            assert!(!game.discard_painting(0));
+            assert_eq!(game.paintings[0].pos, ANCHOR);
+
+            protected.store(false, Ordering::Relaxed);
+            assert!(game.discard_painting(0));
+            assert!(game.paintings.is_empty());
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_frames_item_turns_with_vanillas_wrap_and_other_kinds_are_refused() {
     with_hanging(|game| {
         let frame = game.entity(FRAME).expect("the frame's handle");

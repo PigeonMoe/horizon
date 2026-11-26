@@ -58,6 +58,22 @@ extern crate self as mod_api;
 mod equip_reads;
 
 pub use mod_vocab::*;
+
+/// Writes an informational message to the game's log from a mod callback.
+///
+/// Both native and WebAssembly mods can use this function. The WebAssembly
+/// runtime identifies the calling mod when forwarding the message.
+pub fn log_info(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut args = wire::Writer::new();
+        args.put(&message);
+        let _ = wire::guest::host(wire::HOST_LOG_INFO, args);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    log::info!("{message}");
+}
+
 /// Shared Wire values and the mod-side transport.
 pub mod wire {
     pub use mod_vocab::wire::*;

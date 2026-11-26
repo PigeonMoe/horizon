@@ -641,12 +641,18 @@ impl Game<'_> {
             .collect()
     }
 
-    /// `Entity.teleportCrossDimension`: pair each serialized node with that
-    /// exact object's runtime ownership in one walk, never by UUID or Vec order.
+    /// `Entity.teleportCrossDimension`: put every node in the serialized plan
+    /// before taking any object's runtime ownership. A rider without a
+    /// supported transfer record leaves every source object's runtime state in place.
     pub(in crate::game) fn take_vehicle_tree_transfer(
         &mut self,
         root: u32,
     ) -> Option<(Tag, TransferredVehicleTree)> {
+        let (tag, plan) = self.capture_vehicle_transfer_plan(root)?;
+        Some((tag, self.take_vehicle_transfer_state(plan)))
+    }
+
+    fn capture_vehicle_transfer_plan(&mut self, root: u32) -> Option<(Tag, VehicleTransferPlan)> {
         let (kind, mut tag) = if let Some(object) = self.mob_object_slot(root) {
             (VehicleTreeKind::Mob, self.mob_object_nbt(object))
         } else if self.boat_object(root).is_some() {
@@ -674,9 +680,9 @@ impl Game<'_> {
         for slot in self.ordered_passenger_slots(root) {
             match slot {
                 PassengerSlot::Live(id) => {
-                    let (tag, state) = self.take_vehicle_tree_transfer(id)?;
+                    let (tag, plan) = self.capture_vehicle_transfer_plan(id)?;
                     tags.push(tag);
-                    passengers.push(Some(state));
+                    passengers.push(Some(plan));
                 }
                 PassengerSlot::Saved(tag) => {
                     tags.push(tag);
@@ -687,14 +693,29 @@ impl Game<'_> {
         add_passengers(&mut tag, tags);
         Some((
             tag,
-            TransferredVehicleTree {
+            VehicleTransferTree {
                 source_id: root,
                 kind,
                 name,
-                state: self.take_transferred_entity_state(root),
+                state: (),
                 passengers,
             },
         ))
+    }
+
+    fn take_vehicle_transfer_state(&mut self, plan: VehicleTransferPlan) -> TransferredVehicleTree {
+        let passengers = plan
+            .passengers
+            .into_iter()
+            .map(|child| child.map(|child| self.take_vehicle_transfer_state(child)))
+            .collect();
+        VehicleTransferTree {
+            source_id: plan.source_id,
+            kind: plan.kind,
+            name: plan.name,
+            state: self.take_transferred_entity_state(plan.source_id),
+            passengers,
+        }
     }
 
     pub(super) fn prepare_vehicle_transfer(

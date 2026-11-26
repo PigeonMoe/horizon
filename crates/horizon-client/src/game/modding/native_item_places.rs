@@ -281,6 +281,9 @@ impl Game<'_> {
         let Some(player) = self.place_player(place) else {
             return 0;
         };
+        if self.player_frozen_handover(player).is_some() {
+            return 0;
+        }
         let mut went = 0;
         self.native_as_player(player, |g| {
             if g.player_place(place).is_none() {
@@ -412,6 +415,9 @@ impl Game<'_> {
         let Some(player) = self.place_player(place) else {
             return 0;
         };
+        if self.player_frozen_handover(player).is_some() {
+            return 0;
+        }
         let mut took = 0;
         self.native_as_player(player, |g| {
             let creative = g.creative && matches!(place, ItemPlace::PlayerHand { .. });

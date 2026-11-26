@@ -570,6 +570,9 @@ impl Game<'_> {
             loaded.previous = loaded.position;
             stand = loaded;
         }
+        if self.entity_item_place_cancelled("minecraft:armor_stand", stand.position, None) {
+            return true;
+        }
         if let horizon_core::nbt::Tag::Compound(map) = &mut raw {
             map.remove(&"UUID".into());
         }

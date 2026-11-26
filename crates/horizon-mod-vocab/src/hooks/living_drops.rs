@@ -45,6 +45,21 @@ pub trait Hooks {
         drops: &mut Vec<ItemDrop>,
         cancel: &mut bool,
     );
+    /// A mob's whole drop list survived `living_drops` and is about to spawn.
+    /// Append new mob death stacks to `bonus_drops`. They spawn at the mob's
+    /// feet with default pickup delay and independent item-entity motion.
+    /// `credited_player` is the remembered killing player. `can_pick_up_loot`
+    /// and `protected_drops` are the dying mob's state after rolling its equipment
+    /// drops. The latter includes the remaining hand and armor stacks and a
+    /// chested equine's attached chest and storage contents.
+    /// The event does not run for players, armor stands or canceled drop lists.
+    #[hook(
+        side = "server",
+        contract = "collect",
+        out = "bonus_drops",
+        paper = "EntityDeathEvent (collected mob drops and corpse state)"
+    )]
+    fn mob_death_bonus_drops();
     /// A dying mob `entity` of `kind` is about to roll its drop chance for
     /// the item `stack` in `slot` (`Mob.dropCustomDeathLoot`, NeoForge's
     /// `GetEquipmentDropChanceEvent`). `original_chance` is

@@ -17,6 +17,10 @@ use horizon_client::{lan::hub::TickCtx, world_spawn::PlayerSpawnFinder};
 use horizon_core::{geometry::Vec3, position::BlockPos};
 use horizon_protocol::packets::play::{self, Clientbound as C};
 
+#[path = "server_travel/hull_portal.rs"]
+mod hull_portal;
+pub(super) use hull_portal::PortalHullTrip;
+
 /// Why an entity changes level (`entity_travel_to_dimension`'s `cause`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TravelCause {
@@ -50,14 +54,14 @@ impl TravelCause {
 
 /// A player stays in the source until a subscribed teleport hook approves
 /// the resolved destination. Preserve that source while destination chunks load.
-#[derive(Clone, Copy)]
-struct PortalOrigin {
-    uuid: u128,
-    position: [f64; 3],
-    vehicle: Option<u32>,
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct PlayerTravelOrigin {
+    pub uuid: u128,
+    pub position: [f64; 3],
+    pub vehicle: Option<u32>,
 }
 
-impl PortalOrigin {
+impl PlayerTravelOrigin {
     fn capture(guest: &horizon_client::lan::guest::Guest) -> Self {
         Self {
             uuid: guest.uuid,
@@ -87,7 +91,10 @@ pub(super) struct Trip {
     target: Vec3,
     /// Through an End portal.
     end: bool,
-    origin: Option<PortalOrigin>,
+    origin: Option<PlayerTravelOrigin>,
+    /// An actual portal traveller's source feet position for observers,
+    /// independent of whether a mod subscribed to the veto hook.
+    notify_from: Option<[f64; 3]>,
     /// The Nether portal plan, whose exit is found or built on arrival.
     plan: Option<Plan>,
     /// The vehicle the player rides, which travels with it
@@ -243,8 +250,16 @@ pub(super) struct LevelTeleport {
     pub dim: Dim,
     pub at: [f64; 3],
     pub rotation: Option<[f32; 2]>,
+    /// Whether this was a teleport, so the committed-position hook is told.
+    pub notify_position: bool,
     /// `TeleportTransition.asPassenger`: the vehicle already moved with its tree.
-    pub vehicle: Option<u32>,
+    pub vehicle: Option<LevelTeleportPassenger>,
+}
+
+pub(super) struct LevelTeleportPassenger {
+    pub mount: u32,
+    /// A command's rider left its old seat before its teleport was admitted.
+    pub origin: Option<(Dim, PlayerTravelOrigin)>,
 }
 
 /// A teleport a command made inside a level: told to the mods once it has
@@ -308,6 +323,7 @@ impl Game<'_> {
             target,
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -359,6 +375,7 @@ impl Game<'_> {
                 .server_trips
                 .iter()
                 .any(|t| t.is(conn) && t.holds_movement())
+                || self.portal_hull_trips.iter().any(|trip| trip.holds(g))
             {
                 continue;
             }
@@ -378,6 +395,11 @@ impl Game<'_> {
     /// alone until it arrives.
     pub(super) fn on_server_trip(&self, conn: u32) -> bool {
         self.server_trips.iter().any(|t| t.conn == conn)
+            || self
+                .lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .is_some_and(|guest| self.portal_hull_trips.iter().any(|trip| trip.holds(guest)))
     }
 
     /// Whether a vehicle waits in `dim` for its rider to arrive elsewhere:
@@ -386,6 +408,7 @@ impl Game<'_> {
         self.server_trips
             .iter()
             .any(|t| t.vehicle.is_some() && t.source == dim)
+            || self.portal_hull_trips.iter().any(|trip| trip.source == dim)
     }
 
     /// Per server tick in each level, after the guests' own: the arrivals of
@@ -581,7 +604,24 @@ impl Game<'_> {
     /// id its handle names) may travel to the level `to`, asked before
     /// anything of it moves. Only a server asks, and only when a mod listens.
     pub(super) fn entity_may_travel(&mut self, id: u32, to: Dim, cause: TravelCause) -> bool {
-        self.entity_tree_may_travel(id, to, cause, &mut Vec::new())
+        self.entity_tree_may_travel(id, to, cause, false, &mut Vec::new())
+    }
+
+    /// A vehicle command admits its players once their precise destination and
+    /// the structural tree's viability are known. Keep them on their own
+    /// mounts through this entity-level walk.
+    pub(super) fn command_vehicle_entities_may_travel(&mut self, id: u32, to: Dim) -> bool {
+        self.entity_tree_may_travel(id, to, TravelCause::Teleport, true, &mut Vec::new())
+    }
+
+    pub(super) fn entity_travel_hook_epoch(&self) -> Option<mod_api::WorldEpoch> {
+        if self.native_authoritative()
+            && mod_api::__private::listened(mod_api::HookId::EntityTravelToDimension)
+        {
+            self.native_lifecycle.epoch()
+        } else {
+            None
+        }
     }
 
     fn entity_tree_may_travel(
@@ -589,14 +629,10 @@ impl Game<'_> {
         id: u32,
         to: Dim,
         cause: TravelCause,
+        defer_players: bool,
         visited: &mut Vec<u32>,
     ) -> bool {
-        if !self.native_authoritative()
-            || !mod_api::__private::listened(mod_api::HookId::EntityTravelToDimension)
-        {
-            return true;
-        }
-        let Some(epoch) = self.native_lifecycle.epoch() else {
+        let Some(epoch) = self.entity_travel_hook_epoch() else {
             return true;
         };
         if visited.contains(&id)
@@ -611,7 +647,16 @@ impl Game<'_> {
         // A callback can reparent a participant into a later subtree.
         // Keep the whole transition's visited set, not only its active path.
         visited.push(id);
-        let riders = self.entity_passengers(entity).unwrap_or_default();
+        let mut riders = self.entity_passengers(entity).unwrap_or_default();
+        if defer_players {
+            use super::commands::Target;
+            riders.retain(|&rider| {
+                !matches!(
+                    self.native_entity_target(rider),
+                    Some(Target::Player | Target::Guest(_))
+                )
+            });
+        }
         let mut cancel = false;
         self.native_entity_travel_to_dimension(
             mod_api::EntityRef::new(epoch, id),
@@ -641,7 +686,9 @@ impl Game<'_> {
             if self.entity_vehicle(rider) != Some(entity) {
                 continue;
             }
-            if !self.entity_stop_riding(rider) && self.entity_vehicle(rider) == Some(entity) {
+            if !self.entity_stop_riding_for_travel(rider)
+                && self.entity_vehicle(rider) == Some(entity)
+            {
                 return false;
             }
         }
@@ -649,7 +696,7 @@ impl Game<'_> {
             .into_iter()
             .filter(|rider| {
                 self.entity_is_passenger(*rider) == Some(false)
-                    && self.entity_tree_may_travel(rider.id(), to, cause, visited)
+                    && self.entity_tree_may_travel(rider.id(), to, cause, defer_players, visited)
             })
             .collect();
         for rider in accepted {
@@ -673,6 +720,9 @@ impl Game<'_> {
         let Some(g) = host.hub.guest(conn) else {
             return;
         };
+        if g.profile_source_parked() {
+            return;
+        }
         let (at, invulnerable, sleeping, riding) = (
             Vec3::new(g.position[0], g.position[1], g.position[2]),
             g.creative(),
@@ -859,18 +909,24 @@ impl Game<'_> {
                 })
                 .map(|g| g.conn)
                 .collect();
-            // Entity.canTeleport: out of the End, every rider has seen the
-            // credits.
+            // Entity.canTeleport checks direct player passengers on an End to
+            // Overworld trip. Descendants cross through the passenger transition.
             if plan.end
                 && self.dim == Dim::End
-                && riders
+                && plan.dim == Dim::Overworld
+                && host
+                    .hub
+                    .guests
                     .iter()
-                    .any(|c| !host.hub.guest(*c).is_some_and(|g| g.seen_credits))
+                    .any(|guest| guest.vehicle == Some(vehicle) && !guest.seen_credits)
             {
                 continue;
             }
             // Refused passengers are detached and stay in the source level.
             let cause = TravelCause::of_plan(&plan);
+            if self.schedule_portal_hull(vehicle, plan, &riders) {
+                continue;
+            }
             if !self.entity_may_travel(vehicle, plan.dim, cause) {
                 continue;
             }
@@ -924,9 +980,14 @@ impl Game<'_> {
         let Some(g) = self.lan.as_ref().and_then(|host| host.hub.guest(conn)) else {
             return;
         };
+        if g.profile_source_parked() {
+            return;
+        }
         let origin = (!credits_respawn && self.subscribed_portal_teleport())
-            .then(|| PortalOrigin::capture(g));
+            .then(|| PlayerTravelOrigin::capture(g));
         let from = Vec3::new(g.position[0], g.position[1], g.position[2]);
+        let notify_from =
+            (!credits_respawn && self.player_position_listened()).then_some(g.position);
         let yaw = g.yaw;
         // The vehicle the player rides travels with it: the player is its
         // passenger, and the vehicle is recreated in the other dimension,
@@ -981,7 +1042,7 @@ impl Game<'_> {
             None => scaled,
         };
         if origin.is_none() {
-            self.place_portal_guest(conn, source, from, destination, yaw, credits_respawn);
+            self.place_portal_guest(conn, source, from, destination, yaw, None, credits_respawn);
         } else if let Some(host) = self.lan.as_mut() {
             host.hub.guests.update_connection(conn, |guest| {
                 guest.landing = true;
@@ -995,6 +1056,7 @@ impl Game<'_> {
             target: destination,
             end,
             origin,
+            notify_from,
             plan,
             vehicle,
             gateway: None,
@@ -1019,6 +1081,7 @@ impl Game<'_> {
         from: Vec3,
         destination: Vec3,
         yaw: f32,
+        pitch: Option<f32>,
         credits_respawn: bool,
     ) {
         let Some(i) = self.guest_index(conn) else {
@@ -1037,7 +1100,7 @@ impl Game<'_> {
         // Entity.handlePortal set before the teleport.
         if let Some(host) = self.lan.as_mut() {
             host.hub
-                .change_level(i, at, yaw, None, true, PLAYER_DELAY, &ctx);
+                .change_level(i, at, yaw, pitch, true, PLAYER_DELAY, &ctx);
         }
         if credits_respawn && let Some(host) = self.lan.as_mut() {
             host.hub.guests.update(i, |g| {
@@ -1069,24 +1132,25 @@ impl Game<'_> {
             && mod_api::__private::listened(mod_api::HookId::PlayerTeleportPre)
     }
 
+    fn still_at_portal_origin(&self, conn: u32, origin: PlayerTravelOrigin, source: Dim) -> bool {
+        !self.on_server_trip(conn)
+            && self
+                .lan
+                .as_ref()
+                .and_then(|host| host.hub.guest(conn))
+                .is_some_and(|guest| origin.matches(guest, source))
+    }
+
     fn admit_portal_destination(
         &mut self,
         conn: u32,
-        origin: PortalOrigin,
+        origin: PlayerTravelOrigin,
         source: Dim,
         position: Vec3,
         cause: TravelCause,
     ) -> bool {
         let destination = self.dim;
-        let still_at_source = |game: &Self| {
-            !game.on_server_trip(conn)
-                && game
-                    .lan
-                    .as_ref()
-                    .and_then(|host| host.hub.guest(conn))
-                    .is_some_and(|guest| origin.matches(guest, source))
-        };
-        still_at_source(self)
+        self.still_at_portal_origin(conn, origin, source)
             && self.player_teleport_allowed(
                 origin.uuid,
                 (source, origin.position),
@@ -1094,7 +1158,24 @@ impl Game<'_> {
                 cause.id(),
             )
             && self.dim == destination
-            && still_at_source(self)
+            && self.still_at_portal_origin(conn, origin, source)
+    }
+
+    fn portal_hull_pose(&self, vehicle: u32) -> Option<(Vec3, f32)> {
+        use super::commands::Target;
+        match self.native_entity_target(self.entity(vehicle)?)? {
+            Target::Boat(id) => self
+                .boats
+                .iter()
+                .find(|boat| boat.id == id)
+                .map(|boat| (boat.position, boat.yaw)),
+            Target::Cart(id) => self
+                .carts
+                .iter()
+                .find(|cart| cart.id == id)
+                .map(|cart| (cart.position, cart.yaw)),
+            _ => None,
+        }
     }
 
     fn cool_down_refused_portal(&mut self, conn: u32) {
@@ -1111,6 +1192,11 @@ impl Game<'_> {
             .iter()
             .filter(move |trip| trip.origin.is_some() && trip.dim == dim)
             .map(|trip| Self::chunk_of(trip.target))
+            .chain(
+                self.portal_hull_trips
+                    .iter()
+                    .filter_map(move |trip| trip.pending_chunk(dim)),
+            )
     }
 
     /// A respawned player waits at its point outside the Overworld for the
@@ -1124,6 +1210,7 @@ impl Game<'_> {
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1197,6 +1284,7 @@ impl Game<'_> {
             target: Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
             end: false,
             origin: None,
+            notify_from: None,
             plan: None,
             vehicle: None,
             gateway: None,
@@ -1223,6 +1311,7 @@ impl Game<'_> {
             dim: Dim::Overworld,
             at,
             rotation: None,
+            notify_position: false,
             vehicle: None,
         });
         self.run_level_teleports();
@@ -1244,7 +1333,10 @@ impl Game<'_> {
         let (job, destination) = self.gateway_job(gateway);
         let origin = self
             .subscribed_portal_teleport()
-            .then(|| PortalOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
+            .then(|| PlayerTravelOrigin::capture(&self.lan.as_ref().unwrap().hub.guests[i]));
+        let notify_from = self
+            .player_position_listened()
+            .then(|| self.lan.as_ref().unwrap().hub.guests[i].position);
         let exact = matches!(job, GatewayJob::Known { exact: true, .. });
         if origin.is_none() || exact {
             if let Some(origin) = origin
@@ -1267,6 +1359,7 @@ impl Game<'_> {
             }
         }
         if exact {
+            self.notify_portal_arrival(conn, self.dim, notify_from, destination);
             return;
         }
         self.server_trips.push(Trip {
@@ -1276,6 +1369,7 @@ impl Game<'_> {
             target: destination,
             end: false,
             origin,
+            notify_from,
             plan: None,
             vehicle: None,
             gateway: Some(job),
@@ -1290,11 +1384,25 @@ impl Game<'_> {
         });
     }
 
+    fn notify_portal_arrival(&mut self, conn: u32, source: Dim, from: Option<[f64; 3]>, at: Vec3) {
+        let Some(from) = from else { return };
+        self.as_guest(conn, |game| {
+            if let Some(player) = game.native_acting_player() {
+                game.notify_player_position(
+                    player.uuid(),
+                    (source, from),
+                    (game.dim, [at.x, at.y, at.z]),
+                );
+            }
+        });
+    }
+
     /// The trips into the level in place whose destination has loaded
     /// around their target: the exit (the Nether portal found or built, the
     /// End platform, the Overworld's spawn column) and the teleport there.
     fn arrive_server_trips(&mut self) {
         self.follow_command_arrivals();
+        self.arrive_portal_hulls();
         let mut k = 0;
         while k < self.server_trips.len() {
             let trip = &self.server_trips[k];
@@ -1552,6 +1660,7 @@ impl Game<'_> {
                         host.hub
                             .teleport_keeping_motion(i, [position.x, position.y, position.z]);
                     }
+                    self.notify_portal_arrival(trip.conn, trip.source, trip.notify_from, position);
                     continue;
                 }
                 let [x, y, z] = origin.position;
@@ -1561,6 +1670,7 @@ impl Game<'_> {
                     Vec3::new(x, y, z),
                     position,
                     yaw,
+                    None,
                     false,
                 );
                 if trip.missing.is_some()
@@ -1633,6 +1743,7 @@ impl Game<'_> {
             } else {
                 host.hub.teleport(i, Some(at));
             }
+            self.notify_portal_arrival(trip.conn, trip.source, trip.notify_from, position);
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
         }
         self.release_held_arrivals();
@@ -1729,9 +1840,13 @@ impl Game<'_> {
             } = note;
             // In place when it is their turn already (as_guest finds them swapped in).
             if self.lan_acting == Some(conn) {
+                let level = Dim::from_id(&dimension);
+                self.notify_player_position(uuid, (level, from), (level, to));
                 self.native_player_teleported(uuid, &name, from, to, &dimension);
             } else {
                 self.as_guest(conn, |g| {
+                    let level = Dim::from_id(&dimension);
+                    g.notify_player_position(uuid, (level, from), (level, to));
                     g.native_player_teleported(uuid, &name, from, to, &dimension);
                 });
             }
@@ -1747,15 +1862,20 @@ impl Game<'_> {
             return;
         }
         for t in std::mem::take(&mut self.level_teleports) {
-            let Some(host) = self.lan.as_mut() else {
+            let Some(host) = self.lan.as_ref() else {
                 return;
             };
             let Some(i) = host.hub.guests.iter().position(|g| g.conn == t.conn) else {
                 continue;
             };
+            if let Some((source, origin)) = t.vehicle.as_ref().and_then(|rider| rider.origin)
+                && (!origin.matches(&host.hub.guests[i], source) || self.on_server_trip(t.conn))
+            {
+                continue;
+            }
             let source = self.dim;
             if t.dim != source {
-                drop_hook(host, t.conn);
+                drop_hook(self.lan.as_mut().unwrap(), t.conn);
             }
             if let Err(e) = self.enter_level(t.dim) {
                 log::error!("could not open {}: {e}", t.dim.id());
@@ -1764,7 +1884,12 @@ impl Game<'_> {
             let Some(host) = self.lan.as_mut() else {
                 return;
             };
-            let (uuid, name) = (host.hub.guests[i].uuid, host.hub.guests[i].name.clone());
+            let guest = &host.hub.guests[i];
+            let (uuid, name, player_source) = (
+                guest.uuid,
+                guest.name.clone(),
+                Dim::from_id(&guest.dimension),
+            );
             let (yaw, pitch, origin, passenger_body) = host.hub.guests.update(i, |g| {
                 let [yaw, pitch] = t.rotation.unwrap_or([g.yaw, g.pitch]);
                 let origin = g.position;
@@ -1784,7 +1909,7 @@ impl Game<'_> {
                 host.hub
                     .change_level(i, t.at, yaw, Some(pitch), false, cooldown, &ctx);
                 host.hub.guests.update(i, |g| {
-                    g.vehicle = t.vehicle;
+                    g.vehicle = t.vehicle.map(|rider| rider.mount);
                     if let Some(mut body) = passenger_body {
                         body.position = Vec3::new(t.at[0], t.at[1], t.at[2]);
                         g.motion = Some(body);
@@ -1794,6 +1919,9 @@ impl Game<'_> {
             self.bind_player_attachments(t.conn, false);
             self.as_guest(t.conn, |g| {
                 g.trigger_dimension(source, t.dim, origin);
+                if t.notify_position {
+                    g.notify_player_position(uuid, (player_source, origin), (t.dim, t.at));
+                }
                 // The mods hear the teleport into another level, with the
                 // player's state swapped in.
                 g.native_player_teleported(uuid, &name, origin, t.at, t.dim.id());
@@ -1806,6 +1934,7 @@ impl Game<'_> {
                 target: Vec3::new(t.at[0], t.at[1], t.at[2]),
                 end: false,
                 origin: None,
+                notify_from: None,
                 plan: None,
                 // A command teleports the player alone: it is not a
                 // passenger any more (`ServerPlayer.teleport`).
@@ -2235,6 +2364,415 @@ mod tests {
             assert!(game.mob_object(held).is_some());
             assert_eq!(game.mob_object(held).unwrap().extra.mount, Some(root));
             assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].vehicle, Some(held));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn natural_portal_dismounts_before_ordered_travel_and_moves_the_hull_even_without_riders() {
+        use crate::game::{
+            native_entity_refs::tests::{prepare_entity_ticking_neighborhood, run_on_guest_stack},
+            native_guest_turn_tests::with_guests,
+        };
+        use horizon_client::{chunk::Chunk, nether_portal::ENTITY_DELAY};
+        use horizon_core::position::ChunkPos;
+        use mod_api::{
+            EntityMountEvent, Flow, Hooks, ModEntry, PlayerPositionCommittedEvent,
+            PlayerTeleportPreEvent,
+        };
+        use std::sync::Mutex;
+
+        const HULL: u32 = 702;
+        const HULL_YAW: f32 = 35.0;
+        const RIDER_YAW: f32 = 105.0;
+        const RIDER_PITCH: f32 = 22.0;
+        #[derive(Clone, Copy, PartialEq)]
+        enum Route {
+            Nether,
+            IntoEnd,
+            OutOfEnd,
+            UnseenCredits,
+        }
+        #[derive(Debug, PartialEq)]
+        enum Order {
+            Off(u32),
+            Offer(u128),
+            Commit(u128),
+            On(u32),
+        }
+        #[derive(Default)]
+        struct Trace {
+            order: Mutex<Vec<Order>>,
+            proposals: Mutex<Vec<(u128, [f64; 3], [f64; 3])>>,
+            committed: Mutex<Vec<(u128, [f64; 3])>>,
+        }
+        struct Protection {
+            refuse: &'static [u128],
+            source: Dim,
+            destination: Dim,
+            cause: TravelCause,
+            trace: Arc<Trace>,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for Protection {
+            fn entity_mount(
+                &self,
+                _: &mut dyn ServerHost,
+                event: &mut EntityMountEvent<'_>,
+            ) -> Flow {
+                let step = if event.mounting {
+                    Order::On(event.entity)
+                } else {
+                    Order::Off(event.entity)
+                };
+                self.trace.order.lock().unwrap().push(step);
+                Flow::Continue
+            }
+
+            fn player_teleport_pre(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut PlayerTeleportPreEvent<'_>,
+            ) -> Flow {
+                if event.cause != self.cause.id() {
+                    return Flow::Continue;
+                }
+                assert_eq!(event.from_level, self.source.id());
+                assert_eq!(event.to_level, self.destination.id());
+                let rider = host.player(event.player).unwrap().entity();
+                assert_eq!(rider.vehicle(host), None);
+                assert_eq!(rider.position(host), Some(event.from));
+                self.trace
+                    .order
+                    .lock()
+                    .unwrap()
+                    .push(Order::Offer(event.player));
+                self.trace
+                    .proposals
+                    .lock()
+                    .unwrap()
+                    .push((event.player, event.from, event.to));
+                if self.refuse.contains(&event.player) {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            }
+
+            fn player_position_committed(
+                &self,
+                host: &mut dyn ServerHost,
+                event: &mut PlayerPositionCommittedEvent<'_>,
+            ) {
+                if event.from_level != event.to_level {
+                    let rider = host.player(event.player).unwrap().entity();
+                    assert_eq!(rider.vehicle(host), None);
+                    assert_eq!(rider.position(host), Some(event.to));
+                    self.trace
+                        .committed
+                        .lock()
+                        .unwrap()
+                        .push((event.player, event.to));
+                    self.trace
+                        .order
+                        .lock()
+                        .unwrap()
+                        .push(Order::Commit(event.player));
+                }
+            }
+        }
+
+        run_on_guest_stack(|| {
+            use Route::*;
+            for (route, cart, refuse, two_players, disconnect) in [
+                (Nether, false, &[12][..], false, false),
+                (Nether, true, &[12][..], false, false),
+                (Nether, true, &[][..], false, false),
+                (Nether, false, &[12][..], true, false),
+                (Nether, false, &[12, 13][..], true, false),
+                (Nether, false, &[][..], true, false),
+                (Nether, false, &[][..], false, true),
+                (IntoEnd, false, &[12, 13][..], true, false),
+                (IntoEnd, false, &[12][..], true, false),
+                (IntoEnd, true, &[12][..], false, false),
+                (IntoEnd, true, &[][..], false, false),
+                (OutOfEnd, false, &[13][..], true, false),
+                (UnseenCredits, true, &[][..], false, false),
+            ] {
+                let (source, destination, cause) = match route {
+                    Nether => (Dim::Overworld, Dim::Nether, TravelCause::NetherPortal),
+                    IntoEnd => (Dim::Overworld, Dim::End, TravelCause::EndPortal),
+                    OutOfEnd | UnseenCredits => (Dim::End, Dim::Overworld, TravelCause::EndPortal),
+                };
+                let trace = Arc::new(Trace::default());
+                let mods = vec![ModEntry::new(
+                    "portal_passenger_region",
+                    Box::new(Protection {
+                        refuse,
+                        source,
+                        destination,
+                        cause,
+                        trace: trace.clone(),
+                    }),
+                )]
+                .into();
+                mod_platform::testing::with_mods(mods, || {
+                    with_guests(|game| {
+                        game.options.dedicated = Some(Vec::new());
+                        game.enter_level(source).unwrap();
+                        game.level.world_spawn = Some([6, 80, 9]);
+                        game.level.world_spawn_angle = [25.0, -12.0];
+                        let entry = BlockPos::new(3, 70, 5);
+                        prepare_entity_ticking_neighborhood(game, ChunkPos::new(0, 0));
+                        game.tickets.add_portal((0, 0));
+                        game.update_chunk_tickets();
+                        assert!(game.entity_ticking_area()(entry.x, entry.z));
+                        let registry = &game.pack.assets.registry;
+                        let portal = registry
+                            .default_state(match cause {
+                                TravelCause::NetherPortal => "minecraft:nether_portal",
+                                _ => "minecraft:end_portal",
+                            })
+                            .unwrap();
+                        let nether_exit = (route == Nether).then(|| {
+                            let mut state = registry.state(portal).unwrap().clone();
+                            state.properties.insert("axis".into(), "z".into());
+                            registry.resolve(&state).unwrap()
+                        });
+                        let floor = registry.default_state("minecraft:stone").unwrap();
+                        for z in 3..=7 {
+                            for x in 1..=5 {
+                                game.world.set(x, 69, z, floor).unwrap();
+                            }
+                        }
+                        game.world.set(entry.x, entry.y, entry.z, portal).unwrap();
+                        let at = Vec3::new(3.5, 70.0, 5.5);
+                        if cart {
+                            let mut cart =
+                                minecarts::Minecart::new(HULL, minecarts::CartKind::Rideable, at);
+                            cart.yaw = HULL_YAW;
+                            game.carts.push(cart);
+                        } else {
+                            game.boats
+                                .push(boats::Boat::new(HULL, Arc::from("oak"), at, HULL_YAW));
+                        }
+                        let vehicle = game.entity(HULL).unwrap();
+                        let players: &[u32] = if two_players { &[12, 13] } else { &[12] };
+                        for &conn in players {
+                            game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                                guest.dimension = source.id().into();
+                                guest.loaded = true;
+                                guest.load_timeout = 0;
+                                guest.seen_credits = route != UnseenCredits;
+                                if source == Dim::End {
+                                    guest.respawn_elsewhere = Some((
+                                        Dim::Overworld.id().into(),
+                                        [54, 72, 47],
+                                        70.0,
+                                        10.0,
+                                        true,
+                                    ));
+                                }
+                            });
+                            let rider = game.player(u128::from(conn)).unwrap().entity();
+                            assert!(game.entity_start_riding(rider, vehicle, true));
+                            game.guest_boarded(conn, None);
+                            game.lan.as_mut().unwrap().hub.update_guest(conn, |guest| {
+                                guest.yaw = RIDER_YAW;
+                                guest.pitch = RIDER_PITCH;
+                            });
+                        }
+                        if two_players {
+                            for (seat, &conn) in players.iter().enumerate() {
+                                let at = game.boats[0].seat(
+                                    seat,
+                                    2,
+                                    false,
+                                    super::super::boat_passengers::PLAYER_RIDING_OFFSET,
+                                    false,
+                                );
+                                game.lan
+                                    .as_mut()
+                                    .unwrap()
+                                    .hub
+                                    .update_guest(conn, |guest| guest.position = at.components());
+                            }
+                        }
+                        trace.order.lock().unwrap().clear();
+                        game.portals
+                            .entities
+                            .entry(HULL)
+                            .or_default()
+                            .set_inside(entry, ENTITY_DELAY);
+                        game.handle_vehicle_portals();
+                        game.carry_riders_through_portals();
+                        assert!(game.server_trips.is_empty());
+                        if route == UnseenCredits {
+                            assert!(game.portal_hull_trips.is_empty());
+                            assert_eq!(game.portal_hull_pose(HULL), Some((at, HULL_YAW)));
+                            assert_eq!(game.native_passenger_ids(HULL), [12]);
+                            assert!(trace.order.lock().unwrap().is_empty());
+                            return;
+                        }
+                        assert_eq!(game.portal_hull_trips.len(), 1);
+                        assert!(players.iter().all(|&conn| game.on_server_trip(conn)));
+                        assert!(game.lan.as_ref().unwrap().hub.guest(12).unwrap().landing);
+                        let players = if disconnect {
+                            game.lan
+                                .as_mut()
+                                .unwrap()
+                                .hub
+                                .guests
+                                .retain(|guest| guest.conn != 12);
+                            assert!(game.vehicle_waits_in(source));
+                            assert_eq!(game.pending_portal_chunks(source).next(), Some((0, 0)));
+                            &[]
+                        } else {
+                            players
+                        };
+                        game.arrive_server_trips();
+                        assert_eq!(game.portal_hull_trips.len(), 1);
+                        assert!(trace.order.lock().unwrap().is_empty());
+                        let trip = &game.portal_hull_trips[0];
+                        let plan = trip.plan;
+                        let (cx, cz) = Game::chunk_of(trip.target);
+                        game.enter_level(destination).unwrap();
+                        for z in cz - 2..=cz + 2 {
+                            for x in cx - 2..=cx + 2 {
+                                game.streaming
+                                    .insert_remote(&mut game.world, Chunk::empty(x, z));
+                            }
+                        }
+                        let (expected_hull, expected_yaw, expected_pitch) = match route {
+                            Nether => {
+                                let (exit_x, exit_z) =
+                                    (plan.approximate.x + 2, plan.approximate.z + 2);
+                                for y in 70..73 {
+                                    for z in exit_z..exit_z + 2 {
+                                        game.world.set(exit_x, y, z, nether_exit.unwrap()).unwrap();
+                                    }
+                                }
+                                let (_, exit) =
+                                    game.find_exit_portal(&plan).expect("pre-existing portal");
+                                let (at, turn) = game.arrival(&plan, exit);
+                                assert_ne!(turn, 0.0);
+                                (at, HULL_YAW + turn, RIDER_PITCH)
+                            }
+                            IntoEnd => (Vec3::new(100.5, 50.0, 0.5), 90.0, RIDER_PITCH),
+                            OutOfEnd => {
+                                game.world.set(6, 68, 9, floor).unwrap();
+                                (
+                                    Vec3::new(6.5, 69.0, 9.5),
+                                    HULL_YAW + 25.0,
+                                    RIDER_PITCH - 12.0,
+                                )
+                            }
+                            UnseenCredits => unreachable!(),
+                        };
+                        game.arrive_server_trips();
+                        assert!(game.portal_hull_trips.is_empty());
+                        let mut order: Vec<_> =
+                            players.iter().rev().copied().map(Order::Off).collect();
+                        let mut mounted = Vec::new();
+                        for &conn in players {
+                            let player = u128::from(conn);
+                            order.push(Order::Offer(player));
+                            if !refuse.contains(&player) {
+                                order.push(Order::Commit(player));
+                                mounted.push(conn);
+                            }
+                        }
+                        order.extend(mounted.iter().copied().map(Order::On));
+                        assert_eq!(*trace.order.lock().unwrap(), order);
+                        assert_eq!(
+                            game.portal_hull_pose(HULL),
+                            Some((expected_hull, expected_yaw))
+                        );
+                        if route == IntoEnd {
+                            assert_eq!(&*game.block_name([100, 48, 0]), "minecraft:obsidian");
+                            assert_eq!(&*game.block_name([100, 50, 0]), "minecraft:air");
+                        }
+                        assert_eq!(game.native_passenger_ids(HULL), mounted);
+                        let proposals = trace.proposals.lock().unwrap();
+                        let committed = trace.committed.lock().unwrap();
+                        for &conn in players {
+                            let guest = game.lan.as_ref().unwrap().hub.guest(conn).unwrap();
+                            assert!(!guest.tp_held && !guest.landing);
+                            let &(_, from, to) = proposals
+                                .iter()
+                                .find(|offer| offer.0 == u128::from(conn))
+                                .unwrap();
+                            let expected = super::super::vehicle_teleport::passenger_destination(
+                                at,
+                                expected_hull,
+                                Vec3::new(from[0], from[1], from[2]),
+                            )
+                            .components();
+                            assert_eq!(to, expected);
+                            if two_players {
+                                assert_ne!(
+                                    to,
+                                    expected_hull.components(),
+                                    "retain dismount offset"
+                                );
+                            }
+                            if refuse.contains(&u128::from(conn)) {
+                                assert_eq!(guest.dimension, source.id());
+                                assert_eq!(guest.vehicle, None);
+                                assert_eq!(guest.position, from);
+                            } else {
+                                assert_eq!(guest.dimension, destination.id());
+                                assert_eq!(guest.vehicle, Some(HULL));
+                                assert!(committed.contains(&(u128::from(conn), to)));
+                                assert_eq!(guest.vehicle_good, Some(expected_hull.components()));
+                                let seat = mounted.iter().position(|&rider| rider == conn).unwrap();
+                                let expected_seat = if cart {
+                                    expected_hull.add_vector(Vec3::new(0.0, minecarts::SEAT, 0.0))
+                                } else {
+                                    game.boats
+                                        .iter()
+                                        .find(|boat| boat.id == HULL)
+                                        .unwrap()
+                                        .seat(
+                                            seat,
+                                            seat + 1,
+                                            false,
+                                            super::super::boat_passengers::PLAYER_RIDING_OFFSET,
+                                            false,
+                                        )
+                                };
+                                assert_eq!(guest.position, expected_seat.components());
+                                assert_eq!(guest.yaw, RIDER_YAW + (expected_yaw - HULL_YAW));
+                                assert_eq!(guest.pitch, expected_pitch);
+                            }
+                        }
+                        if mounted.len() == 2 {
+                            // The portal initially seats the first player in the middle.
+                            // An ordinary tick repositions each rider for the now-full boat.
+                            for &conn in mounted.iter().rev() {
+                                game.guest_vehicle_tick(conn);
+                            }
+                            let boat = game.boats.iter().find(|boat| boat.id == HULL).unwrap();
+                            let host = game.lan.as_ref().unwrap();
+                            for (seat, &conn) in mounted.iter().enumerate() {
+                                let guest = host.hub.guest(conn).unwrap();
+                                let expected = boat.seat(
+                                    seat,
+                                    2,
+                                    false,
+                                    super::super::boat_passengers::PLAYER_RIDING_OFFSET,
+                                    false,
+                                );
+                                assert_eq!(guest.position, expected.components());
+                            }
+                            assert!(game.guest_controls_vehicle(mounted[0], HULL));
+                            assert!(!game.guest_controls_vehicle(mounted[1], HULL));
+                        }
+                        game.enter_level(source).unwrap();
+                        assert!(game.portal_hull_pose(HULL).is_none());
+                    });
+                });
+            }
         });
     }
 

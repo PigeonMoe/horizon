@@ -350,8 +350,12 @@ pub(super) fn emit<'a>(
             }
         };
         let event = fresh_name("event", &mut used);
-        let event_type = format!("{}Event", hook_id(name));
-        let hook_id = event_type.strip_suffix("Event").unwrap();
+        let hook_id = hook_id(name);
+        let hook_id = hook_id.as_str();
+        let event_type = hook
+            .shared_event
+            .clone()
+            .unwrap_or_else(|| format!("{hook_id}Event"));
         if !is_render {
             hook_ids.push_str(&format!("{hook_id},\n"));
             hook_constants.push_str(&format!(
@@ -476,6 +480,13 @@ pub(super) fn emit<'a>(
                 ty.clone()
             };
             let (field, scalar) = lifetimes.field(&field_ty);
+            if hook.shared_event.is_some()
+                && (scalar
+                    || mutable_entity
+                    || matches!(&field_ty, Type::Reference(reference) if reference.mutability.is_some()))
+            {
+                return Err(format!("{}: shared_event cannot write {name}", hook.name));
+            }
             if scalar {
                 rollback.push((name.clone(), false));
             } else if matches!(&field_ty, Type::Reference(reference) if reference.mutability.is_some())
@@ -555,8 +566,13 @@ pub(super) fn emit<'a>(
             ));
             continue;
         }
-        trait_params.push(format!("{event}: &mut {event_type}{elided}"));
-        call_args.push(format!("&mut {event}"));
+        let event_mut = if hook.shared_event.is_some() {
+            ""
+        } else {
+            "mut "
+        };
+        trait_params.push(format!("{event}: &{event_mut}{event_type}{elided}"));
+        call_args.push(format!("&{event_mut}{event}"));
         let unused = trait_params[1..]
             .iter()
             .map(|param| format!("let _ = {};", param.split(':').next().unwrap()))
@@ -827,7 +843,7 @@ pub(super) fn emit<'a>(
             } else {
                 String::new()
             },
-            if matches!(name, "blocks" | "items") {
+            if matches!(name, "blocks" | "items") || hook.shared_event.is_some() {
                 ""
             } else {
                 "mut "
@@ -840,12 +856,11 @@ pub(super) fn emit<'a>(
             build
         };
         // A trait mod's call is marked with the mod for a panic to name.
-        let each = match &hook.owner {
-            Some(owner) => format!("super::entered_owned(HookId::{hook_id}, \"{name}\", {owner})"),
-            None if answered || hook.collect_validator.is_some() => {
+        let each = match answered || hook.collect_validator.is_some() {
+            true => {
                 format!("super::entered_with_id(HookId::{hook_id}, \"{name}\")")
             }
-            None => format!("super::entered(HookId::{hook_id}, \"{name}\")"),
+            false => format!("super::entered(HookId::{hook_id}, \"{name}\")"),
         };
         // One callee's call: a mod's, or a scoped hook's part's.
         let call = |callee: &str, exit: &str| {
@@ -938,10 +953,11 @@ pub(super) fn emit<'a>(
                     "for (mod_id, {mod_item}) in super::entered_with_id(HookId::{hook_id}, \"{name}\") {{ let mut local = Vec::new(); {{ let mut {event} = {event_type} {{ {name}: &mut local }}; {mod_item}.{name}(context, &mut {event}); }} for declaration in &mut local {{ if let Err(reason) = super::parts::own_declaration(mod_id, declaration) {{ context.refuse_declaration(reason); }} }} {event}.{name}.extend(local); }}"
                 ),
             ),
-            None if name == "setting_changed" => (
+            None if hook.owner.is_some() => (
                 String::new(),
                 format!(
-                    "{{ let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if owner.id != {event}.mod_id {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
+                    "{{ let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if owner.id != {event}.{} {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
+                    hook.owner.as_ref().unwrap(),
                     call(&mod_item, "break"),
                 ),
             ),

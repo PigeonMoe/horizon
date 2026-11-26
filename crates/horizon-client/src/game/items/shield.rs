@@ -217,7 +217,7 @@ impl Game<'_> {
                         } else {
                             horizon_core::equipment_slot::EquipmentSlot::MainHand
                         };
-                        self.player_equipment_broke(hand, &broken);
+                        self.player_equipment_broke(hand, slot, &broken);
                         self.award_stat("broken", &broken.item, 1);
                     }
                 }

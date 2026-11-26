@@ -2,6 +2,201 @@ use super::tests::{WeaponProbe, isolated};
 use super::*;
 use std::sync::{Arc, Mutex};
 
+#[test]
+#[ignore = "daily"]
+fn llama_spit_uses_the_shooter_for_damage_and_only_a_player_shooter_for_protection() {
+    if isolated() {
+        return;
+    }
+    use crate::game::{
+        native_entity_refs::tests::run_on_guest_stack, native_guest_turn_tests::with_guests,
+    };
+    use horizon_client::lan::playerdata::uuid_ints;
+    use mod_api::{
+        EntityDamageTargetPreEvent, Flow, Hooks, LevelRandomHost, LivingIncomingDamageEvent,
+        ModEntry,
+    };
+
+    const OWNER: u32 = 13;
+    const ACTIVE_VICTIM: u32 = 12;
+    const LLAMA: u32 = 82;
+    const WOLF: u32 = 83;
+    const UNINVOLVED: u32 = 84;
+    const IMPACT: [f64; 3] = [8.5, 200.0, 6.5];
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Case {
+        LlamaToWolf,
+        LlamaToGuest,
+        PlayerToWolf,
+    }
+
+    #[derive(Default)]
+    struct Observation {
+        actors: Mutex<Vec<(String, Option<u128>)>>,
+        sources: Mutex<Vec<(i32, String, i32, i32)>>,
+    }
+
+    struct Probe(Arc<Observation>);
+
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn entity_damage_target_pre(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut EntityDamageTargetPreEvent<'_>,
+        ) -> Flow {
+            let player = event.player.map(|player| player.uuid);
+            self.0
+                .actors
+                .lock()
+                .unwrap()
+                .push((event.target_kind.into(), player));
+            if player.is_some() {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+
+        fn living_incoming_damage(
+            &self,
+            _: &mut dyn LevelRandomHost,
+            event: &mut LivingIncomingDamageEvent<'_>,
+        ) -> Flow {
+            let source = event.source;
+            self.0.sources.lock().unwrap().push((
+                event.entity,
+                source.damage_type.into(),
+                source.causing,
+                source.direct,
+            ));
+            Flow::Continue
+        }
+    }
+
+    crate::entry::install_client_hooks();
+    run_on_guest_stack(|| {
+        for case in [Case::LlamaToWolf, Case::LlamaToGuest, Case::PlayerToWolf] {
+            let seen = Arc::new(Observation::default());
+            let mods = vec![ModEntry::new("spit_policy", Box::new(Probe(seen.clone())))].into();
+            mod_platform::testing::with_mods(mods, || {
+                with_guests(|game| {
+                    game.options.dedicated = Some(Vec::new());
+                    game.build_registries();
+                    game.as_console(|game| assert!(game.run_command("difficulty normal")));
+                    game.load_ticking_neighbourhood(0, 0);
+                    game.update_chunk_tickets();
+                    assert!(game.entity_ticking_area()(8, 6));
+                    let wolf_target = case != Case::LlamaToGuest;
+                    let hub = &mut game.lan.as_mut().unwrap().hub;
+                    for (conn, position) in [
+                        (OWNER, [32.0, 200.0, 32.0]),
+                        (
+                            ACTIVE_VICTIM,
+                            if wolf_target {
+                                [30.0, 200.0, 30.0]
+                            } else {
+                                IMPACT
+                            },
+                        ),
+                    ] {
+                        hub.update_guest(conn, |guest| {
+                            guest.dimension = "minecraft:overworld".into();
+                            guest.loaded = true;
+                            guest.loading = false;
+                            guest.load_timeout = 0;
+                            guest.position = position;
+                            guest.previous_position = position;
+                        })
+                        .unwrap();
+                    }
+                    let kind = game.res.mob_types()["minecraft:llama"].clone();
+                    let mut llama = Mob::new(LLAMA, kind, Vec3::new(3.5, 200.0, 6.5), 0.0);
+                    llama.extra.tame = true;
+                    llama.extra.owner = Some(uuid_ints(u128::from(OWNER)));
+                    game.mobs.push(llama);
+                    let victim = if wolf_target { WOLF } else { ACTIVE_VICTIM };
+                    if wolf_target {
+                        let wolf = game.res.mob_types()["minecraft:wolf"].clone();
+                        game.mobs.push(Mob::new(
+                            WOLF,
+                            wolf,
+                            Vec3::new(IMPACT[0], IMPACT[1], IMPACT[2]),
+                            0.0,
+                        ));
+                    } else {
+                        // Closer to the spit than its shooter, outside its forward path.
+                        let pig = game.res.mob_types()["minecraft:pig"].clone();
+                        game.mobs
+                            .push(Mob::new(UNINVOLVED, pig, Vec3::new(5.0, 200.0, 6.5), 0.0));
+                    }
+                    let health = |game: &Game<'_>| {
+                        if wolf_target {
+                            game.mobs.iter().find(|mob| mob.id == WOLF).unwrap().health
+                        } else {
+                            game.lan
+                                .as_ref()
+                                .unwrap()
+                                .hub
+                                .guest(ACTIVE_VICTIM)
+                                .unwrap()
+                                .health
+                        }
+                    };
+                    let before = health(game);
+                    let player_shooter = case == Case::PlayerToWolf;
+                    let mut spit = Projectile::new(
+                        ProjectileKind::LlamaSpit,
+                        Vec3::new(6.5, 200.45, 6.5),
+                        Some(if player_shooter {
+                            Who::Player
+                        } else {
+                            Who::Mob(LLAMA)
+                        }),
+                    );
+                    if player_shooter {
+                        spit.guest = Some(OWNER);
+                        spit.owner_uuid = Some(uuid_ints(u128::from(OWNER)));
+                    }
+                    spit.left_owner = true;
+                    spit.no_gravity = true;
+                    spit.velocity = Vec3::new(3.0, 0.0, 0.0);
+                    let spit_id = game.add_projectile(spit);
+                    game.tick_projectiles().unwrap();
+                    let kind = if wolf_target {
+                        "minecraft:wolf"
+                    } else {
+                        "minecraft:player"
+                    };
+                    assert_eq!(
+                        *seen.actors.lock().unwrap(),
+                        [(kind.into(), player_shooter.then_some(u128::from(OWNER)))],
+                        "{case:?}"
+                    );
+                    let sources = seen.sources.lock().unwrap();
+                    if player_shooter {
+                        assert_eq!(health(game), before);
+                        assert!(sources.is_empty());
+                    } else {
+                        assert_eq!(health(game), before - 1.0, "{case:?}");
+                        assert_eq!(
+                            *sources,
+                            [(
+                                victim as i32,
+                                "minecraft:spit".into(),
+                                LLAMA as i32,
+                                spit_id as i32
+                            )],
+                            "{case:?}"
+                        );
+                    }
+                });
+            });
+        }
+    });
+}
+
 fn fixture(expected: Option<ItemStack>, run: impl FnOnce(&mut Game<'_>)) {
     crate::game::native_entity_refs::tests::with_game(|game| {
         let scratch = tempfile::tempdir().unwrap();

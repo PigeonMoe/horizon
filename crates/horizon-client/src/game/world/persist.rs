@@ -263,17 +263,21 @@ impl EntityMemory {
     }
 }
 
-/// Runtime ownership paired with serialized nodes by one object walk. UUIDs
-/// are admission identities, never keys for matching distinct object states.
+/// Source object ids and type metadata at each serialized node. UUIDs are
+/// admission identities, never keys for matching distinct object states.
 #[derive(Debug)]
-pub(super) struct TransferredVehicleTree {
+pub(super) struct VehicleTransferTree<State> {
     source_id: u32,
     kind: VehicleTreeKind,
     name: String,
-    state: super::entity_initialization::TransferredEntityState,
+    state: State,
     /// `None` is an unspawned saved slot, at exactly the same NBT child index.
-    passengers: Vec<Option<TransferredVehicleTree>>,
+    passengers: Vec<Option<VehicleTransferTree<State>>>,
 }
+
+type VehicleTransferPlan = VehicleTransferTree<()>;
+pub(super) type TransferredVehicleTree =
+    VehicleTransferTree<super::entity_initialization::TransferredEntityState>;
 
 pub(super) struct RestoredVehicleTree {
     pub(super) root: u32,
@@ -1045,7 +1049,8 @@ impl Game<'_> {
         // The loaded dragon's own random (`Entity.random`): loading draws
         // nothing from the level's.
         let seed = random_source::unique_seed();
-        if self.dragon.is_none()
+        let source = transferred.as_ref().map(|state| state.source());
+        if self.dragon.can_install(source)
             && let Some(mut d) = super::dragon::Dragon::from_nbt(&tag, seed)
         {
             // EnderDragon's constructor takes its id and its

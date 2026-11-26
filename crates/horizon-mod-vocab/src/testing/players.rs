@@ -1,7 +1,7 @@
 //! The players fake: who is online, their inventories, and what the game told them.
 use super::FAKE_EPOCH;
 use crate::{
-    EntityRef, Hand, ItemPlace, ItemStack, LevelRef, PlayerRef, Players, Text, WorldEpoch,
+    Compound, EntityRef, Hand, ItemPlace, ItemStack, LevelRef, PlayerRef, Players, Text, WorldEpoch,
 };
 use std::collections::BTreeMap;
 
@@ -26,6 +26,7 @@ impl FakePlayers {
             level,
             name: format!("Player{entity}"),
             slots: BTreeMap::new(),
+            persistent_data: Compound::new(),
             selected_slot: 0,
             given: Vec::new(),
             action_bar: Vec::new(),
@@ -93,6 +94,8 @@ pub struct FakePlayer {
     /// Their inventory by slot number: 0..36 (0..9 the hotbar), the armour 100..=103, the off
     /// hand -106.
     pub slots: BTreeMap<i32, ItemStack>,
+    /// The player compound returned by `PlayerRef::persistent_data`.
+    pub persistent_data: Compound,
     /// The hotbar slot their main hand holds.
     pub selected_slot: usize,
     /// What an insert into one of their places could not fit there, in order: the game puts it

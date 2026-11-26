@@ -11,6 +11,100 @@ fn api_item(game: &super::Game<'_>, snbt: &str) -> Option<ItemStack> {
 
 #[test]
 #[ignore = "daily"]
+fn saved_gzip_items_use_the_world_codec_and_refuse_partial_data() {
+    use flate2::{Compression, write::GzEncoder};
+    use horizon_core::nbt::{Limits, NamedTag, Tag, write_named};
+    use std::io::Write;
+
+    let gzip = |raw: &[u8]| {
+        let mut writer = GzEncoder::new(Vec::new(), Compression::fast());
+        writer.write_all(raw).unwrap();
+        writer.finish().unwrap()
+    };
+    let current = horizon_core::version::DATA_VERSION;
+    let snbt = r#"{id:"minecraft:diamond",count:3,components:{"minecraft:custom_data":{PublicBukkitValues:{"migration_fixture:original":"saved"},typed:[I;1,2,3]},"minecraft:custom_name":{text:"档案",color:"gold"}}}"#;
+    let encode = |version: i32, snbt: &str| {
+        let (Tag::Compound(mut compound), _) = parse_snbt(snbt).unwrap() else {
+            unreachable!()
+        };
+        compound.insert("DataVersion".into(), Tag::Int(version));
+        write_named(
+            &NamedTag {
+                name: "".into(),
+                tag: Tag::Compound(compound),
+            },
+            Limits::default(),
+        )
+        .unwrap()
+    };
+
+    with_guests(|game| {
+        let host: &dyn mod_api::ServerHost = game;
+        let raw = encode(current - 10, snbt);
+        let valid = gzip(&raw);
+        assert_eq!(
+            host.item_from_saved_gzip_nbt(valid.clone()),
+            api_item(game, snbt)
+        );
+        let mut compressed_trailing = valid.clone();
+        compressed_trailing.push(0);
+        let mut raw_trailing = raw;
+        raw_trailing.push(0);
+        let invalid = [
+            valid[..valid.len() - 4].to_vec(),
+            compressed_trailing,
+            gzip(&raw_trailing),
+            gzip(&encode(current + 1, snbt)),
+            gzip(&encode(current, "{id:stone,count:100}")),
+            gzip(&encode(current, "{id:air,count:1}")),
+            gzip(&vec![0; 16 * 1024 * 1024 + 1]),
+        ];
+        for bytes in invalid {
+            assert!(host.item_from_saved_gzip_nbt(bytes).is_none());
+        }
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn saved_gzip_item_export_keeps_count_and_typed_paper_components() {
+    use horizon_core::nbt::{Limits, Tag, read_named};
+    use std::io::Read;
+
+    let snbt = r#"{id:"minecraft:diamond",count:99,components:{"minecraft:custom_data":{PublicBukkitValues:{"migration_fixture:original":"原始𠮷\u0000描述"},typed:[I;1,2,3]},"minecraft:custom_name":{text:"档案",color:"gold"},"minecraft:lore":["原版说明","第二行"]}}"#;
+    with_guests(|game| {
+        let host: &dyn mod_api::ServerHost = game;
+        let item = api_item(game, snbt).unwrap();
+        let compressed = host.item_to_saved_gzip_nbt(&item).unwrap();
+        assert_eq!(
+            host.item_from_saved_gzip_nbt(compressed.clone()),
+            Some(item.clone())
+        );
+
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(compressed.as_slice())
+            .read_to_end(&mut raw)
+            .unwrap();
+        let (saved, consumed) = read_named(&raw, Limits::default()).unwrap();
+        assert_eq!(consumed, raw.len());
+        assert_eq!(saved.name, horizon_core::nbt::JavaString::default());
+        let Tag::Compound(mut saved) = saved.tag else {
+            panic!("encoded stack must have a compound root");
+        };
+        assert_eq!(
+            saved.remove(&"DataVersion".into()),
+            Some(Tag::Int(horizon_core::version::DATA_VERSION))
+        );
+        assert_eq!(Tag::Compound(saved), parse_snbt(snbt).unwrap().0);
+
+        let mut invalid = item;
+        invalid.set_count(100).unwrap();
+        assert!(host.item_to_saved_gzip_nbt(&invalid).is_none());
+    });
+}
+
+#[test]
+#[ignore = "daily"]
 fn saved_paper_components_keep_stack_data_and_reject_partial_payloads() {
     with_guests(|game| {
         let host: &dyn mod_api::ServerHost = game;

@@ -2,11 +2,11 @@
 // catalog-order: 0178
 
 pub trait Hooks {
-    /// On an authoritative server, fire is about to be placed at `pos` by
-    /// flint and steel, a fire charge, lava, lightning, fire spread or an
-    /// explosion. `player` is the acting server player when there is one, or
-    /// the direct source player for an explosion. Set `cancel` to leave the
-    /// position unchanged.
+    /// On an authoritative server, fire is about to be placed or a block is
+    /// about to be lit at `pos`. `player` is the acting server player, the
+    /// direct source player for an explosion, or the resolved player owner
+    /// of an arrow lighting a candle, candle cake or campfire. Set `cancel`
+    /// to leave the position unchanged.
     #[hook(
         side = "server",
         contract = "cancel",

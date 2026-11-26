@@ -9,10 +9,11 @@ use horizon_client::{
     Result,
     clipboard::EditShortcut,
     confirm_screen::Confirm,
-    dialog::{AfterAction, Body, Click, Control, Dialog, InputValue, Kind},
+    dialog::{Action, AfterAction, Body, Click, Control, Dialog, InputValue, Kind},
     dialog_screen::{BOX, Layout, Part, WARNING_SPRITES, text_height, waiting_button},
     font::Font,
     hud::{HudBatch, rgba},
+    lan::pigeon_auth::{SET, SUBMIT},
     multiline_edit::MultiLineEdit,
     text::{ClickEvent, Text},
     ui,
@@ -88,6 +89,8 @@ pub(super) struct DialogState {
     waiting: Option<Instant>,
     /// `DialogScreen.WarningScreen`, over the dialog.
     warning: bool,
+    /// PigeonAuth keeps the configuration background hidden until admission.
+    auth_pending: bool,
 }
 
 impl DialogState {
@@ -124,6 +127,12 @@ fn warning_texts() -> (Text, Text, [Text; 2]) {
         t("menu.custom_screen_info.contents"),
         [t("menu.disconnect"), t("gui.back")],
     )
+}
+
+fn pigeon_auth_action(dialog: &Dialog, id: &str) -> bool {
+    matches!(&dialog.kind, Kind::MultiAction { actions, .. } if actions.iter().any(|button| {
+        matches!(&button.action, Some(Action::Custom { id: action, .. }) if action == id)
+    }))
 }
 
 impl Game<'_> {
@@ -215,6 +224,8 @@ impl Game<'_> {
 
     /// The parsed dialog's screen, its inputs at their initial values.
     fn open_dialog(&mut self, dialog: Dialog) {
+        let auth_pending = pigeon_auth_action(&dialog, SUBMIT);
+        let protect_password = auth_pending || pigeon_auth_action(&dialog, SET);
         let values = dialog.inputs.iter().map(|i| i.control.initial()).collect();
         let font = &self.gui.atlas.font;
         let fields = dialog
@@ -253,6 +264,7 @@ impl Game<'_> {
                 } => {
                     let mut edit = ui::EditBox::new(0.0, 0.0, *width as f32, 20.0);
                     edit.max_length = (*max_length).max(1) as usize;
+                    edit.obscured = protect_password && i.key == "password";
                     edit.set_value(initial);
                     edit.focused = false;
                     Some(Field::Line(edit))
@@ -261,6 +273,7 @@ impl Game<'_> {
             })
             .collect();
         self.open_screen_overlay("dialog", |game| {
+            game.dialogs.auth_pending = auth_pending;
             game.dialogs.open = Some(Open {
                 dialog,
                 values,
@@ -282,7 +295,12 @@ impl Game<'_> {
     /// `clearDialog`: the dialog closes (under the warning screen, Back then
     /// returns to what was open before it).
     pub(super) fn clear_dialog(&mut self) {
-        if self.dialogs.open.take().is_some() && !self.dialog_open() {
+        let closed = self.dialogs.open.take().is_some();
+        // Admission explicitly clears the screen left by Submit. Preserve the
+        // ordinary waiting screen semantics for other servers' dialogs.
+        let admitted = self.dialogs.auth_pending && self.dialogs.waiting.take().is_some();
+        self.dialogs.auth_pending = false;
+        if (closed || admitted) && !self.dialog_open() {
             self.dialog_closed();
         }
     }
@@ -457,7 +475,12 @@ impl Game<'_> {
         let (w, h) = (batch.width, batch.height);
         let cursor = self.cursor;
         let atlas = &self.gui.atlas;
-        draw_background(batch, atlas, self.player.is_some());
+        draw_background(
+            batch,
+            atlas,
+            self.player.is_some(),
+            self.dialogs.auth_pending,
+        );
         if self.dialogs.warning {
             let (title, message, [disconnect, back]) = warning_texts();
             // DialogScreen.WarningScreen, a ConfirmScreen: its title and its
@@ -494,7 +517,7 @@ impl Game<'_> {
                 u32::MAX,
                 true,
             );
-            if visible {
+            if visible && !self.dialogs.auth_pending {
                 let (bx, by) = (((w - 200.0) / 2.0).trunc(), top + 33.0);
                 let hover = ui::hovered(cursor, bx, by, 200.0, 20.0);
                 ui::action_button(
@@ -821,6 +844,9 @@ impl Game<'_> {
             return Ok(());
         }
         if let Some(since) = self.dialogs.waiting {
+            if self.dialogs.auth_pending {
+                return Ok(());
+            }
             let (w, h) = self.gui_size();
             let active = waiting_button((since.elapsed().as_millis() / 50) as u32).2;
             let (bx, by) = (
@@ -1097,7 +1123,10 @@ impl Game<'_> {
         }
         if let Some(since) = self.dialogs.waiting {
             // shouldCloseOnEsc: once Back works.
-            if escape && waiting_button((since.elapsed().as_millis() / 50) as u32).2 {
+            if escape
+                && !self.dialogs.auth_pending
+                && waiting_button((since.elapsed().as_millis() / 50) as u32).2
+            {
                 self.dialogs.waiting = None;
                 self.dialog_closed();
             }
@@ -1190,6 +1219,16 @@ impl Game<'_> {
             .is_some_and(|open| open.fields.iter().any(Option::is_some))
     }
 
+    pub(super) fn dialog_password_input(&self) -> bool {
+        self.dialogs.open.as_ref().is_some_and(|open| {
+            let field = match open.focus {
+                Some(focused) => open.fields.get(focused).and_then(Option::as_ref),
+                None => open.fields.iter().find_map(Option::as_ref),
+            };
+            matches!(field, Some(Field::Line(edit)) if edit.obscured)
+        })
+    }
+
     /// `type TEXT` with a dialog open: into the focused text input, or the
     /// first one.
     pub(super) fn dialog_type(&mut self, text: &str) -> bool {
@@ -1222,7 +1261,10 @@ impl Game<'_> {
             let mut values = open.values.clone();
             for (value, field) in values.iter_mut().zip(&open.fields) {
                 if let Some(f) = field {
-                    *value = InputValue::Text(f.value());
+                    *value = InputValue::Text(match f {
+                        Field::Line(edit) if edit.obscured => String::new(),
+                        _ => f.value(),
+                    });
                 }
             }
             open.dialog.json(&values)
@@ -1231,8 +1273,17 @@ impl Game<'_> {
     }
 }
 
-fn draw_background(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas, in_world: bool) {
+fn draw_background(
+    batch: &mut HudBatch,
+    atlas: &horizon_client::hud::HudAtlas,
+    in_world: bool,
+    auth_pending: bool,
+) {
     let (w, h) = (batch.width, batch.height);
+    if auth_pending {
+        batch.fill(atlas, 0.0, 0.0, w, h, rgba(0, 0, 0, 255));
+        return;
+    }
     // Screen.extractBackground draws the panorama and blur before this menu overlay.
     // The frame renderer already supplies them while a server is configuring.
     ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
@@ -1252,13 +1303,25 @@ mod background_tests {
             .unwrap();
         atlas.sprites.remove("gui/menu_background");
         let mut batch = HudBatch::scratch([640, 480]);
-        draw_background(&mut batch, &atlas, false);
+        draw_background(&mut batch, &atlas, false, false);
         assert_eq!(
             batch.vertices.len(),
             6,
             "only the menu overlay covers the panorama"
         );
         assert!(batch.vertices.iter().all(|v| v.color >> 24 == 160));
+    }
+
+    #[test]
+    fn offline_authentication_completely_covers_the_background() {
+        let atlas = HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            std::path::PathBuf::from("/nonexistent-horizon-dialog-background-test"),
+        ))
+        .unwrap();
+        let mut batch = HudBatch::scratch([640, 480]);
+        draw_background(&mut batch, &atlas, false, true);
+        assert_eq!(batch.vertices.len(), 6);
+        assert!(batch.vertices.iter().all(|v| v.color == rgba(0, 0, 0, 255)));
     }
 
     #[test]
@@ -1286,7 +1349,7 @@ mod background_tests {
         }
         for (in_world, u) in [(false, 0.1), (true, 0.6)] {
             let mut batch = HudBatch::scratch([640, 480]);
-            draw_background(&mut batch, &atlas, in_world);
+            draw_background(&mut batch, &atlas, in_world, false);
             assert!(!batch.vertices.is_empty());
             assert!(
                 batch
@@ -1325,6 +1388,7 @@ mod pause_tests {
             }),
             waiting: None,
             warning: false,
+            auth_pending: false,
         }
     }
 

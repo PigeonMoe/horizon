@@ -2,7 +2,7 @@
 //! `Feature.place`): reads and writes go through the behaviour library, so
 //! features placed by saplings, fungi and bone meal get vanilla's
 //! `Level.setBlock` update semantics for the flags they request.
-use super::{LevelAccess, Sim, data::state_flags, update::rel};
+use super::{LevelAccess, Sim, data::state_flags, growth_capture::BlockEntityWrite, update::rel};
 use crate::{
     fluid::{FluidKind, FluidState},
     heightmap::HeightmapType,
@@ -65,14 +65,9 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         nbt: horizon_core::nbt::Compound,
     ) -> Result<(), PlacementQueryError> {
         let pos = pos(position);
-        if self.sim.growth_capture.is_some() {
-            let state = self.sim.state(pos);
-            if let Some(capture) = self.sim.growth_capture.as_mut() {
-                if capture.read(pos).is_none() {
-                    capture.stage(pos, state, None);
-                }
-                capture.stage_block_entity(pos, nbt);
-            }
+        let state = self.sim.state(pos);
+        if let Some(capture) = self.sim.growth_capture.as_mut() {
+            capture.stage_block_entity(pos, state, BlockEntityWrite::Load(nbt));
         } else {
             self.sim.level.load_block_entity(pos, nbt);
         }
@@ -137,7 +132,7 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         state: BlockStateId,
     ) -> Result<(), PlacementQueryError> {
         if let Some(capture) = self.sim.growth_capture.as_mut() {
-            capture.stage(pos(position), state, None);
+            capture.stage(self.sim.b, pos(position), state, None);
         } else {
             self.sim.level.set_raw(pos(position), state);
         }
@@ -180,14 +175,18 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         entity: &str,
     ) -> Result<(), PlacementQueryError> {
         let at = pos(position);
+        let state = self.sim.state(at);
         if self
             .sim
             .b
-            .instance_of(self.sim.state(at), super::classes::Class::Spawner)
+            .instance_of(state, super::classes::Class::Spawner)
         {
-            self.sim
-                .level
-                .create_feature_spawner(at, crate::worldgen::cave::dungeon_spawner_nbt(entity));
+            let nbt = crate::worldgen::cave::dungeon_spawner_nbt(entity);
+            if let Some(capture) = self.sim.growth_capture.as_mut() {
+                capture.stage_block_entity(at, state, BlockEntityWrite::CreateSpawner(nbt));
+            } else {
+                self.sim.level.create_feature_spawner(at, nbt);
+            }
         }
         Ok(())
     }
@@ -198,9 +197,10 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
         position: [i32; 3],
         ticks_in_hive: &[i32],
     ) -> Result<(), PlacementQueryError> {
-        let nbt = crate::worldgen::tree::beehive_occupants(ticks_in_hive);
-        self.sim.level.load_block_entity(pos(position), nbt);
-        Ok(())
+        self.set_block_entity(
+            position,
+            crate::worldgen::tree::beehive_occupants(ticks_in_hive),
+        )
     }
     /// Live levels hold no loot-table containers placed by these features.
     fn set_block_entity_loot_table(

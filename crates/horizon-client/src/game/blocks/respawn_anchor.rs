@@ -7,9 +7,10 @@ use super::{Dim, Game};
 use horizon_client::{
     Result,
     blocks::Fluid,
-    collisions::{SceneCollisions, no_collision_empty},
+    collisions::{PowderSnowSubject, SceneCollisions, no_collision_with_context},
     items::ItemStack,
-    mobs::Who,
+    mobs::{Mob, Who},
+    motion::PlayerMotion,
     stand_up::{StandUpLevel, StandUpType, bed_forward, stand_up_fallback},
     text::Text,
 };
@@ -18,9 +19,50 @@ use horizon_core::{
     position::BlockPos,
 };
 use horizon_world::{
-    collision_context::CollisionContext, level::data::state_flags, registry::BlockStateId,
+    collision_context::{CollisionContext, CollisionEntity, CollisionItem, EntityContextKind},
+    entity_obstruction::EntityIdentity,
+    level::data::state_flags,
+    registry::BlockStateId,
 };
 use mod_api::client::first_person::Hand;
+
+/// The passenger's current state while candidate landing boxes are tested.
+pub(super) struct DismountCollision<'a> {
+    context: CollisionContext<'a>,
+    subject: PowderSnowSubject<'a>,
+}
+
+impl<'a> DismountCollision<'a> {
+    fn new(
+        identity: EntityIdentity,
+        kind: EntityContextKind,
+        y: f64,
+        descending: bool,
+        subject: PowderSnowSubject<'a>,
+    ) -> Self {
+        let context = CollisionContext::for_entity(
+            CollisionEntity {
+                identity,
+                kind,
+                y,
+                descending,
+                main_hand: Some(subject.main_hand.unwrap_or(CollisionItem::EMPTY)),
+            },
+            false,
+        );
+        Self { context, subject }
+    }
+
+    pub(super) fn mob(rider: &'a Mob) -> Self {
+        Self::new(
+            EntityIdentity(u64::from(rider.id)),
+            EntityContextKind::Living,
+            rider.position.y,
+            false,
+            rider.collision_subject(),
+        )
+    }
+}
 
 /// `ServerPlayer.RespawnConfig`: a respawn point other than the world spawn
 /// that the game resolves through its block (a respawn anchor).
@@ -437,20 +479,63 @@ impl Game<'_> {
             )
             .unwrap_or_else(|_| VoxelShape::empty())
     }
-    /// `DismountHelper.canDismountTo(level, entity, box)`: no block collides
-    /// with the box and it is inside the world border.
-    pub(super) fn can_dismount_to(&self, bounds: Aabb) -> bool {
+    pub(super) fn player_dismount_collision(&self, rider: &PlayerMotion) -> DismountCollision<'_> {
+        let installed = self
+            .player
+            .as_ref()
+            .is_some_and(|body| std::ptr::eq(body, rider));
+        let (armor, hand, descending) = if installed {
+            (
+                Some(&self.armor),
+                self.inventory.get(self.selected).and_then(Option::as_ref),
+                rider.shift_key_down,
+            )
+        } else if let Some(guest) = self.lan.as_ref().and_then(|host| {
+            host.hub
+                .guests
+                .iter()
+                .find(|guest| guest.entity_id == rider.entity_id)
+        }) {
+            (
+                Some(&guest.armor),
+                guest.inventory.get(guest.selected).and_then(Option::as_ref),
+                guest.sneaking,
+            )
+        } else {
+            (None, None, rider.shift_key_down)
+        };
+        let mut subject: PowderSnowSubject<'_> = rider.powder_snow_subject();
+        if let Some(armor) = armor {
+            subject.leather_boots = super::worn_boots::leather_boots(armor);
+        }
+        subject.main_hand = hand.map(|stack| CollisionItem {
+            item: &stack.item,
+            count: stack.count.min(i32::MAX as u32) as i32,
+        });
+        DismountCollision::new(
+            EntityIdentity(u64::from(rider.entity_id as u32)),
+            EntityContextKind::Player,
+            rider.position.y,
+            descending,
+            subject,
+        )
+    }
+
+    /// `DismountHelper.canDismountTo`: block collisions use the passenger's
+    /// state at the source. The candidate box itself must fit in the border.
+    pub(super) fn can_dismount_to(&self, bounds: Aabb, rider: &DismountCollision<'_>) -> bool {
         let mut scene = SceneCollisions {
             world: &self.world,
             binding: self.collision,
-            subject: None,
+            subject: Some(rider.subject),
         };
-        if !no_collision_empty(&mut scene, bounds) {
+        if !no_collision_with_context(&mut scene, bounds, rider.context) {
             return false;
         }
         // WorldBorder.isWithinBounds(box).
-        let (lo, hi) = (bounds.min(Axis::X), bounds.max(Axis::X) - 1.0e-5);
-        let (lz, hz) = (bounds.min(Axis::Z), bounds.max(Axis::Z) - 1.0e-5);
+        let inset = f64::from(1.0e-5_f32);
+        let (lo, hi) = (bounds.min(Axis::X), bounds.max(Axis::X) - inset);
+        let (lz, hz) = (bounds.min(Axis::Z), bounds.max(Axis::Z) - inset);
         self.border.contains(lo, lz) && self.border.contains(hi, hz)
     }
     pub(super) fn named_block_in_tag(&self, tag: &str, block: &str) -> bool {

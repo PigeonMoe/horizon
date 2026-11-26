@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 use {
-    horizon_core::nbt::Tag,
+    horizon_core::nbt::{Compound, Tag},
     horizon_mod_runtime::attachments::{ATTACHMENTS_KEY, attachment_compound},
 };
 
@@ -82,6 +82,12 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
     let Some(tag) = read_dat(&file).or_else(|| read_dat(&file.with_extension("dat_old"))) else {
         return false;
     };
+    apply(guest, &saved_player(tag));
+    true
+}
+
+/// Decode the same player state for ordinary joins and canonical return resumption.
+pub fn saved_player(tag: Tag) -> Level {
     let mut level = Level {
         health: 20.0,
         food: 20,
@@ -90,8 +96,7 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
     };
     level.read_player(&tag);
     level.player_extra = Some(tag);
-    apply(guest, &level);
-    true
+    level
 }
 
 /// `PlayerList.loadPlayerData` for the world's single-player owner: the file
@@ -366,6 +371,138 @@ pub fn save_now(guest: &Guest, world: &Path) -> Result<(), String> {
     let file = path(world, guest.uuid);
     crate::save::write_dat_durable(&file, player_tag(guest))
         .map_err(|e| format!("{} is not saved: {e}", file.display()))
+}
+
+/// Whether this held arrival requires its plugin profile sections to be made
+/// durable before the single player data file activates them.
+pub fn has_staged_arrival_profiles(guest: &Guest) -> bool {
+    guest.arrival_profiles.is_some()
+}
+
+/// Publish the staged PDC and profile markers in the same durable player file.
+pub fn save_profile_arrival(guest: &mut Guest, world: &Path, handover: u128) -> Result<(), String> {
+    use super::profile_storage;
+    let stage = guest
+        .arrival_profiles
+        .as_ref()
+        .ok_or("no profile sections were staged")?;
+    if !guest.held || guest.placed || stage.owner != guest.uuid || stage.handover != handover {
+        return Err("the required profile stage belongs to another held hand-over".into());
+    }
+    let markers = stage.make_durable(world)?;
+    let mut tag = player_tag(guest);
+    profile_storage::set_markers(&mut tag, markers.clone());
+    replace_profile_pdc(&mut tag, stage.player_data.clone());
+    let file = path(world, guest.uuid);
+    crate::save::write_dat_durable(&file, tag)
+        .map_err(|e| format!("{} is not saved: {e}", file.display()))?;
+    let saved = guest
+        .saved
+        .get_or_insert_with(|| Tag::Compound(Compound::new()));
+    profile_storage::set_markers(saved, markers);
+    let stage = guest
+        .arrival_profiles
+        .take()
+        .expect("the stage was used above");
+    replace_profile_pdc(saved, stage.player_data);
+    Ok(())
+}
+
+/// Finish the in-memory half of an interrupted confirmation. The verified current player
+/// file was already written for this exact held import. No data needs to be written again.
+pub fn reconcile_profile_arrival(
+    guest: &mut Guest,
+    current: super::source_handover::CurrentReturn,
+    tag: Tag,
+) -> Result<(), String> {
+    let authorization = current.authorization();
+    if !guest.held
+        || guest.placed
+        || guest.uuid != authorization.retired.owner
+        || guest.arrival_handover != Some(authorization.handover)
+    {
+        return Err("the committed return belongs to another held hand-over".into());
+    }
+    guest.saved = Some(tag);
+    guest.arrival_profiles = None;
+    Ok(())
+}
+
+/// Restore into a held slot after a trusted current-owner command. The caller
+/// has read the exact canonical file and verified all configured profiles.
+pub fn resume_profile_arrival(
+    guest: &mut Guest,
+    owner: u128,
+    generation: u128,
+    level: &Level,
+) -> Result<(), String> {
+    if !guest.held
+        || guest.placed
+        || !guest.left_reason.is_empty()
+        || guest.uuid != owner
+        || guest.arrival_handover.is_some_and(|id| id != generation)
+        || guest.dimension != level.dimension
+    {
+        return Err("the committed arrival belongs to another held player or level".into());
+    }
+    guest.inventory.fill(None);
+    guest.armor = Default::default();
+    guest.offhand = None;
+    guest.equipment = Default::default();
+    guest.ender_items.fill(None);
+    apply(guest, level);
+    guest.imported = true;
+    guest.arrival_handover = Some(generation);
+    guest.arrival_announce = true;
+    guest.arrival_profiles = None;
+    guest.arrival_profile_fingerprint = None;
+    Ok(())
+}
+
+/// Verify required immutable sidecars before restored local gameplay can write player data.
+pub fn verify_committed_profile(
+    world: &Path,
+    owner: u128,
+    generation: u128,
+    tag: &Tag,
+    id: &horizon_core::identifier::Identifier,
+    schema: u32,
+) -> Result<(), String> {
+    super::profile_storage::verify_committed_profile(
+        world,
+        owner,
+        Some(tag),
+        id,
+        schema,
+        generation,
+    )
+}
+
+fn replace_profile_pdc(tag: &mut Tag, pdc: Compound) {
+    if let Tag::Compound(root) = tag {
+        root.insert("NeoForgeData".into(), Tag::Compound(pdc));
+    }
+}
+
+/// Check committed metadata without decompressing or reading the sidecar payload.
+pub fn transfer_profile_generation(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &horizon_core::identifier::Identifier,
+) -> Result<Option<u128>, mod_api::TransferProfileReadError> {
+    super::profile_storage::active_generation(world, owner, saved, id)
+}
+
+/// Verify the payload of exactly the marker the engine selected for this owner.
+pub fn transfer_profile_payload(
+    world: &Path,
+    owner: u128,
+    saved: Option<&Tag>,
+    id: &horizon_core::identifier::Identifier,
+    generation: u128,
+) -> Result<Vec<u8>, mod_api::TransferProfileReadError> {
+    super::profile_storage::active_payload(world, owner, saved, id, generation)
 }
 
 /// An immutable player snapshot. Compression and all filesystem work belong to

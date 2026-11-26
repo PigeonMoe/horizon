@@ -151,26 +151,26 @@ pub(in crate::game) type LiveBlockEntity = (
 );
 
 impl Game<'_> {
-    /// The block entity at `key` as a player's break finds it before the removal takes it out of
-    /// the world. The saved data is read only when a `block_drops` listener will want it.
+    /// The block entity at `key` before the removal takes it out of the world.
+    /// Snapshot the saved data when the applicable drop hook has a listener.
     pub(in crate::game) fn live_block_entity(
         &self,
         key: (i32, i32, i32),
         block: &str,
+        hook: mod_api::HookId,
     ) -> Option<LiveBlockEntity> {
         let entity = self.world.block_entities.get(&key)?.clone();
-        let view = (self.native_authoritative()
-            && mod_api::__private::listened(mod_api::HookId::BlockDrops))
-        .then(|| {
-            let data = self.saved_block_entity_data(key, &entity, block)?;
-            Some(horizon_client::block_entities::Broken {
-                pos: key,
-                generation: self.world.block_entities.generation(&key)?,
-                data,
-                attachments: self.world.block_entities.attachments(key).cloned(),
+        let view = (self.native_authoritative() && mod_api::__private::listened(hook))
+            .then(|| {
+                let data = self.saved_block_entity_data(key, &entity, block)?;
+                Some(horizon_client::block_entities::Broken {
+                    pos: key,
+                    generation: self.world.block_entities.generation(&key)?,
+                    data,
+                    attachments: self.world.block_entities.attachments(key).cloned(),
+                })
             })
-        })
-        .flatten();
+            .flatten();
         Some((entity, view))
     }
     /// `Block.dropResources` for a player's break (`block_dropped`), with the data of the block
@@ -187,14 +187,37 @@ impl Game<'_> {
     ) -> crate::game::spill::BlockDrops {
         let ([x, y, z], state) = at;
         let (breaker, tool, live) = who;
+        self.with_broken_block_entity(live, |game| {
+            game.with_level(|_, level, _| {
+                level.block_dropped(BlockPos::new(x, y, z), state, breaker, tool, loot.0, loot.1)
+            })
+        })
+    }
+
+    pub(in crate::game) fn creative_player_block_dropped(
+        &mut self,
+        [x, y, z]: [i32; 3],
+        state: BlockStateId,
+        tool: Option<&ItemStack>,
+        live: Option<LiveBlockEntity>,
+    ) -> crate::game::spill::BlockDrops {
+        let breaker = self.native_acting_id();
+        self.with_broken_block_entity(live, |game| {
+            game.with_level(|_, level, _| {
+                level.creative_block_dropped(BlockPos::new(x, y, z), state, breaker, tool)
+            })
+        })
+    }
+
+    fn with_broken_block_entity<T>(
+        &mut self,
+        live: Option<LiveBlockEntity>,
+        run: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if let Some(snapshot) = live.and_then(|(_, view)| view) {
             self.world.block_entities.hold_broken(snapshot);
         }
-        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.with_level(|_, level, _| {
-                level.block_dropped(BlockPos::new(x, y, z), state, breaker, tool, loot.0, loot.1)
-            })
-        }));
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
         self.world.block_entities.release_broken();
         dropped.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }

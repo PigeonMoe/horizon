@@ -140,11 +140,13 @@ impl UserCache {
         Some(self.infos[index].user.clone())
     }
 
-    /// The player with this name (any case) while their entry hasn't expired: `get(String)` without
-    /// the lookup, the offline player and any change to the cache.
+    /// The current account with this name (any case) while its entry hasn't
+    /// expired. Reads the cache without looking up or generating a profile.
     pub fn find_by_name(&self, name: &str) -> Option<NameAndId> {
-        let info = &self.infos[*self.by_name.get(&name.to_lowercase())?];
-        (now_millis() < info.expires).then(|| info.user.clone())
+        let index = self.by_name.get(&name.to_lowercase())?;
+        let info = &self.infos[*index];
+        (self.by_uuid.get(&info.user.id) == Some(index) && now_millis() < info.expires)
+            .then(|| info.user.clone())
     }
 
     /// `get(String)`: the player with this name (any case). An expired entry is
@@ -172,7 +174,9 @@ impl UserCache {
             && now >= self.infos[index].expires
         {
             let user = self.infos[index].user.clone();
-            self.by_uuid.remove(&user.id);
+            if self.by_uuid.get(&user.id) == Some(&index) {
+                self.by_uuid.remove(&user.id);
+            }
             self.by_name.remove(&user.name.to_lowercase());
             needs_save = true;
             found = None;
@@ -303,8 +307,9 @@ mod tests {
 
     #[test]
     fn find_by_name_only_reads() {
-        let (c, _) = cache(
+        let (mut c, _) = cache(
             r#"[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Notch","expiresOn":"2099-01-01 00:00:00 +0000"},
+                {"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"FormerName","expiresOn":"2098-01-01 00:00:00 +0000"},
                 {"uuid":"61699b2e-d327-4a01-9f1e-0ea8c3f06bc6","name":"Expired","expiresOn":"2000-01-01 00:00:00 +0000"}]"#,
         );
         let before = c.to_json();
@@ -312,10 +317,20 @@ mod tests {
             c.find_by_name("nOtCh").map(|u| u.name),
             Some("Notch".into())
         );
-        // An expired entry, an unknown name: nothing, and no offline player made up.
+        // A former name, an expired entry, and an unknown name have no current profile.
+        assert_eq!(c.find_by_name("FormerName"), None);
         assert_eq!(c.find_by_name("Expired"), None);
         assert_eq!(c.find_by_name("Nobody"), None);
         assert_eq!(c.to_json(), before);
+
+        // Expiring the former name through a resolving command keeps the current UUID entry.
+        c.resolve_offline_users = false;
+        let later = days_from_civil(2098, 6, 1) * DAY;
+        assert_eq!(c.get_by_name_at("FormerName", later, |_| None), None);
+        assert_eq!(
+            c.find_by_name("Notch").map(|u| u.id),
+            Some(0x069a_79f4_44e9_4726_a5be_fca9_0e38_aaf5)
+        );
     }
 
     #[test]

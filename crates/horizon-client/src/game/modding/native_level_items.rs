@@ -5,11 +5,80 @@
 //! the world is simulated, in the level in place: on the server thread, for a
 //! server's players, and in-frame on the window's own level. Clients get the
 //! new entities through the tracker, as any other.
-use super::{Game, spill};
+use super::{Dim, Game, spill, transactions::After};
+use horizon_core::random::RandomSource;
 use horizon_items::items::ItemStack;
-use mod_api::{EntityRef, LevelRef};
+use mod_api::{EntityRef, LevelRef, PlayerRef, StackWriteError};
 
 impl Game<'_> {
+    /// Drops an owned stack without simulating a throw or withdrawing from the recipient.
+    pub(super) fn player_drop_item_naturally(
+        &mut self,
+        player: PlayerRef,
+        stack: ItemStack,
+    ) -> Result<bool, StackWriteError> {
+        // The saved ItemStack count is bounded independently of a material's slot maximum.
+        const MAX_SAVED_COUNT: u32 = 99;
+        if stack.count > MAX_SAVED_COUNT {
+            return Err(StackWriteError::CountExceeded {
+                maximum: MAX_SAVED_COUNT,
+            });
+        }
+        if !self.is_logical_server()
+            || self.player_write_gate(player).is_err()
+            || !self.stack_spawns(&stack)
+        {
+            return Ok(false);
+        }
+        let Some(level) = self.player_level(player) else {
+            return Ok(false);
+        };
+        let Some(position) = self.entity_position(player.entity()) else {
+            return Ok(false);
+        };
+        if !position.into_iter().all(f64::is_finite)
+            || self.native_level_world_result(level).is_err()
+            || self.entity_ids_exhausted()
+        {
+            return Ok(false);
+        }
+
+        if level.dimension() != self.dim.key() && !self.transactions.is_empty() {
+            self.after_commit(After::NaturalItemDrop(level, position, stack));
+            return Ok(true);
+        }
+        Ok(self.finish_natural_item_drop(level, position, stack).is_some())
+    }
+
+    /// Publish a validated drop in its destination level and leave the caller's level in place.
+    pub(super) fn finish_natural_item_drop(
+        &mut self,
+        level: LevelRef,
+        position: [f64; 3],
+        stack: ItemStack,
+    ) -> Option<EntityRef> {
+        self.native_level_world_result(level).ok()?;
+        let spawn = |game: &mut Self| {
+            let mut offset = || -0.25 + game.world.random.next_double() * 0.5;
+            let at = [
+                position[0] + offset(),
+                position[1] + (offset() - 0.125),
+                position[2] + offset(),
+            ];
+            game.spawn_level_item(level, stack, at, None, 10)
+        };
+        if level.dimension() == self.dim.key() {
+            return spawn(self);
+        }
+        let back = self.enter_command_level(Dim::from_id(level.dimension_id()))?;
+        let spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawn(self)));
+        self.enter_command_level(back);
+        match spawn {
+            Ok(entity) => entity,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// Whether vanilla could make an item entity of `stack`: not empty
     /// (`ItemStack.isEmpty`) and of an item the registry has.
     pub(super) fn stack_spawns(&self, stack: &ItemStack) -> bool {
@@ -154,6 +223,80 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use mod_api::ServerHost;
+
+    #[test]
+    #[ignore = "daily"]
+    fn natural_item_drop_uses_the_recipient_level_and_respects_transaction_close() {
+        use super::super::{Dim, native_guest_turn_tests::with_guests};
+        use mod_api::{ItemStack, StackWriteError};
+
+        with_guests(|game| {
+            game.enter_level(Dim::Nether).unwrap();
+            game.enter_level(Dim::Overworld).unwrap();
+            let target_position = [11.25, 66.2, -8.5];
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(13, |guest| {
+                    guest.dimension = Dim::Nether.id().to_owned();
+                    guest.position = target_position;
+                })
+                .unwrap();
+            game.reset_entity_residency();
+            let source = game.player(12).unwrap();
+            let recipient = game.player(13).unwrap();
+            let source_inventory = source.inventory_slots(game).unwrap();
+            let recipient_inventory = recipient.inventory_slots(game).unwrap();
+            let key = mod_api::__private::item_key("minecraft:ender_pearl").unwrap();
+            let overflow = || ItemStack::new(key, 64).unwrap();
+
+            assert_eq!(
+                recipient.drop_item_naturally(game, ItemStack::new(key, 100).unwrap()),
+                Err(StackWriteError::CountExceeded { maximum: 99 })
+            );
+            assert!(source.drop_item_naturally(game, ItemStack::of(key)).unwrap());
+            assert_eq!(game.dropped.len(), 1);
+            let seal = game.transaction_open();
+            assert!(source.drop_item_naturally(game, ItemStack::of(key)).unwrap());
+            game.transaction_close(&seal, false);
+            assert_eq!(game.dropped.len(), 1);
+
+            for commit in [false, true] {
+                let seal = game.transaction_open();
+                recipient
+                    .set_inventory_slot(game, 0, Some(ItemStack::of(key)))
+                    .unwrap();
+                assert!(recipient.drop_item_naturally(game, overflow()).unwrap());
+                assert_eq!(game.dim, Dim::Overworld);
+                assert_eq!(game.dropped.len(), 1);
+                game.transaction_close(&seal, commit);
+                assert_eq!(game.dim, Dim::Overworld);
+                assert_eq!(game.dropped.len(), 1);
+                assert_eq!(source.inventory_slots(game).unwrap(), source_inventory);
+                if !commit {
+                    assert_eq!(recipient.inventory_slots(game).unwrap(), recipient_inventory);
+                }
+                game.enter_level(Dim::Nether).unwrap();
+                assert_eq!(game.dropped.len(), usize::from(commit));
+                if let Some(drop) = game.dropped.last() {
+                    assert_eq!((drop.stack.count, drop.pickup_delay), (64, 10));
+                    assert_eq!((drop.thrower, drop.target), (None, None));
+                    assert!((drop.position.x - target_position[0]).abs() <= 0.25);
+                    assert!((drop.position.y - target_position[1] + 0.125).abs() <= 0.25);
+                    assert!((drop.position.z - target_position[2]).abs() <= 0.25);
+                }
+                game.enter_level(Dim::Overworld).unwrap();
+            }
+            assert_eq!(game.player(13), Some(recipient));
+            assert_eq!(game.player(12), Some(source));
+            assert_eq!(
+                recipient.inventory_slots(game).unwrap().as_slice(),
+                &[(0, ItemStack::of(key))]
+            );
+        });
+    }
+
     #[test]
     #[ignore = "daily"]
     fn a_level_pops_spawns_and_awards_as_vanilla() {

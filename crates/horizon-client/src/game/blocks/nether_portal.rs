@@ -459,7 +459,7 @@ impl Game<'_> {
     /// above the platform built below it (`EndPlatformFeature.createEndPlatform`);
     /// out of the End, the top of the shared spawn's column
     /// (`Entity.adjustSpawnLocation`).
-    fn end_portal_exit(&mut self, plan: &Plan) -> Vec3 {
+    pub(super) fn end_portal_exit(&mut self, plan: &Plan) -> Vec3 {
         let p = plan.approximate;
         let centre = Vec3::new(f64::from(p.x) + 0.5, f64::from(p.y), f64::from(p.z) + 0.5);
         if plan.dim == Dim::End {

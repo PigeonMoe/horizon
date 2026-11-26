@@ -48,6 +48,9 @@ impl HiveHost for GameHive<'_, '_> {
             .block_collision_boxes(at[0], at[1], at[2])
             .is_empty()
     }
+    fn allow_honey_change(&self, at: [i32; 3], bee: &Mob) -> bool {
+        self.game.mob_block_change_allowed(bee.id, &bee.kind.id, at)
+    }
     fn set_honey_level(&mut self, at: [i32; 3], level: i32) {
         let state = self.game.world.block(at[0], at[1], at[2]);
         if let Some(state) = self.game.hive_with_honey(state, level) {
@@ -546,6 +549,93 @@ mod stay_tests {
     use super::*;
     use horizon_client::beehive::Occupant;
     use horizon_core::nbt::Compound;
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_protected_hive_vetoes_honey_without_keeping_its_bee() {
+        use mod_api::{Flow, Hooks, Host, MobBlockChangePreEvent};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        const PROTECTED: [i32; 3] = [8, 64, 8];
+        const OPEN: [i32; 3] = [10, 64, 8];
+
+        struct Claim(Arc<AtomicUsize>);
+
+        #[mod_api::__subscriptions]
+        impl Hooks for Claim {
+            fn mob_block_change_pre(
+                &self,
+                _: &dyn Host,
+                event: &mut MobBlockChangePreEvent<'_>,
+            ) -> Flow {
+                assert_eq!(event.kind, "minecraft:bee");
+                assert_eq!(event.dimension, "minecraft:overworld");
+                assert!(event.entity > 0);
+                self.0.fetch_add(1, Ordering::Relaxed);
+                if event.pos == PROTECTED {
+                    Flow::Cancel
+                } else {
+                    assert_eq!(event.pos, OPEN);
+                    Flow::Continue
+                }
+            }
+        }
+
+        let changes = Arc::new(AtomicUsize::new(0));
+        let mods = vec![mod_api::ModEntry::new(
+            "honey_claim",
+            Box::new(Claim(Arc::clone(&changes))),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+                let hive = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:beehive")
+                    .unwrap();
+                let hive = game.hive_with_honey(hive, 4).unwrap();
+                game.world.day_time = 1_000;
+                for [x, y, z] in [PROTECTED, OPEN] {
+                    game.world.set(x, y, z, hive).unwrap();
+                    game.world.block_entities.insert(
+                        (x, y, z),
+                        BlockEntity::Beehive(Box::new(Beehive {
+                            bees: vec![Occupant {
+                                entity_data: Tag::compound([
+                                    ("id", Tag::String("minecraft:bee".into())),
+                                    ("HasNectar", Tag::Byte(1)),
+                                ]),
+                                ticks_in_hive: 2_401,
+                                min_ticks_in_hive: 2_400,
+                            }],
+                            flower: None,
+                        })),
+                    );
+                    game.tick_beehive((x, y, z));
+                    let Some(BlockEntity::Beehive(hive)) =
+                        game.world.block_entities.get(&(x, y, z))
+                    else {
+                        panic!("the hive is gone");
+                    };
+                    assert!(hive.bees.is_empty());
+                }
+                assert_eq!(game.hive_state(PROTECTED).unwrap().0, Some(4));
+                assert_eq!(game.hive_state(OPEN).unwrap().0, Some(5));
+                assert_eq!(game.mobs.len(), 2);
+                assert!(game.mobs.iter().all(|mob| !bee::has_nectar(mob)));
+                assert_eq!(changes.load(Ordering::Relaxed), 2);
+            });
+        });
+    }
 
     /// `BeehiveBlockEntity.tickOccupants`: every bee whose time is up asks
     /// `releaseOccupant`, which keeps it in at night (`BEES_STAY_IN_HIVE`)

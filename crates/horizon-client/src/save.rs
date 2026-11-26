@@ -22,6 +22,7 @@ mod block_entity_order;
 mod far_regions;
 pub mod level_mods;
 mod respawn;
+mod world_uuid;
 mod writes;
 use writes::{Outstanding, Writer};
 
@@ -1370,6 +1371,15 @@ pub fn encode_with(
                 None => current,
             };
             let mut saved = crate::block_entity_nbt::canonical(&merged).unwrap_or(merged);
+            // Preserve Paper's opaque skull metadata on disk without changing vanilla's
+            // canonical block entity data. Replacing the block discards its source tag.
+            if matches!(e, crate::containers::BlockEntity::Skull(_))
+                && let Some(values @ Tag::Compound(_)) =
+                    source.and_then(|original| original.get("PublicBukkitValues"))
+                && let Tag::Compound(map) = &mut saved
+            {
+                map.insert("PublicBukkitValues".into(), values.clone());
+            }
             if let Some(limit) = extras
                 .and_then(|x| x.block_entity_sources.iter().find(|(q, _)| q == p))
                 .and_then(|(_, tag)| tag.get("horizon:stack_limit"))
@@ -2315,6 +2325,7 @@ pub struct SaveDir {
     lod_decoded: Mutex<LodDecoded>,
     /// What older chunks are upgraded with, found on the first one read.
     datafix_context: OnceLock<Option<DatafixContext>>,
+    world_uuid: OnceLock<Option<u128>>,
     /// The Overworld's old-world blending cache, read when a save is requested
     /// (installed where `SavedOldWorld` is made for this same folder).
     blending_lookup: OnceLock<BlendingLookup>,
@@ -2452,6 +2463,20 @@ impl SaveDir {
             .join("attachments.dat")
     }
 
+    /// This dimension's persistent UUID. `legacy_root` is the old Paper world folder for the
+    /// Overworld. Keep the answer with this save so live reads do no recurring disk work.
+    pub fn world_uuid(&self, legacy_root: Option<&Path>) -> Option<u128> {
+        *self.world_uuid.get_or_init(|| {
+            match world_uuid::load_or_create(&self.root, legacy_root) {
+                Ok(uuid) => Some(uuid),
+                Err(why) => {
+                    log::warn!("{}: world UUID unavailable: {why}", self.root.display());
+                    None
+                }
+            }
+        })
+    }
+
     /// The saves of a level of `shape` at `root` (its dimension folder).
     pub fn new(root: PathBuf, shape: LevelShape) -> Self {
         Self {
@@ -2470,6 +2495,7 @@ impl SaveDir {
             far_regions: Default::default(),
             lod_decoded: Default::default(),
             datafix_context: OnceLock::new(),
+            world_uuid: OnceLock::new(),
             blending_lookup: OnceLock::new(),
         }
     }
@@ -3456,6 +3482,21 @@ impl ServerAttachments {
         match self {
             Self::Loaded(attachments) => Ok(attachments),
             _ => unreachable!(),
+        }
+    }
+
+    pub fn persisted_value(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> std::result::Result<Option<&horizon_core::nbt::Compound>, AttachmentError> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Saved(Tag::Compound(raw)) => {
+                Attachments::persisted_value_from_nbt(raw, namespace, name)
+            }
+            Self::Saved(_) => Err(AttachmentError::InvalidNamespace),
+            Self::Loaded(attachments) => attachments.persisted_value(namespace, name),
         }
     }
 
@@ -7697,6 +7738,120 @@ mod tests {
             Some(BlockEntity::Skull(_))
         ));
         assert!(BlockEntity::for_block("minecraft:piston_head").is_none());
+    }
+
+    #[test]
+    fn paper_skull_values_survive_disk_save_but_not_replacement() {
+        use super::*;
+        use crate::containers::BlockEntity;
+
+        let (_, biomes) = loot_tests::fixture();
+        let carriers = [
+            "minecraft:air",
+            "minecraft:player_head",
+            "minecraft:player_wall_head",
+        ];
+        let registry = BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            (
+                "states",
+                Tag::List(
+                    carriers
+                        .map(|id| Tag::compound([("id", string(id))]))
+                        .to_vec(),
+                ),
+            ),
+            (
+                "defaults",
+                Tag::compound(
+                    carriers
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, id)| (id, Tag::Int(index as i32))),
+                ),
+            ),
+        ]))
+        .unwrap();
+        let profile = Tag::compound([("id", Tag::IntArray(vec![1, 2, 3, 4]))]);
+        let pdc = Tag::compound([
+            ("slimefun:slimefun_block", string("FERTILIZER_WHEAT")),
+            ("another_plugin:opaque", Tag::ByteArray(vec![255, 3])),
+        ]);
+        let mut chunk = Chunk::empty(0, 0);
+        let mut input = Vec::new();
+        for (x, carrier, values) in [
+            (1, 1, pdc.clone()),
+            (2, 2, pdc.clone()),
+            (3, 1, string("malformed")),
+        ] {
+            chunk.set(x, 64, 2, carrier);
+            input.push(Tag::compound([
+                ("id", string("minecraft:skull")),
+                ("x", Tag::Int(x)),
+                ("y", Tag::Int(64)),
+                ("z", Tag::Int(2)),
+                ("profile", profile.clone()),
+                ("PublicBukkitValues", values),
+                ("UnmodelledField", Tag::Byte(1)),
+            ]));
+        }
+        let mut initial = encode(&chunk, &registry, &biomes);
+        let Tag::Compound(root) = &mut initial.tag else {
+            unreachable!();
+        };
+        root.insert("block_entities".into(), Tag::List(input));
+        let round_trip = |chunk: &Chunk| {
+            let bytes =
+                nbt::write_named(&encode(chunk, &registry, &biomes), Limits::default()).unwrap();
+            let (from_disk, used) = nbt::read_named(&bytes, Limits::default()).unwrap();
+            assert_eq!(used, bytes.len());
+            decode(&from_disk, &registry, &biomes).unwrap()
+        };
+        let loaded = decode(&initial, &registry, &biomes).unwrap();
+        assert_eq!(loaded.block_entities.len(), 3);
+        let mut saved = round_trip(&loaded);
+        let sources = &saved.saved.as_ref().unwrap().block_entity_sources;
+        assert_eq!(sources.len(), 3);
+        for &x in &[1, 2, 3] {
+            let source = &sources
+                .iter()
+                .find(|(pos, _)| *pos == (x, 64, 2))
+                .unwrap()
+                .1;
+            assert_eq!(source.get("profile"), Some(&profile));
+            assert_eq!(source.get("PublicBukkitValues"), (x != 3).then_some(&pdc));
+            assert!(source.get("UnmodelledField").is_none());
+            assert!(
+                crate::block_entity_nbt::canonical(source)
+                    .unwrap()
+                    .get("PublicBukkitValues")
+                    .is_none()
+            );
+        }
+
+        let pos = (1, 64, 2);
+        let mut world = horizon_client::world::World::new(BlockStateId(0), 0);
+        world.chunks.insert((0, 0), Arc::new(saved.clone()));
+        world.forget_block_entity_source(pos);
+        saved.saved = world.chunks[&(0, 0)].saved.clone();
+        saved
+            .block_entities
+            .iter_mut()
+            .find(|(at, _)| *at == pos)
+            .unwrap()
+            .1 = BlockEntity::Skull(crate::containers::Skull::default());
+        let replaced = round_trip(&saved);
+        let source = &replaced
+            .saved
+            .as_ref()
+            .unwrap()
+            .block_entity_sources
+            .iter()
+            .find(|(at, _)| *at == pos)
+            .unwrap()
+            .1;
+        assert!(source.get("PublicBukkitValues").is_none());
+        assert!(source.get("profile").is_none());
     }
 
     #[test]

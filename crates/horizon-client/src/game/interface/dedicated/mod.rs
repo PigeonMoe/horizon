@@ -47,6 +47,7 @@ mod management;
 pub(super) mod report;
 mod status;
 mod transfer;
+mod transfer_source;
 
 /// What the tick loop tells `ServerWatchdog`: when the tick in progress was
 /// due (`getNextTickTime`), how long a tick is, and whether the server runs.
@@ -182,6 +183,16 @@ pub(super) fn player_joined(id: u128, name: &str) {
 /// A player in the user cache by id, on a dedicated server.
 pub(super) fn cached_user_by_id(id: u128) -> Option<NameAndId> {
     USER_CACHE.lock().unwrap().as_mut()?.get_by_id(id)
+}
+
+/// The UUID of a current cached account name, without updating the cache.
+pub(super) fn cached_user_uuid_by_name(name: &str) -> Option<u128> {
+    USER_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .find_by_name(name)
+        .map(|user| user.id)
 }
 
 /// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
@@ -875,6 +886,7 @@ fn append(to: &mut Tag, sibling: Tag) {
 struct ServerState {
     lists: Arc<Mutex<Lists>>,
     console: mpsc::Receiver<String>,
+    paper_activation: Option<transfer::PendingPaperActivation>,
     empty_ticks: i32,
     /// The mutable `DedicatedServer.pauseWhenEmptySeconds` setting.
     pause_when_empty_seconds: i32,
@@ -1219,6 +1231,9 @@ impl Game<'_> {
             .transfers
             .clone()
             .map(horizon_client::lan::arrivals::Transfers::new);
+        let source_handovers =
+            horizon_client::lan::source_handover::Journal::open(&self.world_root)
+                .map_err(|error| format!("could not open source hand-over journal: {error}"))?;
         if transfers.is_some() && forwarding_secret.is_none() {
             return Err("server.toml's [transfer] is on, but players can join this server without the proxy: \
                  turn on Velocity forwarding (forwarding.secret, docs/velocity-forwarding.md) or turn [transfer] off"
@@ -1254,6 +1269,7 @@ impl Game<'_> {
             pigeon_auth,
             forwarding_secret,
             arrivals: transfers.as_ref().map(|t| t.expected.clone()),
+            source_handovers: Some(Arc::new(source_handovers)),
             log: Some(NetLog {
                 write: Arc::new(log_from),
                 lang: Arc::new(horizon_client::net::load_language(&self.options.resources)),
@@ -1404,6 +1420,7 @@ impl Game<'_> {
         let mut state = ServerState {
             lists,
             console,
+            paper_activation: None,
             empty_ticks: 0,
             pause_when_empty_seconds: props.pause_when_empty_seconds,
             ticks: Default::default(),

@@ -980,6 +980,65 @@ impl Attachments {
             .entries
             .get(&(namespace, name) as &dyn AttachmentKeyView))
     }
+
+    /// The canonical persisted contents without a typed read or write.
+    #[doc(hidden)]
+    pub fn persisted_value(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<&Compound>, AttachmentError> {
+        match self.entry(namespace, name)?.map(|entry| &entry.state) {
+            Some(Entry::Decoded(value)) => Ok(value.encoded.as_ref()),
+            Some(Entry::Raw { saved, .. }) => {
+                raw_value(saved).map(Some).ok_or(AttachmentError::Decode)
+            }
+            None => self.raw.as_deref().map_or(Ok(None), |raw| {
+                Self::persisted_value_from_nbt(raw, namespace, name)
+            }),
+        }
+    }
+
+    /// Read the same contents from an attachment map that has not been loaded.
+    #[doc(hidden)]
+    pub fn persisted_value_from_nbt<'a>(
+        raw: &'a Compound,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<&'a Compound>, AttachmentError> {
+        let Some(namespace) = attachment_compound(raw.get(&namespace.into()))? else {
+            return Ok(None);
+        };
+        match namespace.get(&name.into()) {
+            Some(Tag::Compound(saved)) => raw_value(saved).map(Some).ok_or(AttachmentError::Decode),
+            Some(_) => Err(AttachmentError::Decode),
+            None => Ok(None),
+        }
+    }
+
+    /// Snapshot a bounded range without copying or scanning unrelated keys.
+    #[doc(hidden)]
+    pub fn persisted_entries(
+        value: Option<&Compound>,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<Compound, AttachmentError> {
+        let mut entries = Compound::new();
+        if let Some(value) = value {
+            let prefix = JavaString::from(prefix);
+            for (key, tag) in value.range(prefix.clone()..) {
+                if !key.0.starts_with(&prefix.0) {
+                    break;
+                }
+                if entries.len() == max_entries as usize {
+                    return Err(AttachmentError::Decode);
+                }
+                entries.insert(key.clone(), tag.clone());
+            }
+        }
+        Ok(entries)
+    }
+
     /// Whether a value is stored, saved or set, without decoding or inserting it.
     fn holds(&self, namespace: &str, name: &str) -> bool {
         self.entries
@@ -1117,6 +1176,36 @@ impl Attachments {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_prefix_reads_agree_before_and_after_the_attachment_map_is_loaded() {
+        let data = Compound::from([
+            ("2#1".into(), Tag::Int(1)),
+            ("2#2".into(), Tag::Int(2)),
+            ("20#1".into(), Tag::Int(3)),
+        ]);
+        let raw = Compound::from([(
+            "example".into(),
+            Tag::compound([("bags", Tag::compound([("value", Tag::Compound(data))]))]),
+        )]);
+        let expected = Compound::from([("2#1".into(), Tag::Int(1)), ("2#2".into(), Tag::Int(2))]);
+        let attachments = Attachments::from_nbt(raw.clone());
+        for value in [
+            Attachments::persisted_value_from_nbt(&raw, "example", "bags"),
+            attachments.persisted_value("example", "bags"),
+        ] {
+            let value = value.unwrap();
+            assert_eq!(
+                Attachments::persisted_entries(value, "2#", 2),
+                Ok(expected.clone())
+            );
+            assert_eq!(
+                Attachments::persisted_entries(value, "2#", 1),
+                Err(AttachmentError::Decode)
+            );
+        }
+        assert_eq!(attachments.to_nbt(), raw);
+    }
 
     fn encode(n: &i32) -> Result<Compound, AttachmentError> {
         Ok([(JavaString::from("value"), Tag::Int(*n))].into())

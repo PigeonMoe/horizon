@@ -12,7 +12,7 @@ mod placement;
 mod rollback_tests;
 pub(super) use placement::OutlineFluidRay;
 
-use super::native_hooks::{BlockClickAnswer, VehicleRiderRecovery};
+use super::native_hooks::{BlockClickAnswer, VehicleRollback};
 use super::{Game, Hit, InteractTarget, entity::Entity, entity_culling::at, view_vector};
 use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
@@ -779,7 +779,7 @@ impl Game<'_> {
         &mut self,
         mut b: Boat,
         controlled: bool,
-    ) -> (Boat, Option<VehicleRiderRecovery>) {
+    ) -> (Boat, Option<VehicleRollback>) {
         b.previous = b.position;
         b.previous_yaw = b.yaw;
         // Entity.baseTick ends with Leashable.tickLeash, on a server only
@@ -955,14 +955,17 @@ impl Game<'_> {
             b.velocity = Vec3::ZERO;
             b.delta_rotation = 0.0;
             if paper_rollback {
-                recovery = self.vehicle_recovery_if_rollback_denied(
+                recovery = self.edit_vehicle_rollback(
                     b.id,
                     player,
                     (b.position, [b.yaw, b.pitch]),
                     (b.previous, [b.previous_yaw, b.pitch]),
                 );
             }
-            if recovery.is_none() {
+            if !recovery
+                .as_ref()
+                .is_some_and(VehicleRollback::keeps_attempted_pose)
+            {
                 b.position = b.previous;
                 b.yaw = b.previous_yaw;
             }
@@ -1111,7 +1114,7 @@ impl Game<'_> {
                     });
                     if let Some((from, to, recovery)) = section_step {
                         self.entity_section_step(id, [from.x, from.y, from.z], [to.x, to.y, to.z]);
-                        self.complete_vehicle_rider_recovery(id, recovery);
+                        self.finish_vehicle_rollback(super::commands::Target::Boat(id), recovery);
                     }
                     if checks_guest_move {
                         self.remember_boat_pose(i, id);
@@ -1146,7 +1149,7 @@ impl Game<'_> {
                 boat.velocity = Vec3::ZERO;
                 boat.delta_rotation = 0.0;
             });
-            let recovery = self.vehicle_recovery_if_rollback_denied(id, player, attempted, origin);
+            let recovery = self.edit_vehicle_rollback(id, player, attempted, origin);
             // The driver's packet moves its seat immediately. A second seat
             // may still be at the boat's earlier packet baseline this tick.
             let dimension = self.dim.id();
@@ -1166,22 +1169,13 @@ impl Game<'_> {
                 });
             }
             if recovery.is_some() {
-                self.complete_vehicle_rider_recovery(id, recovery);
+                self.finish_vehicle_rollback(super::commands::Target::Boat(id), recovery);
             } else {
-                self.place_teleport_filed(
+                self.place_vehicle_rollback(
                     super::commands::Target::Boat(id),
                     origin.0.components(),
-                    Some(origin.1),
-                    [false; 3],
-                    true,
+                    origin.1,
                 );
-                if let Some(host) = self.lan.as_mut() {
-                    host.hub.guests.update_all(|guest| {
-                        if guest.vehicle == Some(id) && guest.dimension == dimension {
-                            guest.vehicle_good = Some(origin.0.components());
-                        }
-                    });
-                }
             }
         }
         self.remember_boat_pose(i, id);
@@ -1709,10 +1703,22 @@ impl Game<'_> {
     /// `getDismountLocationForPassenger`: in front of the player if there is
     /// floor there, else on top of the boat.
     pub(super) fn dismount(&mut self, i: usize) {
-        let id = self.boats[i].id;
-        if self.riding == Some(id) && !self.native_may_leave(id) {
-            return;
+        if let Some(target) = self.prepare_boat_dismount(i)
+            && let Some(p) = self.player.as_mut()
+        {
+            p.position = target;
+            p.velocity = Vec3::ZERO;
         }
+    }
+
+    /// Detach the rider and calculate the ordinary landing without placing
+    /// the player. A boat inside a portal uses the free-position dismount.
+    pub(super) fn prepare_boat_dismount(&mut self, i: usize) -> Option<Vec3> {
+        let id = self.boats[i].id;
+        if self.riding == Some(id) && (!self.native_may_leave(id) || self.riding != Some(id)) {
+            return None;
+        }
+        let i = self.boats.iter().position(|b| b.id == id)?;
         self.riding = None;
         // `AbstractBoat.tick`'s non-authoritative branch: the copy of a boat
         // that no player of this side drives drops its cached motion
@@ -1721,14 +1727,10 @@ impl Game<'_> {
         // of coasting on the velocity of the ride that just ended.
         self.boats.update(i, |b| b.velocity = Vec3::ZERO);
         self.boats.update(i, |b| b.delta_rotation = 0.0);
-        if self.dismount_in_portal(self.boats[i].position) {
-            return;
-        }
-        let target = self.boat_player_dismount_target(i, self.yaw);
-        if let Some(p) = self.player.as_mut() {
-            p.position = target;
-            p.velocity = Vec3::ZERO;
-        }
+        Some(
+            self.portal_dismount_point(self.boats[i].position)
+                .unwrap_or_else(|| self.boat_player_dismount_target(i, self.yaw)),
+        )
     }
     /// Where the boat at `i` lets a player facing `yaw` off.
     pub(super) fn boat_player_dismount_target(&self, i: usize, yaw: f32) -> Vec3 {
@@ -1800,13 +1802,17 @@ impl Game<'_> {
             }
         }
         let boat = self.boat_from_hit(wood, chest, hit)?;
+        let kind = boat.entity_type();
+        if self.entity_item_place_cancelled(&kind, boat.position, Some(stack)) {
+            return Some(true);
+        }
         self.next_entity += 1;
         let key = (
             boat.position.x.floor() as i32 >> 4,
             boat.position.z.floor() as i32 >> 4,
         );
         self.world.modified.insert(key);
-        let (id, kind, yaw) = (boat.id, boat.entity_type(), boat.yaw);
+        let (id, yaw) = (boat.id, boat.yaw);
         self.boats.push(boat);
         self.apply_item_stack_config(super::commands::Target::Boat(id), &kind, stack, true);
         // BoatItem.use: setYRot(player.getYRot()) after the stack's config.
@@ -2104,9 +2110,19 @@ impl Game<'_> {
     pub(super) fn hurt_boat_result(
         &mut self,
         i: usize,
-        mut damage: f32,
+        damage: f32,
         creative: bool,
         by: Option<super::commands::Target>,
+    ) -> Option<bool> {
+        self.hurt_boat_from(i, damage, creative, by.into())
+    }
+
+    pub(super) fn hurt_boat_from(
+        &mut self,
+        i: usize,
+        mut damage: f32,
+        creative: bool,
+        source: super::nonliving_hurt::DamageAttribution,
     ) -> Option<bool> {
         let id = self.boats[i].id;
         if self
@@ -2121,7 +2137,7 @@ impl Game<'_> {
             id,
             || boat.entity_type().into(),
             boat.position.components(),
-            by,
+            source.attacker,
         ) {
             return None;
         }
@@ -2148,7 +2164,7 @@ impl Game<'_> {
                 [b.position.x, b.position.y, b.position.z],
             )
         });
-        self.vehicle_damage_event(at, by);
+        self.vehicle_damage_event(at, source.credit);
         if destroyed {
             self.native_vehicle_destroy("boat", at);
             if !self.boats.iter().any(|b| {

@@ -20,6 +20,33 @@ pub trait PlayersHost {
 /// The server host's methods of the `players` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
 pub trait PlayersServerHost {
+    /// The current source hand-over id. A durable source fence remains even
+    /// when the owner is offline. A held arrival has no source hand-over.
+    /// Check this before writing owner-keyed data on someone else's behalf,
+    /// for example in an open menu for a borrowed backpack.
+    #[access(WorldOnly)]
+    fn player_frozen_handover(&self, owner: u128) -> Option<u128>;
+
+    /// The committed generation of the calling mod's profile section, for a live
+    /// or offline owner in this world. `Ok(None)` means there is no committed
+    /// section. An unreadable, held, frozen or released owner reports an error.
+    #[access(WorldOnly)]
+    fn player_transfer_profile_generation(
+        &self,
+        owner: u128,
+        id: &Identifier,
+    ) -> Result<Option<u128>, TransferProfileReadError>;
+
+    /// Read the calling mod's immutable payload for the supplied active owner
+    /// generation. The server rechecks the generation and verifies the bytes.
+    #[access(WorldOnly)]
+    fn player_transfer_profile_payload(
+        &self,
+        owner: u128,
+        id: &Identifier,
+        generation: u128,
+    ) -> Result<Vec<u8>, TransferProfileReadError>;
+
     /// Side: server. Select which of the requested `PlayerPersisted` byte
     /// flags are exactly 1. Every key must belong to the calling package's
     /// namespace. The returned keys follow the request order.
@@ -484,6 +511,11 @@ pub trait PlayersBackend {
     #[access(WorldOnly)]
     fn player_sees(&self, viewer: PlayerRef, target: PlayerRef)
     -> Result<bool, PlayerWorldRefusal>;
+    /// Side: server.
+    /// The current locale from the player's Client Information, including the one
+    /// supplied while connecting. None for a stale or unavailable player.
+    #[access(WorldOnly)]
+    fn player_client_language(&self, player: PlayerRef) -> Option<String>;
 }
 /// The handles' client reads of the `players` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -942,6 +974,20 @@ pub trait PlayersBackendMut {
         stack: ItemStack,
         thrown_by_player: bool,
     ) -> Result<Option<ItemStack>, StackWriteError>;
+    /// Side: server.
+    /// Drops a caller-owned stack at this player's feet as Paper's `World.dropItemNaturally`
+    /// does: it has no owner or thrower, uses random offsets and motion, and can be picked up
+    /// after 10 ticks. It accepts counts through 99 even when they exceed the item's slot limit.
+    /// True once accepted. A drop in another level during a transaction spawns on root commit,
+    /// subject to the normal entity join policy. False for an unavailable player or a drop
+    /// refused before it could be staged.
+    #[access(WorldOnly)]
+    #[preserve_stack_count]
+    fn player_drop_item_naturally(
+        &mut self,
+        player: PlayerRef,
+        stack: ItemStack,
+    ) -> Result<bool, StackWriteError>;
     /// Side: server.
     /// Remove a fake without treating it as a disconnect or saving it.
     #[access(WorldOnly)]

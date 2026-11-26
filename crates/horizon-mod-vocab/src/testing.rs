@@ -53,9 +53,11 @@ use crate::runtime::Installed;
 use crate::world::ticket_controller::{ControllerInfo, TEST_CONTROLLERS};
 use crate::{
     Backend, BackendMut, BackendMutRef, BackendRef, BlockEntityRef, BlockEntityTypeKey, BlockSide,
-    ClientHost, Commands, EntityRef, FluidStack, Host, ItemPlace, ItemStack, LevelRef, Messages,
-    Mods, PlayerRef, Players, ServerHost, TEST_MODS, Tag, Text, TicketController, WorldEpoch,
+    ClientHost, Commands, Compound, EntityRef, FluidStack, Host, Identifier, ItemPlace, ItemStack,
+    LevelRef, Messages, Mods, PlayerRef, Players, ServerHost, TEST_MODS, Tag, Text,
+    TicketController, WorldEpoch,
 };
+use std::collections::BTreeMap;
 
 /// The world epoch of every fake's handles.
 const FAKE_EPOCH: u64 = 1;
@@ -194,6 +196,12 @@ pub struct FakeHost {
     pub registries: FakeRegistries,
     /// The players online.
     pub players: FakePlayers,
+    /// Source hand-overs that currently freeze a player's state.
+    pub frozen_player_handovers: BTreeMap<u128, u128>,
+    /// Committed owner profiles keyed by owner and namespaced section ID.
+    pub transfer_profiles: BTreeMap<(u128, crate::Identifier), (u128, Vec<u8>)>,
+    /// Refusals the active profile store reports before exposing an owner's state.
+    pub transfer_profile_refusals: BTreeMap<u128, crate::TransferProfileReadError>,
     /// The one level.
     pub level: FakeLevel,
     /// The command service.
@@ -328,6 +336,41 @@ impl crate::prelude::PlayersHost for FakeHost {
         self.players.handle(uuid)
     }
 }
+
+impl crate::prelude::PlayersServerHost for FakeHost {
+    fn player_frozen_handover(&self, owner: u128) -> Option<u128> {
+        self.frozen_player_handovers.get(&owner).copied()
+    }
+
+    fn player_transfer_profile_generation(
+        &self,
+        owner: u128,
+        id: &crate::Identifier,
+    ) -> Result<Option<u128>, crate::TransferProfileReadError> {
+        if self.frozen_player_handovers.contains_key(&owner) {
+            return Err(crate::TransferProfileReadError::Transferring);
+        }
+        if let Some(error) = self.transfer_profile_refusals.get(&owner) {
+            return Err(*error);
+        }
+        Ok(self
+            .transfer_profiles
+            .get(&(owner, id.clone()))
+            .map(|entry| entry.0))
+    }
+
+    fn player_transfer_profile_payload(
+        &self,
+        owner: u128,
+        id: &crate::Identifier,
+        generation: u128,
+    ) -> Result<Vec<u8>, crate::TransferProfileReadError> {
+        if self.player_transfer_profile_generation(owner, id)? != Some(generation) {
+            return Err(crate::TransferProfileReadError::StaleGeneration);
+        }
+        Ok(self.transfer_profiles[&(owner, id.clone())].1.clone())
+    }
+}
 impl crate::prelude::ItemsHost for FakeHost {
     fn item_key(&self, id: &crate::Identifier) -> Option<crate::ItemKey> {
         crate::content::registry_keys::item_key_by_identifier(id)
@@ -409,6 +452,18 @@ impl crate::host::mod_state::ModStateHost for FakeHost {
     }
 }
 impl crate::prelude::ModStateServerHost for FakeHost {
+    fn server_attachment_entries(
+        &self,
+        id: &Identifier,
+        prefix: &str,
+        max_entries: u32,
+    ) -> Result<Compound, mod_api::AttachmentError> {
+        let value = self
+            .attachments
+            .persisted_value(id.namespace(), id.path())?;
+        crate::Attachments::persisted_entries(value, prefix, max_entries)
+    }
+
     fn transaction_open(&mut self) -> TransactionSeal {
         self.journal.open((
             self.players.clone(),
@@ -453,7 +508,7 @@ impl crate::prelude::ServicesServerHost for FakeHost {
         &self.players
     }
 }
-crate::impl_server_host_areas!(FakeHost, except(mod_state, services));
+crate::impl_server_host_areas!(FakeHost, except(mod_state, players, services));
 impl ClientHost for FakeHost {}
 crate::impl_client_host_areas!(FakeHost);
 
@@ -461,6 +516,13 @@ impl Backend for FakeHost {}
 impl crate::prelude::LevelsBackend for FakeHost {
     fn level_in_place(&self, level: LevelRef) -> bool {
         level == self.level.level()
+    }
+    fn level_world_uuid(&self, level: LevelRef) -> Option<u128> {
+        if level == self.level.level() {
+            self.level.world_uuid
+        } else {
+            None
+        }
     }
     fn level_block(&self, level: LevelRef, pos: [i32; 3]) -> Option<crate::BlockKey> {
         self.level
@@ -626,6 +688,10 @@ impl crate::prelude::PlayersBackend for FakeHost {
     fn player_dimension(&self, player: PlayerRef) -> Option<crate::Identifier> {
         let level = self.player_level(player)?;
         crate::Identifier::parse(level.dimension_id()).ok()
+    }
+    fn player_persistent_data(&self, player: PlayerRef) -> Option<crate::Compound> {
+        (self.players.handle(player.uuid())? == player).then_some(())?;
+        Some(self.players.get(player.uuid())?.persistent_data.clone())
     }
     fn player_has_infinite_materials(&self, player: PlayerRef) -> Option<bool> {
         Some(self.players.get(player.uuid())?.infinite_materials)
@@ -868,6 +934,25 @@ impl crate::prelude::EntitiesBackendMut for FakeHost {
     }
 }
 impl crate::prelude::PlayersBackendMut for FakeHost {
+    fn player_set_persistent_data(
+        &mut self,
+        player: PlayerRef,
+        data: crate::Compound,
+    ) -> Result<(), crate::PlayerDataRefusal> {
+        let owner = player.uuid();
+        if self.players.handle(owner) != Some(player) {
+            return Err(crate::PlayerDataRefusal::Stale);
+        }
+        if self.frozen_player_handovers.contains_key(&owner) {
+            return Err(crate::PlayerDataRefusal::Transferring);
+        }
+        self.players
+            .get_mut(owner)
+            .ok_or(crate::PlayerDataRefusal::Stale)?
+            .persistent_data = data;
+        Ok(())
+    }
+
     fn player_action_bar(
         &mut self,
         player: PlayerRef,

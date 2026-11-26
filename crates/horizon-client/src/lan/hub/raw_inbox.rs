@@ -27,7 +27,7 @@ impl Hub {
             conns: self
                 .guests
                 .iter()
-                .filter(|g| self.here(g) || (g.held && self.watches(g)))
+                .filter(|g| self.receives_level_packets(g))
                 .map(|g| g.conn)
                 .collect(),
             next: 0,
@@ -61,9 +61,7 @@ impl Hub {
                 pass.movement_held = false;
                 continue;
             }
-            if !self.here(&self.guests[i])
-                && !(self.guests[i].held && self.watches(&self.guests[i]))
-            {
+            if !self.receives_level_packets(&self.guests[i]) {
                 pass.next += 1;
                 pass.started = false;
                 pass.movement_held = false;
@@ -86,6 +84,10 @@ impl Hub {
             pass.movement_held = false;
         }
         events
+    }
+
+    fn receives_level_packets(&self, guest: &Guest) -> bool {
+        self.here(guest) || ((guest.held || guest.profile_source_parked()) && self.watches(guest))
     }
 
     /// A raw boundary must finish in Game before continuing this same level pass.

@@ -2,7 +2,7 @@
 //! armour and chests, mounting, the rider's control and jump bar
 //! (`LocalPlayer.aiStep`'s riding jump), positioning, dismounting, and the
 //! mount's health and jump bar on the HUD.
-use super::Game;
+use super::{Game, lan_vehicles::GuestDismount, respawn_anchor::DismountCollision};
 use horizon_client::actions::Action;
 use horizon_client::{
     blocks::Fluid,
@@ -266,6 +266,7 @@ impl Game<'_> {
                 if let Some(broken) = broken {
                     self.player_equipment_broke(
                         horizon_core::equipment_slot::EquipmentSlot::MainHand,
+                        self.selected,
                         &broken,
                     );
                     self.award_stat("broken", &broken.item, 1);
@@ -567,22 +568,38 @@ impl Game<'_> {
         self.fluid_height_of(bx, by, bz, Some(Fluid::Water))
             .is_some_and(|(height, _)| f64::from(by) + f64::from(height) > y)
     }
-    /// The rider's input for this tick; returns false when not on a mount.
+    #[cfg(test)]
     pub(super) fn tick_mount_riding(&mut self, keys: Keys) -> bool {
+        self.tick_mount_riding_turn(keys).0
+    }
+
+    /// The rider's input for this tick; horse dismounts can propose a landing.
+    pub(super) fn tick_mount_riding_turn(&mut self, keys: Keys) -> (bool, Option<GuestDismount>) {
         let Some(i) = self.mount_index() else {
-            return false;
+            return (false, None);
         };
         // `Player.rideTick`: a sneaking rider gets off (`wantsToStopRiding`), and so does one on a
         // dead mount. `LivingEntity.baseTick`: so does a rider whose eyes are in water on a mount
         // of the `dismounts_underwater` tag (a server's player too: `leave_guest` tells their
         // client). When `entity_mount` keeps it on, the mount still reads this tick's input.
+        let species = self.mobs[i].species();
+        let alive = self.mobs[i].alive();
+        let mut dismount = None;
         let i = if keys.shift
-            || !self.mobs[i].alive()
-            || (dismounts_underwater(self.mobs[i].species()) && self.rider_eyes_in_water())
+            || !alive
+            || (dismounts_underwater(species) && self.rider_eyes_in_water())
         {
-            self.dismount_mount();
+            // Both sneak and underwater stopRiding on a live horse detach
+            // before Paper offers a separately cancellable landing.
+            if alive && species == Species::Horse && self.lan_acting.is_some() {
+                dismount = self
+                    .prepare_mount_dismount()
+                    .and_then(|landing| self.admit_guest_dismount(landing));
+            } else {
+                self.dismount_mount();
+            }
             let Some(i) = self.mount_index().filter(|&i| self.mobs[i].alive()) else {
-                return true;
+                return (true, dismount);
             };
             i
         } else {
@@ -628,7 +645,7 @@ impl Game<'_> {
             // a horse from its own client (`handleMoveVehicle`).
             client: self.lan_acting.is_some(),
         });
-        true
+        (true, dismount)
     }
     /// `LivingEntity.baseTick` for the mobs that ride a mount of the `dismounts_underwater` tag (a baby
     /// zombie on a chicken): with their eyes in water they get off it.
@@ -694,40 +711,41 @@ impl Game<'_> {
     /// `removePassenger` + `getDismountLocationForPassenger`: where the mount
     /// lets the rider out.
     pub(super) fn dismount_mount(&mut self) {
-        let Some(id) = self.riding else {
-            return;
-        };
-        if !self.native_may_leave(id) {
-            return;
+        if let Some(spot) = self.prepare_mount_dismount()
+            && let Some(p) = self.player.as_mut()
+        {
+            p.position = spot;
+            p.velocity = Vec3::ZERO;
+        }
+    }
+
+    pub(super) fn prepare_mount_dismount(&mut self) -> Option<Vec3> {
+        let id = self.riding?;
+        if !self.native_may_leave(id) || self.riding != Some(id) {
+            return None;
         }
         self.riding = None;
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
-            return;
-        };
+        let m = self.mobs.iter_mut().find(|m| m.id == id)?;
         m.rider = None;
         if m.species() == Species::HappyGhast {
             let id = m.id;
             self.dismount_happy_ghast(id);
-            return;
+            return None;
         }
         let mount = Mount::of(m);
-        if self.dismount_in_portal(mount.position) {
-            return;
+        if let Some(at) = self.portal_dismount_point(mount.position) {
+            return Some(at);
         }
-        let Some(p) = self.player.as_ref() else {
-            return;
-        };
+        let p = self.player.as_ref()?;
         let (spot, pose) = self.mount_player_dismount(&mount, self.yaw, p);
-        if let Some(p) = self.player.as_mut() {
-            p.position = spot;
-            p.velocity = Vec3::ZERO;
-            // LivingEntity.setPose: the dismount pose that fit.
-            if let Some(pose) = pose
-                && let Err(e) = p.set_pose(pose)
-            {
-                log::warn!("dismount pose: {e}");
-            }
+        // LivingEntity.setPose applies the fitting pose before dismountTo.
+        if let Some(pose) = pose
+            && let Some(p) = self.player.as_mut()
+            && let Err(e) = p.set_pose(pose)
+        {
+            log::warn!("dismount pose: {e}");
         }
+        Some(spot)
     }
     /// Where `mount` lets a player in `p` facing `yaw` off, and the pose they take there.
     fn mount_player_dismount(
@@ -740,9 +758,27 @@ impl Game<'_> {
             yaw,
             width: p.dimensions.width,
             poses: rider_poses(p),
-            main_arm_left: self.settings.main_hand_left,
+            main_arm_left: self
+                .lan
+                .as_ref()
+                .and_then(|host| {
+                    host.hub
+                        .guests
+                        .iter()
+                        .find(|guest| guest.entity_id == p.entity_id)
+                })
+                .map_or(self.settings.main_hand_left, |guest| {
+                    guest.info.main_hand == 0
+                }),
         };
-        dismount_location(mount, &rider, &GameDismountWorld(self))
+        dismount_location(
+            mount,
+            &rider,
+            &GameDismountWorld {
+                game: self,
+                collision: self.player_dismount_collision(p),
+            },
+        )
     }
 
     /// The same player search when the mount is lent out during a mob tick.
@@ -770,7 +806,7 @@ impl Game<'_> {
             return Some(self.boat_player_dismount_target(i, yaw));
         }
         if let Some(i) = self.carts.iter().position(|c| c.id == vehicle) {
-            return Some(self.cart_player_dismount_target(i));
+            return Some(self.cart_player_dismount_target(i, p).0);
         }
         let mount = self.mobs.iter().find(|m| m.id == vehicle)?;
         if mount.species() == Species::HappyGhast {
@@ -1073,7 +1109,7 @@ struct Rider {
 /// `Player.getDismountPoses`: standing, crouching, then crawling.
 const DISMOUNT_POSES: [Pose; 3] = [Pose::Standing, Pose::Crouching, Pose::Swimming];
 /// The rider's box in each dismount pose, at their `minecraft:scale`.
-fn rider_poses(p: &PlayerMotion) -> Vec<(Pose, Dimensions)> {
+pub(super) fn rider_poses(p: &PlayerMotion) -> Vec<(Pose, Dimensions)> {
     // EntityDimensions.scale: every player pose scales alike, so the
     // standing width gives the scale without a mutable attribute lookup.
     let scale = p.dimensions.width / Pose::Standing.dimensions(1.0).width;
@@ -1091,21 +1127,24 @@ trait DismountWorld {
     /// `DismountHelper.canDismountTo(level, passenger, box)`.
     fn can_dismount_to(&self, bounds: Aabb) -> bool;
 }
-struct GameDismountWorld<'a, 'g>(&'a Game<'g>);
+struct GameDismountWorld<'a, 'g> {
+    game: &'a Game<'g>,
+    collision: DismountCollision<'a>,
+}
 impl DismountWorld for GameDismountWorld<'_, '_> {
     fn lava(&self, p: [i32; 3]) -> bool {
-        let g = self.0;
+        let g = self.game;
         g.res.facts().get(g.world.block(p[0], p[1], p[2])).fluid == Fluid::Lava
     }
     fn floor_height(&self, p: [i32; 3]) -> f64 {
-        let shape = self.0.block_collision_shape(p);
+        let shape = self.game.block_collision_shape(p);
         let below = std::cell::OnceCell::<VoxelShape>::new();
         horizon_core::geometry::block_floor_height(&shape, || {
-            below.get_or_init(|| self.0.block_collision_shape([p[0], p[1] - 1, p[2]]))
+            below.get_or_init(|| self.game.block_collision_shape([p[0], p[1] - 1, p[2]]))
         })
     }
     fn can_dismount_to(&self, bounds: Aabb) -> bool {
-        self.0.can_dismount_to(bounds)
+        self.game.can_dismount_to(bounds, &self.collision)
     }
 }
 /// `getDismountLocationForPassenger`, and the pose the rider takes there: each
@@ -1845,7 +1884,8 @@ mod tests {
         let mut m = horizon_client::mobs::Mob::new(id, kind, Vec3::new(at[0], at[1], at[2]), 0.0);
         m.extra.tame = true;
         m.health = m.attrs.max_health;
-        m.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
+        m.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
         game.mobs.clear();
         game.mobs.push(m);
     }

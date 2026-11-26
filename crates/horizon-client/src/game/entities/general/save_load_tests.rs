@@ -471,6 +471,110 @@ fn transferred_general_tree_loads_as_the_same_logical_entity() {
     });
 }
 
+#[test]
+#[ignore = "daily"]
+fn a_vehicle_transfer_with_an_unsupported_rider_preserves_earlier_runtime_attachments() {
+    use crate::game::persist::PassengerSlot;
+    use horizon_mod_runtime::attachments::{AttachmentType, Attachments, Holder};
+
+    with_types(|game| {
+        let mob_tag = |kind: &str, uuid| {
+            Tag::compound([
+                ("id", Tag::String(kind.into())),
+                ("UUID", Tag::IntArray(vec![1, 2, 3, uuid])),
+                (
+                    "Pos",
+                    Tag::List(
+                        [4.5f64, 70.0, 4.5]
+                            .into_iter()
+                            .map(|coord| Tag::Double(coord.to_bits()))
+                            .collect(),
+                    ),
+                ),
+            ])
+        };
+        let vehicle = game.load_mob(mob_tag("minecraft:pig", 801), None).unwrap();
+        let first = game
+            .load_mob(mob_tag("minecraft:cow", 802), Some(vehicle))
+            .unwrap();
+        game.load_listed(
+            "mymod:robot",
+            None,
+            None,
+            record_tag("mymod:robot", [1, 2, 3, 803], b"", Vec::new()),
+        )
+        .unwrap();
+        let row = &mut game.resident_entities.general.rows[0];
+        let unsupported = row.id;
+        row.mount = Some(vehicle);
+        game.persist.passenger_slots.insert(
+            vehicle,
+            vec![PassengerSlot::Live(first), PassengerSlot::Live(unsupported)],
+        );
+        assert_eq!(game.ordered_live_passengers(vehicle), [first, unsupported]);
+        assert_eq!(
+            game.level_entity(unsupported as i32),
+            Some(Target::General(unsupported))
+        );
+
+        let attachment = AttachmentType {
+            namespace: "mymod",
+            name: "runtime_rider",
+            default: || 0,
+            codec: None,
+            copy_on_death: false,
+            sync: false,
+        };
+        let mut values = Attachments::default();
+        attachment
+            .set(&mut values, Holder::Entity(first), 91)
+            .unwrap();
+        game.entity_attachments.insert(first, values);
+
+        // A live general rider has its own serialization path. The typed
+        // transfer cannot take it, even though the preceding rider was valid.
+        assert!(game.take_vehicle_tree_transfer(vehicle).is_none());
+        assert_eq!(game.ordered_live_passengers(vehicle), [first, unsupported]);
+        assert_eq!(
+            attachment.get(
+                game.entity_attachments.get_mut(&first).unwrap(),
+                Holder::Entity(first),
+            ),
+            Ok(91)
+        );
+
+        game.resident_entities.general.rows[0].mount = None;
+        game.unlink_passenger(unsupported);
+        assert!(
+            game.teleport_vehicle_across(
+                Target::Mob(vehicle),
+                crate::game::Dim::Nether,
+                [8.5, 70.0, 8.5],
+                None,
+                false,
+                crate::game::vehicle_teleport::TeleportMotion::Stop,
+            )
+            .unwrap()
+        );
+        assert!(game.mob_object(first).is_none());
+        assert!(!game.entity_attachments.contains_key(&first));
+        game.enter_level(crate::game::Dim::Nether).unwrap();
+        let arrived_rider = game
+            .mobs
+            .iter()
+            .find(|mob| game.persist.uuid_of(mob.id) == Some([1, 2, 3, 802]))
+            .unwrap()
+            .id;
+        assert_eq!(
+            attachment.get(
+                game.entity_attachments.get_mut(&arrived_rider).unwrap(),
+                Holder::Entity(arrived_rider),
+            ),
+            Ok(91)
+        );
+    });
+}
+
 /// A tree travels between dimensions with its riders: the source ends with
 /// zero rows and stale ids, the destination holds the same tree — same
 /// UUIDs, same mount links — with fresh join identities, the root placed.

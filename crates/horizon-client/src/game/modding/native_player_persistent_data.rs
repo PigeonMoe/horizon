@@ -4,7 +4,9 @@ use super::{Game, native_server::PlayerRead};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use horizon_core::nbt::{Compound, Limits, Tag};
-use mod_api::{Identifier, PlayerDataRefusal, PlayerFlagReadError, PlayerRef};
+use mod_api::{
+    Identifier, PlayerDataRefusal, PlayerFlagReadError, PlayerRef, TransferProfileReadError,
+};
 use std::{
     io::{ErrorKind, Read},
     path::Path,
@@ -67,6 +69,13 @@ impl Game<'_> {
         if keys.iter().any(|key| key.namespace() != owner) {
             return Err(Error::NotOwned);
         }
+        if self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.source_frozen_handover(uuid).is_some())
+        {
+            return Err(Error::Unavailable);
+        }
 
         if let Some(player) = self.player(uuid) {
             let saved = match self.player_handle_read(player).ok_or(Error::Unavailable)? {
@@ -84,9 +93,93 @@ impl Game<'_> {
         {
             return Err(Error::Unavailable);
         }
-        read_archived_player(&self.world_root, uuid)?
+        read_archived_player(&self.world_root, uuid, true)?
             .map(|saved| true_flags(Some(&saved), keys))
             .transpose()
+    }
+
+    pub(super) fn player_transfer_profile_generation(
+        &self,
+        owner: u128,
+        id: &Identifier,
+    ) -> Result<Option<u128>, TransferProfileReadError> {
+        self.with_transfer_profile_saved(owner, id, |saved| {
+            horizon_client::lan::playerdata::transfer_profile_generation(
+                &self.world_root,
+                owner,
+                saved,
+                id,
+            )
+        })
+    }
+
+    pub(super) fn player_transfer_profile_payload(
+        &self,
+        owner: u128,
+        id: &Identifier,
+        generation: u128,
+    ) -> Result<Vec<u8>, TransferProfileReadError> {
+        self.with_transfer_profile_saved(owner, id, |saved| {
+            horizon_client::lan::playerdata::transfer_profile_payload(
+                &self.world_root,
+                owner,
+                saved,
+                id,
+                generation,
+            )
+        })
+    }
+
+    fn with_transfer_profile_saved<T>(
+        &self,
+        owner: u128,
+        id: &Identifier,
+        read: impl FnOnce(Option<&Tag>) -> Result<T, TransferProfileReadError>,
+    ) -> Result<T, TransferProfileReadError> {
+        use TransferProfileReadError as Error;
+        if !self.is_logical_server() || self.native_lifecycle.epoch().is_none() {
+            return Err(Error::Unavailable);
+        }
+        if mod_api::content::crash::current_native_mod() != Some(id.namespace()) {
+            return Err(Error::NotOwned);
+        }
+        if self
+            .lan
+            .as_ref()
+            .is_some_and(|host| host.hub.source_frozen_handover(owner).is_some())
+        {
+            return Err(Error::Transferring);
+        }
+        let live_guest = self.lan.as_ref().and_then(|host| {
+            host.hub
+                .guests
+                .iter()
+                .find(|guest| guest.uuid == owner && !guest.is_fake())
+        });
+        if let Some(guest) = live_guest {
+            if guest.released {
+                return Err(Error::Away);
+            }
+            if guest.held || guest.handover.is_some() {
+                return Err(Error::Transferring);
+            }
+        }
+        if let Some(player) = self.player(owner) {
+            let saved = match self.player_handle_read(player).ok_or(Error::Unavailable)? {
+                PlayerRead::Acting { .. } => self.level.player_extra.as_ref(),
+                PlayerRead::Guest(guest) => guest.saved.as_ref(),
+            };
+            return read(saved);
+        }
+        if live_guest.is_some() {
+            return Err(Error::Unavailable);
+        }
+        let saved =
+            read_archived_player(&self.world_root, owner, false).map_err(|error| match error {
+                PlayerFlagReadError::Unavailable => Error::Unavailable,
+                _ => Error::Corrupt,
+            })?;
+        read(saved.as_ref())
     }
 
     pub(super) fn player_paper_persistent_value(
@@ -173,7 +266,11 @@ fn true_flags(
         .collect())
 }
 
-fn read_archived_player(world: &Path, uuid: u128) -> Result<Option<Tag>, PlayerFlagReadError> {
+fn read_archived_player(
+    world: &Path,
+    uuid: u128,
+    recover_corrupt: bool,
+) -> Result<Option<Tag>, PlayerFlagReadError> {
     use PlayerFlagReadError as Error;
     let root = Dir::open_ambient_dir(world, cap_std::ambient_authority())
         .map_err(|_| Error::Unavailable)?;
@@ -229,6 +326,7 @@ fn read_archived_player(world: &Path, uuid: u128) -> Result<Option<Tag>, PlayerF
     let current = read("dat");
     match current {
         Ok(Some(_)) => current,
+        Err(_) if !recover_corrupt => current,
         _ => match read("dat_old") {
             Ok(None) => current,
             fallback => fallback,

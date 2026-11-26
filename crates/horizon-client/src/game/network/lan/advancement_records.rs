@@ -9,6 +9,7 @@ impl Game<'_> {
     ) {
         if !guest.placed
             || guest.released
+            || host.hub.source_frozen_handover(guest.uuid).is_some()
             || !guest.participates_in_player_simulation()
             || self.adv.tree.list.is_empty()
         {
@@ -36,6 +37,7 @@ impl Game<'_> {
     ) {
         if !guest.placed
             || guest.released
+            || host.hub.source_frozen_handover(guest.uuid).is_some()
             || !guest.participates_in_player_simulation()
             || self.adv.tree.list.is_empty()
         {

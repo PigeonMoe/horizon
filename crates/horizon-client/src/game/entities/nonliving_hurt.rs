@@ -9,6 +9,23 @@ use super::*;
 use horizon_client::mobs::Who;
 use horizon_client::projectiles::Projectile;
 
+/// A block-attached entity or vehicle can receive separate combat credit
+/// and event-attacker identities for the same damage.
+#[derive(Clone, Copy, Default)]
+pub(in crate::game) struct DamageAttribution {
+    pub(in crate::game) credit: Option<Target>,
+    pub(in crate::game) attacker: Option<Target>,
+}
+
+impl From<Option<Target>> for DamageAttribution {
+    fn from(by: Option<Target>) -> Self {
+        Self {
+            credit: by,
+            attacker: by,
+        }
+    }
+}
+
 /// The entity a projectile's damage names (`Projectile.getOwner`): a server's
 /// guest by connection, else the owner.
 pub(super) fn projectile_by(p: &Projectile) -> Option<Target> {

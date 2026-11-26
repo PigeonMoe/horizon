@@ -244,6 +244,18 @@ pub trait Players {
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }
+    /// Side: server.
+    /// The UUID associated with an account name, case-insensitively. A placed
+    /// network player takes precedence over the dedicated server's unexpired,
+    /// current cached profile. No profile service lookup, offline UUID
+    /// generation, or cache update is performed.
+    fn known_player_uuid(&self, name: &str) -> Option<u128> {
+        crate::world::phase::unprovided(
+            "Players::known_player_uuid",
+            "known_player_uuid",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
 }
 /// The runtime_levels service, reached through its host.
 /// Success from `open` or `unload` admits a queued request, not its completion.

@@ -10,8 +10,13 @@ pub mod durable;
 pub mod duration;
 pub mod eula;
 pub mod json;
+pub mod pm_sync_envelope;
+pub mod pm_sync_spool;
+#[cfg(feature = "pm-sync-mysql")]
+pub mod pm_sync_store;
 pub mod private_file;
 pub mod profiles;
 pub mod properties;
+pub mod transfer_routes;
 pub mod user_cache;
 pub mod user_lists;
